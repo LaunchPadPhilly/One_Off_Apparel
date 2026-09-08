@@ -1,0 +1,46 @@
+name: CI
+
+# Correctness gate for every push and PR. There is no linter or test suite
+# yet (see CLAUDE.md "Verification limits") — `pnpm run check`, the
+# production build, and Prisma schema validation are the available gates.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Not a secret: prisma.config.ts only needs DATABASE_URL to be *present*
+  # to load config for `prisma generate`/`validate`/build. Nothing in CI
+  # ever connects to this. Never use this value outside CI.
+  DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `version:` here: the action reads `packageManager` from package.json and
+      # errors if both are set.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate Prisma schema
+        run: pnpm run db:validate
+
+      - name: Type-check
+        run: pnpm run check
+
+      - name: Production build
+        run: pnpm run build

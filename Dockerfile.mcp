@@ -1,0 +1,79 @@
+# syntax=docker/dockerfile:1
+
+# Production image for the standalone MCP server (src/mcp-server/index.ts), extracted out of
+# the SvelteKit app's in-process /api/mcp route. Runs via tsx rather than a compiled bundle —
+# matches this repo's existing convention of running one-off scripts (scripts/*.ts)
+# directly through tsx instead of introducing a second build toolchain. Shares the same
+# Postgres database as the `web` image/service in each AWS environment.
+
+ARG NODE_VERSION=24-slim
+
+# ---------------------------------------------------------------------------
+# deps: install the full dependency tree (incl. devDependencies) once, and
+# let Docker cache it across builds unless package.json/pnpm-lock.yaml change.
+# ---------------------------------------------------------------------------
+FROM node:${NODE_VERSION} AS deps
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+	pnpm install --frozen-lockfile --ignore-scripts
+
+# ---------------------------------------------------------------------------
+# build: generate the Prisma client and the SvelteKit sync output ($lib path
+# alias resolution depends on .svelte-kit/tsconfig.json existing — tsx reads
+# tsconfig `paths` at runtime, so this image needs that file even though it
+# never runs the bundler). DATABASE_URL here is a placeholder — prisma
+# generate never connects to it, prisma.config.ts just needs it present.
+# ---------------------------------------------------------------------------
+FROM node:${NODE_VERSION} AS build
+WORKDIR /app
+RUN corepack enable
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build"
+RUN pnpm run prepare
+RUN pnpm run db:generate
+
+# ---------------------------------------------------------------------------
+# runtime: full dependency tree (not --prod) — tsx/typescript are
+# devDependencies, and this is the one image that needs them at runtime since
+# it interprets TypeScript directly rather than running a compiled bundle.
+# Deliberately not moved into the main dependency list in package.json: that
+# would change the web app's production footprint for a concern that already
+# has its own separate image. Only the source subtree this service actually
+# touches is copied forward — no migrations directory (that stays a
+# web-image concern; both images share one Prisma schema and one migration
+# history against the same database).
+# ---------------------------------------------------------------------------
+FROM node:${NODE_VERSION} AS runtime
+WORKDIR /app
+RUN corepack enable && groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 --gid nodejs mcpserver
+ENV NODE_ENV=production
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+	pnpm install --frozen-lockfile --ignore-scripts
+
+COPY tsconfig.json ./tsconfig.json
+COPY --from=build /app/.svelte-kit ./.svelte-kit
+COPY --from=build /app/prisma/generated ./prisma/generated
+COPY prisma/schema.prisma ./prisma/schema.prisma
+COPY prisma.config.ts ./prisma.config.ts
+COPY src/mcp-server ./src/mcp-server
+COPY src/lib/appConfig.ts ./src/lib/appConfig.ts
+COPY src/lib/server/mcp ./src/lib/server/mcp
+COPY src/lib/server/prisma.ts ./src/lib/server/prisma.ts
+# Add each connector or domain directory the tools in src/lib/server/mcp/tools.ts import,
+# e.g. `COPY src/lib/server/<connector> ./src/lib/server/<connector>`. tsx resolves imports at
+# runtime, so a missing directory surfaces as ERR_MODULE_NOT_FOUND on the first request, not
+# at build time. Keep any idempotent data loaders in this image too: it is the one that can
+# reach a private RDS from an in-VPC one-off ECS task.
+
+RUN chown -R mcpserver:nodejs /app
+
+USER mcpserver
+EXPOSE 3001
+ENV PORT=3001 HOST=0.0.0.0
+
+CMD ["node_modules/.bin/tsx", "src/mcp-server/index.ts"]

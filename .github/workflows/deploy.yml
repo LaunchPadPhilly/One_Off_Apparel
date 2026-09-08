@@ -1,0 +1,232 @@
+name: Deploy
+
+# Build once, prove it in UAT. Every push to main runs:
+#
+#   build → deploy-uat → smoke-test-uat
+#
+# and stops. Production is promoted deliberately by a human running
+# `deploy-production.yml` with the SHA this pipeline proved. Nothing is rebuilt
+# between the two, so "it worked in UAT" means the same bytes: images are tagged
+# by commit SHA, and the production workflow refuses any SHA not already in ECR.
+#
+# Why production is a separate workflow_dispatch workflow rather than a job gated
+# on GitHub environment approval: required-reviewer protection rules on a PRIVATE
+# repository need a paid plan (Team/Enterprise). On a plan without them, an
+# `environment:` gate silently does not exist and every merge would deploy to
+# production. The split gives the guarantee regardless of plan. If the repository
+# is on a plan that supports them, adding required reviewers on the `Production`
+# environment is a sound extra gate — but keep the split.
+#
+# Infrastructure for both environments is defined in Terraform (infra/); the
+# cluster/service/task-family names below are stable outputs of that code, not
+# secrets. `terraform -chdir=infra/environments/<env> output` is their source of
+# truth. Subnet and security-group ids are read from Terraform outputs at run
+# time, so a rebuilt environment needs no workflow edit.
+#
+# The job-level `environment:` declarations are load-bearing rather than
+# cosmetic: the AWS OIDC role's trust policy only accepts `environment:UAT` or
+# `environment:Production` in the token subject, so a job that assumes AWS
+# credentials MUST declare one of them, and `AWS_ROLE_ARN` has to be readable
+# from whichever environment the job declares.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  # One pipeline at a time across both environments: a second push must not
+  # promote to production while the first is still proving itself in UAT.
+  group: deploy-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # required for AWS OIDC role assumption
+
+env:
+  # Region and ECR repository names are the same class of stable, non-secret
+  # infrastructure identifier as the cluster/service names below, and they must
+  # be readable by jobs in BOTH GitHub environments — environment-scoped
+  # secrets/variables are invisible to jobs declaring a different environment,
+  # which is exactly the trap that would break the UAT jobs. They live here
+  # rather than in `vars`/`secrets` for that reason. Only AWS_ROLE_ARN stays a
+  # secret, and it must be present in both environments.
+  AWS_REGION: __AWS_REGION__
+  ECR_REPOSITORY: __PROJECT_SLUG__-web
+  ECR_REPOSITORY_MCP: __PROJECT_SLUG__-mcp
+
+  # UAT names: <name_prefix>-cluster / -web / -mcp, from infra/environments/uat.
+  UAT_CLUSTER: __PROJECT_SLUG__-uat-cluster
+  UAT_WEB_SERVICE: __PROJECT_SLUG__-uat-web
+  UAT_MCP_SERVICE: __PROJECT_SLUG__-uat-mcp
+  UAT_URL: https://uat.__PRIMARY_DOMAIN__
+
+jobs:
+  # ---------------------------------------------------------------- 1. build
+  build:
+    name: Build and push images
+    runs-on: ubuntu-latest
+    environment: UAT # OIDC subject condition; no reviewers on this environment
+    outputs:
+      registry: ${{ steps.ecr-login.outputs.registry }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build and push (web)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (mcp)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.mcp
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY_MCP }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ----------------------------------------------------------- 2. deploy UAT
+  deploy-uat:
+    name: Deploy to UAT
+    needs: build
+    runs-on: ubuntu-latest
+    environment: UAT
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Render both revisions first, then migrate before deploying either one.
+      # MCP reads Prisma-backed models too, so it must not start schema-dependent
+      # code against the previous schema.
+      - name: Download current UAT mcp task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "$UAT_MCP_SERVICE" \
+            --query taskDefinition > uat-mcp-task-definition.json
+
+      - name: Render new image into UAT mcp task definition
+        id: render-uat-mcp
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: uat-mcp-task-definition.json
+          container-name: mcp
+          image: ${{ needs.build.outputs.registry }}/${{ env.ECR_REPOSITORY_MCP }}:${{ github.sha }}
+
+      # web: register the revision explicitly so the migration task and the
+      # service update reference the same one (see the production job for the
+      # full rationale).
+      - name: Download current UAT web task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "$UAT_WEB_SERVICE" \
+            --query taskDefinition > uat-web-task-definition.json
+
+      - name: Render new image into UAT web task definition
+        id: render-uat-web
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: uat-web-task-definition.json
+          container-name: web
+          image: ${{ needs.build.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Register new UAT web task definition revision
+        id: register-uat-web
+        run: |
+          ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://${{ steps.render-uat-web.outputs.task-definition }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Run UAT migrations (one-off ECS task, blocks on failure)
+        run: |
+          set -euo pipefail
+          # Reuse the web service's own network configuration, so the migration task
+          # lands in the same subnets and security group as the app — no ids to keep
+          # in sync here when the environment is rebuilt.
+          NETWORK_CONFIG=$(aws ecs describe-services --cluster "$UAT_CLUSTER" --services "$UAT_WEB_SERVICE" \
+            --query 'services[0].networkConfiguration' --output json)
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$UAT_CLUSTER" \
+            --task-definition "${{ steps.register-uat-web.outputs.arn }}" \
+            --launch-type FARGATE \
+            --network-configuration "$NETWORK_CONFIG" \
+            --overrides '{"containerOverrides":[{"name":"web","command":["node_modules/.bin/prisma","migrate","deploy"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+          echo "UAT migration task: $TASK_ARN"
+          aws ecs wait tasks-stopped --cluster "$UAT_CLUSTER" --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$UAT_CLUSTER" --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "!! UAT migration failed (exit $EXIT_CODE) — stopping before UAT web is updated, production untouched." >&2
+            aws ecs describe-tasks --cluster "$UAT_CLUSTER" --tasks "$TASK_ARN" \
+              --query 'tasks[0].{StopCode:stopCode,StoppedReason:stoppedReason}'
+            exit 1
+          fi
+          echo "UAT migrations applied cleanly."
+
+      - name: Deploy UAT mcp
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-uat-mcp.outputs.task-definition }}
+          service: ${{ env.UAT_MCP_SERVICE }}
+          cluster: ${{ env.UAT_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Deploy UAT web
+        run: |
+          aws ecs update-service --cluster "$UAT_CLUSTER" --service "$UAT_WEB_SERVICE" \
+            --task-definition "${{ steps.register-uat-web.outputs.arn }}"
+          aws ecs wait services-stable --cluster "$UAT_CLUSTER" --services "$UAT_WEB_SERVICE"
+
+  # ------------------------------------------------ 3. the promotion gate
+  smoke-test-uat:
+    name: Smoke test UAT (promotion gate)
+    needs: deploy-uat
+    runs-on: ubuntu-latest
+    # No AWS credentials needed: this only makes public HTTP requests, so it
+    # declares no environment and cannot touch infrastructure.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Smoke test UAT
+        run: ./scripts/smoke-test.sh "$UAT_URL"
+      - name: Explain how to promote
+        run: |
+          {
+            echo "### UAT is updated and proved this commit"
+            echo
+            echo 'Image SHA: `${{ github.sha }}`'
+            echo
+            echo "Production does **not** deploy from this workflow. Promote deliberately:"
+            echo
+            echo '```bash'
+            echo 'gh workflow run deploy-production.yml -f image_sha=${{ github.sha }}'
+            echo '```'
+            echo
+            echo "That workflow refuses any SHA whose images are not already in ECR,"
+            echo "so it can only ship an artifact this pipeline built."
+          } >> "$GITHUB_STEP_SUMMARY"

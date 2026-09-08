@@ -1,0 +1,19 @@
+# Local Terraform working files — state never enters git.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tf.plan
+crash.log
+crash.*.log
+# Keep dependency locks committed:
+!.terraform.lock.hcl
+# Never commit variable files that could carry secrets (terraform.tfvars for
+# uat/production here hold only flags/image tags and ARE committed; anything
+# ending in .auto.tfvars or secret.tfvars is not):
+*.auto.tfvars
+*secret*.tfvars
+*_override.tf
+# The secret template is a reference doc; a filled copy must never be committed.
+uat-secret.filled*.json
+*secret*.filled.json

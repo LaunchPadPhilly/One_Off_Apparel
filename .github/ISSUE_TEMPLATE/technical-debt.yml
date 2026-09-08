@@ -1,0 +1,39 @@
+name: Technical debt
+description: Something that works but will cost us later
+title: "debt: "
+labels: [technical-debt]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What is the shortcut, workaround, or gap? Link the file and line.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact if left alone
+      description: What breaks, slows down, or becomes risky, and when?
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Low — cosmetic or convenience
+        - Medium — slows development or operations
+        - High — security, data integrity, or deploy reliability
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed fix
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true

@@ -1,0 +1,169 @@
+name: Deploy production
+
+# Production is promoted deliberately, never automatically.
+#
+# `deploy.yml` builds one set of images per commit, deploys them to UAT, and
+# gates on UAT's smoke test. It stops there. This workflow ships that exact,
+# already-built artifact to production when a human runs it:
+#
+#   gh workflow run deploy-production.yml -f image_sha=<sha>
+#
+# Why a separate manually-triggered workflow rather than a job gated on GitHub
+# environment approval: required-reviewer protection rules on a private
+# repository need a paid plan, and on a plan without them an `environment:`
+# approval gate silently does not exist. A workflow that only ever runs on
+# `workflow_dispatch` gives the same guarantee — production cannot move without
+# someone deciding to move it — whatever the plan. Add required reviewers on the
+# `Production` environment as well when the plan allows; keep this split.
+#
+# The `Verify` step below is what keeps this honest: it refuses any SHA whose
+# images are not already in ECR, so this workflow can only ever ship an
+# artifact `deploy.yml` built and UAT exercised. It never builds.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_sha:
+        description: "Commit SHA to promote. Must already be built and in ECR (see the deploy.yml run summary)."
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: __AWS_REGION__
+  ECR_REPOSITORY: __PROJECT_SLUG__-web
+  ECR_REPOSITORY_MCP: __PROJECT_SLUG__-mcp
+
+  # Production names: <name_prefix>-cluster / -web / -mcp, from infra/environments/production.
+  PROD_CLUSTER: __PROJECT_SLUG__-cluster
+  PROD_WEB_SERVICE: __PROJECT_SLUG__-web
+  PROD_MCP_SERVICE: __PROJECT_SLUG__-mcp
+  PROD_URL: https://__PRIMARY_DOMAIN__
+
+jobs:
+  deploy-production:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    # Scopes the AWS_ROLE_ARN secret and satisfies the OIDC role's trust
+    # condition, which requires environment:Production in the token subject.
+    environment: Production
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Verify both images already exist in ECR
+        run: |
+          set -euo pipefail
+          for repo in "$ECR_REPOSITORY" "$ECR_REPOSITORY_MCP"; do
+            if ! aws ecr describe-images --repository-name "$repo" \
+                 --image-ids imageTag='${{ inputs.image_sha }}' >/dev/null 2>&1; then
+              echo "!! $repo has no image tagged '${{ inputs.image_sha }}'." >&2
+              echo "   Production only ships artifacts deploy.yml built and UAT proved." >&2
+              echo "   Check the deploy.yml run summary for a promotable SHA." >&2
+              exit 1
+            fi
+          done
+          echo "Both images present for ${{ inputs.image_sha }}."
+
+      # Promote the exact images UAT proved — no rebuild, so the SHA tag is
+      # already in ECR from the build job.
+      - name: Download current production mcp task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "$PROD_MCP_SERVICE" \
+            --query taskDefinition > mcp-task-definition.json
+
+      - name: Render new image into production mcp task definition
+        id: render-mcp-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: mcp-task-definition.json
+          container-name: mcp
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY_MCP }}:${{ inputs.image_sha }}
+
+      # web needs its migration to run once, before the new tasks start, and to
+      # fail the deploy if it fails. That requires the new revision to be
+      # *registered* before the migration runs, so the migration task and the
+      # service update reference the identical revision — hence a plain
+      # register-task-definition call rather than the deploy action, which
+      # registers and updates in one step with no room in between.
+      - name: Download current production web task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "$PROD_WEB_SERVICE" \
+            --query taskDefinition > web-task-definition.json
+
+      - name: Render new image into production web task definition
+        id: render-web-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: web-task-definition.json
+          container-name: web
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ inputs.image_sha }}
+
+      - name: Register new production web task definition revision
+        id: register-web-task-def
+        run: |
+          ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://${{ steps.render-web-task-def.outputs.task-definition }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Run production migrations (one-off ECS task, blocks on failure)
+        run: |
+          set -euo pipefail
+          # Same network configuration as the running web service — see deploy.yml.
+          NETWORK_CONFIG=$(aws ecs describe-services --cluster "$PROD_CLUSTER" --services "$PROD_WEB_SERVICE" \
+            --query 'services[0].networkConfiguration' --output json)
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$PROD_CLUSTER" \
+            --task-definition "${{ steps.register-web-task-def.outputs.arn }}" \
+            --launch-type FARGATE \
+            --network-configuration "$NETWORK_CONFIG" \
+            --overrides '{"containerOverrides":[{"name":"web","command":["node_modules/.bin/prisma","migrate","deploy"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Migration task: $TASK_ARN"
+          aws ecs wait tasks-stopped --cluster "$PROD_CLUSTER" --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$PROD_CLUSTER" --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "!! Migration task failed (exit $EXIT_CODE) — aborting deploy, web service is untouched." >&2
+            aws ecs describe-tasks --cluster "$PROD_CLUSTER" --tasks "$TASK_ARN" \
+              --query 'tasks[0].{StopCode:stopCode,StoppedReason:stoppedReason}'
+            exit 1
+          fi
+          echo "Migrations applied cleanly."
+
+      - name: Deploy production mcp
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-mcp-task-def.outputs.task-definition }}
+          service: ${{ env.PROD_MCP_SERVICE }}
+          cluster: ${{ env.PROD_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Deploy production web
+        run: |
+          aws ecs update-service --cluster "$PROD_CLUSTER" --service "$PROD_WEB_SERVICE" \
+            --task-definition "${{ steps.register-web-task-def.outputs.arn }}"
+          aws ecs wait services-stable --cluster "$PROD_CLUSTER" --services "$PROD_WEB_SERVICE"
+
+      # Verifies the deploy that just happened, rather than trusting that
+      # "services stable" means "the app works".
+      - name: Smoke test production
+        run: ./scripts/smoke-test.sh "$PROD_URL"

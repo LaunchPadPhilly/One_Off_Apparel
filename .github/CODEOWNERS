@@ -1,0 +1,9 @@
+# Review is requested from these owners on every PR. Team slugs are organization teams
+# (verified 2026-09-04 with `gh api orgs/LaunchPadPhilly/teams --jq '.[].slug'`). A slug
+# that does not exist makes GitHub ignore the whole file; re-verify after generating a
+# repository and add the client's developer team as a second owner on `*`.
+*                  @LaunchPadPhilly/liftoff-developers
+/.github/          @LaunchPadPhilly/liftoff-admin
+/infra/            @LaunchPadPhilly/liftoff-admin
+/SECURITY.md       @LaunchPadPhilly/liftoff-admin
+/playbook/         @LaunchPadPhilly/liftoff-admin

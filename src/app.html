@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="text-scale" content="scale" />
+		<script>
+			// Applied before first paint to avoid a flash of the wrong theme/density when
+			// the user has an explicit preference saved. The settings page is the only
+			// place that writes these keys.
+			//
+			// This file cannot import $lib/appConfig, so the storage-key prefix is repeated
+			// here. It MUST equal `storageKeyPrefix` in src/lib/appConfig.ts (slug + ':'),
+			// or the settings page and this bootstrap read different keys and saved
+			// preferences silently stop applying. scripts/init-template.sh rewrites both.
+			try {
+				var theme = localStorage.getItem('__PROJECT_SLUG__:theme');
+				if (theme === 'light' || theme === 'dark' || theme === 'slate') {
+					document.documentElement.dataset.theme = theme;
+				}
+				var density = localStorage.getItem('__PROJECT_SLUG__:density');
+				if (density === 'compact') {
+					document.documentElement.dataset.density = density;
+				}
+			} catch (e) {}
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

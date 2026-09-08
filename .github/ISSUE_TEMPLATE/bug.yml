@@ -1,0 +1,64 @@
+name: Bug report
+description: Something behaves differently from what the code or a play says it should
+title: "bug: "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: One or two sentences. What is wrong, and where (route, script, play, workflow job)?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Paste exact error text or status lines in a code block. Never paste secret values, tokens, or connection strings.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Local development
+        - UAT
+        - Production
+        - CI / GitHub Actions
+        - Terraform / AWS
+    validations:
+      required: true
+  - type: input
+    id: sha
+    attributes:
+      label: Commit or image SHA
+      description: From `git rev-parse HEAD` or the deploy run summary.
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or logs
+      description: Redact anything sensitive before attaching.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How will we know this is fixed? Name the command, evidence, or play step that must pass.
+    validations:
+      required: true

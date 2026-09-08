@@ -1,0 +1,48 @@
+name: Feature request
+description: New capability, tool, scope, page, or connector
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What should exist that does not today, and who needs it?
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem it solves
+      description: The user or operator pain in their own words.
+    validations:
+      required: true
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Boundary touched
+      multiple: true
+      options:
+        - SvelteKit UI / routes
+        - Prisma schema (needs a migration)
+        - MCP tool or scope
+        - Connector (external API)
+        - Infrastructure (Terraform)
+        - Pipeline (GitHub Actions)
+        - Documentation / playbook
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security considerations
+      description: New env keys, new data exposed through MCP, new scope? State them. MCP tools stay read-only.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true

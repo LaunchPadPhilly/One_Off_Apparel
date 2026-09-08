@@ -1,0 +1,253 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "./generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                    String                 @id @default(cuid())
+  email                 String                 @unique
+  displayName           String?
+  status                UserStatus             @default(INVITED)
+  lastLoginAt           DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  auditEvents           AuditEvent[]           @relation("AuditActor")
+  accounts              AuthAccount[]
+  sessions              AuthSession[]
+  mcpTokens             McpAccessToken[]
+  mcpAuthorizationCodes McpAuthorizationCode[]
+  mcpRefreshTokens      McpRefreshToken[]
+  mcpScopes             McpUserScopeGrant[]
+  roles                 UserRole[]
+}
+
+model AuthAccount {
+  id                String    @id @default(cuid())
+  userId            String
+  provider          String
+  providerAccountId String
+  accessToken       String?
+  refreshToken      String?
+  expiresAt         DateTime?
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model AuthSession {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Role {
+  id          String     @id @default(cuid())
+  name        RoleName   @unique
+  description String?
+  users       UserRole[]
+}
+
+model UserRole {
+  userId     String
+  roleId     String
+  assignedAt DateTime @default(now())
+  assignedBy String?
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  resource   String
+  resourceId String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  actor      User?    @relation("AuditActor", fields: [actorId], references: [id])
+
+  @@index([actorId])
+  @@index([resource, resourceId])
+  @@index([createdAt])
+}
+
+model RateLimitBucket {
+  id          String   @id @default(cuid())
+  bucketKey   String
+  windowStart DateTime
+  count       Int      @default(0)
+
+  @@unique([bucketKey, windowStart])
+}
+
+model McpOAuthClient {
+  id                      String                    @id @default(cuid())
+  clientId                String                    @unique
+  clientSecretHash        String?
+  clientName              String?
+  redirectUris            String[]
+  tokenEndpointAuthMethod String                    @default("none")
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  disabledAt              DateTime?
+  accessTokens            McpAccessToken[]
+  authorizationCodes      McpAuthorizationCode[]
+  authorizationRequests   McpAuthorizationRequest[]
+  refreshTokens           McpRefreshToken[]
+
+  @@index([disabledAt])
+}
+
+model McpAuthorizationRequest {
+  id                  String                        @id @default(cuid())
+  clientId            String
+  redirectUri         String
+  clientState         String
+  codeChallenge       String
+  codeChallengeMethod String
+  scope               String
+  userId              String?
+  status              McpAuthorizationRequestStatus @default(PENDING)
+  createdAt           DateTime                      @default(now())
+  expiresAt           DateTime
+  client              McpOAuthClient                @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([expiresAt])
+}
+
+model McpAuthorizationCode {
+  id                  String         @id @default(cuid())
+  codeHash            String         @unique
+  clientId            String
+  userId              String
+  redirectUri         String
+  codeChallenge       String
+  codeChallengeMethod String
+  scope               String
+  expiresAt           DateTime
+  consumedAt          DateTime?
+  createdAt           DateTime       @default(now())
+  client              McpOAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  user                User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model McpRefreshToken {
+  id            String         @id @default(cuid())
+  tokenHash     String         @unique
+  clientId      String
+  userId        String
+  scope         McpScope[]
+  familyId      String
+  rotatedFromId String?
+  revokedAt     DateTime?
+  expiresAt     DateTime
+  lastUsedAt    DateTime?
+  createdAt     DateTime       @default(now())
+  client        McpOAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+}
+
+model McpAccessToken {
+  id         String         @id @default(cuid())
+  tokenHash  String         @unique
+  clientId   String
+  userId     String
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime       @default(now())
+  scope      McpScope[]
+  client     McpOAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// A non-interactive machine credential: an automation, service, or agent with no
+/// human user behind it. Unlike McpAccessToken, its scopes are its own (there is no
+/// McpUserScopeGrant to intersect against), but it is still individually named,
+/// scoped, revocable, and attributable in the audit log.
+model AgentToken {
+  id          String     @id @default(cuid())
+  name        String
+  description String?
+  tokenHash   String     @unique
+  tokenPrefix String
+  scope       McpScope[]
+  createdBy   String?
+  createdAt   DateTime   @default(now())
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  revokedBy   String?
+  lastUsedAt  DateTime?
+
+  @@index([revokedAt])
+}
+
+model McpUserScopeGrant {
+  id        String    @id @default(cuid())
+  userId    String
+  scope     McpScope
+  grantedAt DateTime  @default(now())
+  grantedBy String?
+  revokedAt DateTime?
+  revokedBy String?
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope])
+  @@index([userId])
+}
+
+enum UserStatus {
+  INVITED
+  ACTIVE
+  DISABLED
+}
+
+enum RoleName {
+  ADMIN
+  STAFF
+  VIEWER
+}
+
+/// The data scopes an admin can grant. Two neutral examples ship with the template;
+/// rename or extend them for the client's domain. Keeping this an enum (rather than a
+/// table) means a missed scope check is a compile-time error in every switch over it.
+/// Wire names (`data:read`) live in src/lib/server/mcp/scopes.ts.
+enum McpScope {
+  DATA_READ
+  REPORTS_READ
+}
+
+enum McpAuthorizationRequestStatus {
+  PENDING
+  AWAITING_CONSENT
+  GRANTED
+  DENIED
+  EXPIRED
+}

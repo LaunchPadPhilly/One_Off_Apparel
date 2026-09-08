@@ -1,0 +1,35 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+aws-iam-policies/
+
+# Prisma generated client
+/prisma/generated
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+.env copy*
+!.env.example
+!.env.test
+project-notes/
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Operational tooling and IAM policy documents are kept locally, not in the repo.
+deploy/
+# Terraform backend partial configs carry account-specific bucket names.
+*.backend.hcl
+!example.backend.hcl

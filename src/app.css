@@ -1,0 +1,476 @@
+:root {
+	--warm-50: #fdf8f3;
+	--warm-100: #f7ece1;
+	--warm-200: #edd9c4;
+	--warm-300: #ddb894;
+	--warm-500: #b4653a;
+	--warm-600: #97502c;
+	--warm-700: #7a3f23;
+	--ink-900: #2b1c14;
+	--ink-700: #4d3a2e;
+	--ink-500: #7a6558;
+	--surface: #fffdfb;
+	--border: #e8d9c9;
+	--success-bg: #e8f2e4;
+	--success-fg: #3d6b31;
+	--danger-bg: #fbe9e5;
+	--danger-fg: #a03520;
+	--radius: 10px;
+	--shadow: 0 1px 2px rgb(43 28 20 / 6%), 0 4px 16px rgb(43 28 20 / 6%);
+	--focus: 0 0 0 3px rgb(180 101 58 / 35%);
+
+	/* Elevation scale — --shadow-1 aliases the original --shadow so nothing already
+	   using --shadow changes; --shadow-2/-3 are new, for the redesigned components. */
+	--shadow-1: var(--shadow);
+	--shadow-2: 0 2px 6px rgb(43 28 20 / 8%), 0 10px 24px rgb(43 28 20 / 10%);
+	--shadow-3: 0 4px 10px rgb(43 28 20 / 10%), 0 20px 40px rgb(43 28 20 / 14%);
+
+	/* Spacing scale, 4px base. */
+	--space-1: 0.25rem;
+	--space-2: 0.5rem;
+	--space-3: 0.75rem;
+	--space-4: 1rem;
+	--space-5: 1.5rem;
+	--space-6: 2rem;
+	--space-7: 2.5rem;
+	--space-8: 3rem;
+
+	/* Radius scale — --radius-md aliases the original --radius. */
+	--radius-sm: 6px;
+	--radius-md: var(--radius);
+	--radius-lg: 16px;
+
+	/* Type scale. */
+	--fs-xs: 0.75rem;
+	--fs-sm: 0.875rem;
+	--fs-base: 1rem;
+	--fs-lg: 1.125rem;
+	--fs-xl: 1.5rem;
+	--fs-2xl: 2rem;
+	--fs-display: clamp(2rem, 1.6rem + 1.6vw, 2.75rem);
+
+	/* Motion tokens — the CSS half of the motion system; src/lib/motion.ts mirrors
+	   these numerically for svelte/motion. Keep both in sync if either changes. */
+	--motion-fast: 120ms;
+	--motion-base: 220ms;
+	--motion-slow: 360ms;
+	--ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--warm-50: #241a14;
+		--warm-100: #2e211a;
+		--warm-200: #3d2c22;
+		--warm-300: #5c4232;
+		--warm-500: #d08a5c;
+		--warm-600: #e0a074;
+		--warm-700: #eab88f;
+		--ink-900: #f6ece3;
+		--ink-700: #dcc9b8;
+		--ink-500: #a99283;
+		--surface: #2a1e17;
+		--border: #453227;
+		--success-bg: #23331f;
+		--success-fg: #a8d199;
+		--danger-bg: #3a1f19;
+		--danger-fg: #f0a894;
+		--shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 16px rgb(0 0 0 / 25%);
+		--shadow-2: 0 2px 6px rgb(0 0 0 / 32%), 0 10px 24px rgb(0 0 0 / 30%);
+		--shadow-3: 0 4px 10px rgb(0 0 0 / 36%), 0 20px 40px rgb(0 0 0 / 40%);
+	}
+}
+
+/*
+ * Explicit theme choice from the Settings page (stored in localStorage, applied via
+ * a pre-paint script in app.html). An attribute selector on :root outranks the plain
+ * ":root" selector inside the prefers-color-scheme query above, so this always wins
+ * over the OS setting once the user has picked one, in either direction.
+ */
+:root[data-theme='dark'] {
+	--warm-50: #241a14;
+	--warm-100: #2e211a;
+	--warm-200: #3d2c22;
+	--warm-300: #5c4232;
+	--warm-500: #d08a5c;
+	--warm-600: #e0a074;
+	--warm-700: #eab88f;
+	--ink-900: #f6ece3;
+	--ink-700: #dcc9b8;
+	--ink-500: #a99283;
+	--surface: #2a1e17;
+	--border: #453227;
+	--success-bg: #23331f;
+	--success-fg: #a8d199;
+	--danger-bg: #3a1f19;
+	--danger-fg: #f0a894;
+	--shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 16px rgb(0 0 0 / 25%);
+	--shadow-2: 0 2px 6px rgb(0 0 0 / 32%), 0 10px 24px rgb(0 0 0 / 30%);
+	--shadow-3: 0 4px 10px rgb(0 0 0 / 36%), 0 20px 40px rgb(0 0 0 / 40%);
+}
+
+:root[data-theme='light'] {
+	--warm-50: #fdf8f3;
+	--warm-100: #f7ece1;
+	--warm-200: #edd9c4;
+	--warm-300: #ddb894;
+	--warm-500: #b4653a;
+	--warm-600: #97502c;
+	--warm-700: #7a3f23;
+	--ink-900: #2b1c14;
+	--ink-700: #4d3a2e;
+	--ink-500: #7a6558;
+	--surface: #fffdfb;
+	--border: #e8d9c9;
+	--success-bg: #e8f2e4;
+	--success-fg: #3d6b31;
+	--danger-bg: #fbe9e5;
+	--danger-fg: #a03520;
+	--shadow: 0 1px 2px rgb(43 28 20 / 6%), 0 4px 16px rgb(43 28 20 / 6%);
+	--shadow-2: 0 2px 6px rgb(43 28 20 / 8%), 0 10px 24px rgb(43 28 20 / 10%);
+	--shadow-3: 0 4px 10px rgb(43 28 20 / 10%), 0 20px 40px rgb(43 28 20 / 14%);
+}
+
+/*
+ * "Slate Studio" — a fourth, explicit-only theme (no OS media-query equivalent,
+ * chosen from Settings same as Dark/Light). Medium-dark, cool graphite/slate
+ * neutrals rather than Dark's warm-brown-tinted near-black — a deliberately
+ * different mood, not just "dark but lighter". The warm-500/600/700 accent ramp
+ * is copied verbatim from Dark for continuity: buttons, links, and badges read
+ * identically between the two dark themes, only the surrounding neutrals differ.
+ */
+:root[data-theme='slate'] {
+	--warm-50: #2a2d33;
+	--warm-100: #33373e;
+	--warm-200: #3f434c;
+	--warm-300: #565b66;
+	--warm-500: #d08a5c;
+	--warm-600: #e0a074;
+	--warm-700: #eab88f;
+	--ink-900: #edeef0;
+	--ink-700: #c5c9d0;
+	--ink-500: #8b909a;
+	--surface: #34383f;
+	--border: #454951;
+	--success-bg: #1f2e22;
+	--success-fg: #9bd6a6;
+	--danger-bg: #362127;
+	--danger-fg: #ef9ba6;
+	--shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 16px rgb(0 0 0 / 25%);
+	--shadow-2: 0 2px 6px rgb(0 0 0 / 32%), 0 10px 24px rgb(0 0 0 / 30%);
+	--shadow-3: 0 4px 10px rgb(0 0 0 / 36%), 0 20px 40px rgb(0 0 0 / 40%);
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+	background: var(--warm-50);
+	color: var(--ink-900);
+	line-height: 1.6;
+	-webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+	line-height: 1.25;
+	margin: 0 0 0.5rem;
+	letter-spacing: -0.01em;
+}
+
+h1 {
+	font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2rem);
+}
+
+h2 {
+	font-size: 1.25rem;
+}
+
+p {
+	margin: 0 0 1rem;
+}
+
+a {
+	color: var(--warm-600);
+	text-underline-offset: 2px;
+}
+
+a:hover {
+	color: var(--warm-700);
+}
+
+.page {
+	max-width: 68rem;
+	margin: 0 auto;
+	padding: 2rem 1.25rem 4rem;
+}
+
+.page--narrow {
+	max-width: 32rem;
+}
+
+.page--wide {
+	max-width: 84rem;
+}
+
+.site-header {
+	background: var(--surface);
+	border-bottom: 1px solid var(--border);
+}
+
+.site-header__inner {
+	max-width: 68rem;
+	margin: 0 auto;
+	padding: 0.85rem 1.25rem;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.75rem 1.25rem;
+	align-items: center;
+}
+
+.site-header__brand {
+	font-weight: 650;
+	color: var(--ink-900);
+	text-decoration: none;
+	margin-right: auto;
+}
+
+.site-header__nav {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 1rem;
+	align-items: center;
+}
+
+.card {
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow);
+	padding: 1.5rem;
+	margin-bottom: 1.25rem;
+}
+
+.card__title {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 1rem;
+	margin-bottom: 0.75rem;
+}
+
+.muted {
+	color: var(--ink-500);
+	font-size: 0.925rem;
+}
+
+.eyebrow {
+	display: block;
+	font-size: var(--fs-xs);
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--warm-600);
+	margin: 0 0 var(--space-2);
+}
+
+.grid {
+	display: grid;
+	gap: 1.25rem;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+}
+
+button,
+.button {
+	font: inherit;
+	font-weight: 550;
+	padding: 0.5rem 1rem;
+	border-radius: 8px;
+	border: 1px solid transparent;
+	/* warm-600, not warm-500: white on warm-500 measures 4.3:1, under the 4.5:1 AA
+	   threshold, which made labels look washed out. warm-600 measures 5.7:1. */
+	background: var(--warm-600);
+	color: #fff;
+	cursor: pointer;
+	text-decoration: none;
+	display: inline-block;
+	transition: background-color var(--motion-fast) var(--ease-standard), opacity var(--motion-fast) var(--ease-standard),
+		transform var(--motion-fast) var(--ease-standard);
+	/* --press-scale is written by use:pressable (src/lib/actions/pressable.svelte.ts) —
+	   composes the tactile press feedback with whatever transform hover already sets,
+	   and is simply 1 (a no-op) on buttons that don't use the action. */
+	transform: scale(var(--press-scale, 1));
+}
+
+button:hover:not(:disabled),
+.button:hover {
+	background: var(--warm-700);
+	color: #fff;
+}
+
+button:focus-visible,
+.button:focus-visible,
+a:focus-visible {
+	outline: none;
+	box-shadow: var(--focus);
+}
+
+/*
+ * Disabled buttons must stay readable. Dimming the whole button with opacity made
+ * white label text vanish against the light page background — the label looked blank.
+ * Swap to a muted fill with body-text colour so the label survives; both values are
+ * theme variables, so this holds in dark mode too.
+ */
+button:disabled,
+.button:disabled {
+	opacity: 1;
+	background: var(--warm-100);
+	border-color: var(--border);
+	color: var(--ink-500);
+	cursor: not-allowed;
+}
+
+.button--secondary {
+	background: transparent;
+	border-color: var(--border);
+	color: var(--ink-700);
+}
+
+.button--secondary:hover:not(:disabled) {
+	background: var(--warm-100);
+	color: var(--ink-900);
+}
+
+.button--danger {
+	background: transparent;
+	border-color: var(--danger-fg);
+	color: var(--danger-fg);
+}
+
+.button--danger:hover:not(:disabled) {
+	background: var(--danger-bg);
+	color: var(--danger-fg);
+}
+
+.table-scroll {
+	overflow-x: auto;
+}
+
+table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.95rem;
+}
+
+th,
+td {
+	text-align: left;
+	padding: 0.7rem 0.85rem;
+	border-bottom: 1px solid var(--border);
+	white-space: nowrap;
+}
+
+th {
+	font-size: 0.78rem;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--ink-500);
+	font-weight: 650;
+}
+
+tbody tr:hover {
+	background: var(--warm-100);
+}
+
+.badge {
+	display: inline-block;
+	padding: 0.15rem 0.6rem;
+	border-radius: 999px;
+	font-size: 0.78rem;
+	font-weight: 600;
+	background: var(--warm-100);
+	color: var(--warm-700);
+	border: 1px solid var(--border);
+}
+
+.badge--on {
+	background: var(--success-bg);
+	color: var(--success-fg);
+	border-color: transparent;
+}
+
+.badge--off {
+	background: transparent;
+	color: var(--ink-500);
+}
+
+.badge--warn {
+	background: var(--danger-bg);
+	color: var(--danger-fg);
+	border-color: transparent;
+}
+
+.alert {
+	padding: 0.85rem 1rem;
+	border-radius: var(--radius);
+	margin-bottom: 1.25rem;
+	border: 1px solid transparent;
+}
+
+.alert--error {
+	background: var(--danger-bg);
+	color: var(--danger-fg);
+}
+
+.alert--info {
+	background: var(--warm-100);
+	color: var(--ink-700);
+	border-color: var(--border);
+}
+
+.actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.6rem;
+	align-items: center;
+}
+
+ul.plain {
+	list-style: none;
+	padding: 0;
+	margin: 0 0 1rem;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+}
+
+/*
+ * Compact density (Settings > Appearance), applied via [data-density='compact']
+ * on <html> the same way theme is. Targets the highest-impact, most repeated
+ * surfaces — card padding, table cells, page padding, grid gaps — rather than
+ * retrofitting every hardcoded gap in every component; those are the surfaces
+ * that actually make a page feel "dense" or not.
+ */
+:root[data-density='compact'] .card {
+	padding: 1rem;
+	margin-bottom: 0.85rem;
+}
+
+:root[data-density='compact'] th,
+:root[data-density='compact'] td {
+	padding: 0.45rem 0.6rem;
+}
+
+:root[data-density='compact'] .page {
+	padding: 1.25rem 1.25rem 2.5rem;
+}
+
+:root[data-density='compact'] .grid {
+	gap: 0.85rem;
+}
