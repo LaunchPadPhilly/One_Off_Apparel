@@ -13,7 +13,7 @@ variable "name_prefix" {
 variable "github_org" {
   description = "GitHub organization (or user) that owns the repository running the deploy workflows."
   type        = string
-  default     = "YarScar"
+  default     = "LaunchPadPhilly"
 }
 
 variable "github_repo" {
