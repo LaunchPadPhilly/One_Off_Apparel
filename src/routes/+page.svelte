@@ -21,6 +21,17 @@
 				account to continue.
 			</p>
 			<a class="button" href="/api/auth/google/login">Sign in with Google</a>
+
+			{#if data.devLoginEnabled}
+				<hr style="margin: 1.5rem 0; border: 0; border-top: 1px solid rgba(0,0,0,0.1);" />
+				<p class="muted">
+					<strong>Dev bypass enabled.</strong> Signs you in as a local dev admin — never
+					enabled in production.
+				</p>
+				<form method="POST" action="/api/auth/dev-login">
+					<button type="submit" class="button">Dev bypass sign-in</button>
+				</form>
+			{/if}
 		</div>
 	{:else}
 		<h1>Welcome</h1>
