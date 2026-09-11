@@ -29,11 +29,33 @@ export type Principal =
 	| { kind: 'agent'; agentId: string; agentName: string; scopes: Set<McpScope> }
 	| { kind: 'oauth'; userId: string; scopes: Set<McpScope> };
 
+/** A human-readable actor identity for audit logs and `*_by` columns (e.g. proposedBy).
+ *  The legacy static token has no identity of its own — it's unattributable by design
+ *  (see Architecture above) — so it falls back to a literal, greppable label. */
+export function principalIdentity(principal: Principal): string {
+	switch (principal.kind) {
+		case 'oauth':
+			return principal.userId;
+		case 'agent':
+			return principal.agentName;
+		case 'static':
+			return 'mcp-server-token';
+	}
+}
+
 /**
- * One read-only tool. The handler owns authentication and the scope gate; the tool owns
- * its input schema and its query. Callers (src/mcp-server/index.ts and the SvelteKit
+ * One MCP tool. The handler owns authentication and the scope gate; the tool owns its
+ * input schema and its query. Callers (src/mcp-server/index.ts and the SvelteKit
  * passthrough) pass a list of these into `createMcpHandler`, so this module never imports
  * domain code and the domain never touches auth.
+ *
+ * Read-only by default (`readOnly: true`) — no INSERT/UPDATE/DELETE/DROP. A tool may set
+ * `readOnly: false` only as an approved, scoped exception: today that's the domain
+ * write-tools (`import_hoops_export`, `confirm_import`, `commit_schedule`) described in
+ * CLAUDE.md's Domain section, each gated by its own scope and one of the two human
+ * approval gates CLAUDE.md's non-negotiable design principles require — never a bare
+ * database write with no approval step in front of it. See CLAUDE.md's Security
+ * constraints section for the decision record.
  */
 export type McpToolDefinition<Shape extends z.ZodRawShape = z.ZodRawShape> = {
 	/** snake_case, unique per server; what the client sees in the tool list. */
@@ -42,7 +64,10 @@ export type McpToolDefinition<Shape extends z.ZodRawShape = z.ZodRawShape> = {
 	inputSchema: Shape;
 	/** The scope a principal must hold. Checked live per request — see guardedToolResult. */
 	requiredScope: McpScope;
-	/** Must be read-only: no INSERT/UPDATE/DELETE/DROP. Its return value is JSON-serialized. */
+	/** Whether this tool only reads. Advertised to clients via annotations.readOnlyHint —
+	 *  keep it truthful, since that's what tells an MCP client it's safe to call without
+	 *  side effects. */
+	readOnly: boolean;
 	handler: (input: z.infer<z.ZodObject<Shape>>, principal: Principal) => Promise<unknown>;
 };
 
@@ -97,7 +122,7 @@ function createServer(principal: Principal, tools: readonly McpToolDefinition[])
 			{
 				description: tool.description,
 				inputSchema: tool.inputSchema,
-				annotations: { readOnlyHint: true }
+				annotations: { readOnlyHint: tool.readOnly }
 			},
 			async (input) => guardedToolResult(principal, tool.requiredScope, () => tool.handler(input, principal))
 		);

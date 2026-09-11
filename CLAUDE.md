@@ -13,11 +13,22 @@ command works.
 This project is the One Off Apparel scheduling system, built on the platform template
 described below. Domain design (schema, engine logic, MCP tools/skills, open decisions) is
 fully specified in **"Domain: One Off Apparel Scheduling System"** further down this file —
-read it before touching any order/schedule/line-item logic. As of this writing that section
-reflects the finalized design; update this paragraph once implementation actually begins so
-it states what's built and verified end-to-end vs. still a shell. Also record here the
-decisions Play 13 asks for: the MCP_SERVER_TOKEN choice, which scopes replace
-DATA_READ / REPORTS_READ and the default grant, and who owns deployment, data and UI.
+read it before touching any order/schedule/line-item logic.
+
+**Build status:** schema (`prisma/schema.prisma`), the engine (`src/lib/server/engine/`),
+the Hoops import persistence layer (`src/lib/server/hoops/`), the schedule persistence
+layer (`src/lib/server/schedule/`), and all six domain MCP tools
+(`src/lib/server/mcp/tools.ts`) are built and merged. **Still a shell, not end-to-end
+schedulable:** `estimate_hours` has real numbers for none of the six stations — every
+station still throws `MissingFormulaError` (see the engine section and Known open items)
+— so `propose_schedule`/`simulate_change` will flag every real job at_risk until the
+client's actual Consolidated IT rate tables land. No file parser exists for the Hoops
+export itself (format still undocumented); `import_hoops_export` takes already-structured
+data, not a raw file. Also record here the decisions Play 13 asks for: the
+MCP_SERVER_TOKEN choice, which scopes replace DATA_READ / REPORTS_READ and the default
+grant (three domain scopes — `SCHEDULE_READ`, `IMPORT_WRITE`, `SCHEDULE_WRITE` — were added
+alongside the originals for the six domain tools, not yet a full replacement/default-grant
+decision), and who owns deployment, data and UI.
 
 ## Human Activation Gate Policy
 
@@ -501,19 +512,22 @@ tool list until they reconnect; the server is stateless per request and cannot p
 
 - Connector credentials load server-side only — never in browser-reachable code paths or `PUBLIC_*` variables.
 - All database queries are parameterized; validate tool inputs with Zod.
-- MCP tools are read-only: no DELETE/UPDATE/INSERT/DROP.
+- MCP tools are read-only by default: no DELETE/UPDATE/INSERT/DROP, unless explicitly
+  approved as a scoped exception (see the domain-specific note below).
 - Logs never contain tokens, connection strings, raw upstream payloads, or sensitive data.
 - Environment variables are validated at startup/first use without printing values.
 
-**Domain-specific note:** the "Domain MCP tools" listed above (`commit_schedule`,
-`confirm_import`, etc.) do perform writes — `commit_schedule` writes to
-`schedule_assignments` and `audit_log`, `confirm_import` writes to `orders`. This appears to
-conflict with "MCP tools are read-only" above. Do not silently resolve this either
-direction — flag it and get an explicit decision on whether domain write-tools are an
-approved, scoped exception (gated behind their own scope and the human-approval gates
-described in the Domain section) or whether they need to move behind a different boundary
-entirely (e.g. a server action the MCP tool merely triggers with its own auth check, rather
-than being an MCP "tool" in the read-only sense this section defines).
+**Domain-specific note — decision recorded:** the read-only-vs-write conflict this section
+used to flag is resolved: domain write-tools are an **approved, scoped exception**, not
+moved behind a separate server-action boundary. `import_hoops_export`, `confirm_import`
+and `commit_schedule` are real MCP tools with `readOnly: false` (`McpToolDefinition` in
+`src/lib/server/mcp/handler.ts` now carries a per-tool `readOnly` flag instead of a
+hardcoded blanket `true`), each gated by its own scope (`IMPORT_WRITE` / `SCHEDULE_WRITE`)
+and one of CLAUDE.md's two human approval gates — never a bare write with nothing in front
+of it. Rationale: "no separate write path" in the Domain section's "What this system is"
+implies one write path shared by chat and the production board, not two; splitting
+confirmation out to a UI-only action would contradict that. See
+`src/lib/server/mcp/tools.ts` for the six registered tools.
 
 ## Git and definition of done
 

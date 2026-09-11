@@ -51,7 +51,16 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 
 		for (const [orderId, patch] of Object.entries(corrections?.orders ?? {})) {
 			const validated = orderCorrectionSchema.parse(patch);
-			await tx.order.update({ where: { id: orderId }, data: validated });
+			// externalShipDate/internalDueDate, if present, are z.iso.date() strings —
+			// Prisma's runtime validation needs a real Date (see getSchedule.ts).
+			await tx.order.update({
+				where: { id: orderId },
+				data: {
+					...validated,
+					...(validated.externalShipDate ? { externalShipDate: new Date(validated.externalShipDate) } : {}),
+					...(validated.internalDueDate ? { internalDueDate: new Date(validated.internalDueDate) } : {})
+				}
+			});
 		}
 
 		await tx.order.updateMany({ where: { id: { in: [...orderIds] } }, data: { status: OrderStatus.CONFIRMED } });

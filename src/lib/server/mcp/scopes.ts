@@ -9,7 +9,10 @@ import type { McpScope } from '../../../../prisma/generated/prisma/enums.ts';
  */
 const scopeToWire: Record<McpScope, string> = {
 	DATA_READ: 'data:read',
-	REPORTS_READ: 'reports:read'
+	REPORTS_READ: 'reports:read',
+	SCHEDULE_READ: 'schedule:read',
+	IMPORT_WRITE: 'import:write',
+	SCHEDULE_WRITE: 'schedule:write'
 };
 
 const wireToScope: Record<string, McpScope> = Object.fromEntries(

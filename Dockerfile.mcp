@@ -64,11 +64,13 @@ COPY src/mcp-server ./src/mcp-server
 COPY src/lib/appConfig.ts ./src/lib/appConfig.ts
 COPY src/lib/server/mcp ./src/lib/server/mcp
 COPY src/lib/server/prisma.ts ./src/lib/server/prisma.ts
-# Add each connector or domain directory the tools in src/lib/server/mcp/tools.ts import,
-# e.g. `COPY src/lib/server/<connector> ./src/lib/server/<connector>`. tsx resolves imports at
+# Every domain directory src/lib/server/mcp/tools.ts imports. tsx resolves imports at
 # runtime, so a missing directory surfaces as ERR_MODULE_NOT_FOUND on the first request, not
 # at build time. Keep any idempotent data loaders in this image too: it is the one that can
 # reach a private RDS from an in-VPC one-off ECS task.
+COPY src/lib/server/engine ./src/lib/server/engine
+COPY src/lib/server/hoops ./src/lib/server/hoops
+COPY src/lib/server/schedule ./src/lib/server/schedule
 
 RUN chown -R mcpserver:nodejs /app
 
