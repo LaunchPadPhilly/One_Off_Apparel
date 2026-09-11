@@ -1,0 +1,96 @@
+import { z } from 'zod';
+import { ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
+
+/**
+ * Candidate data for one line item, as already extracted from a Hoops export — by
+ * whatever does that extraction (today: Claude reading the file in conversation; see
+ * CLAUDE.md's "Import confirmation" gate). This module only persists already-structured
+ * candidates; it does not parse a file itself — there is no documented Hoops export
+ * format anywhere in this repo to parse against (see CLAUDE.md's Known open items:
+ * "PDF/export import accuracy has not been validated against a real Hoops export sample").
+ *
+ * `localId` exists only to let a finishing row's `dependsOn` reference a sibling
+ * decoration row *within this same call*, before either has a real database id.
+ * It never reaches storage.
+ */
+export const lineItemCandidateBaseSchema = z.object({
+	localId: z.string().min(1),
+	itemType: z.enum(['DECORATION', 'FINISHING']),
+	design: z.string().min(1),
+	printLocation: z.enum(['FRONT', 'BACK', 'LEFT', 'RIGHT']).nullish(),
+	decorationType: z.enum(['SCREEN_PRINT', 'EMBROIDERY', 'DTF', 'DTG']).nullish(),
+	finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG']).nullish(),
+	// Another line item's `localId` in this same order candidate, or the literal
+	// "all_siblings" sentinel — never a real LineItem.id (none exist yet at import time).
+	dependsOn: z.string().nullish(),
+	weightClass: z.enum(['THIN', 'POLY', 'BULKY']),
+	apparelColor: z.string().min(1),
+	inkColorCount: z.number().int().nonnegative().nullish(),
+	screens: z.number().int().nonnegative().nullish(),
+	stitchCount: z.number().int().nonnegative().nullish(),
+	quantity: z.number().int().positive(),
+	sizeBreakdown: z.record(z.string(), z.number().int().nonnegative()),
+	reviewConfidence: z.number().min(0).max(1).nullish()
+});
+
+export const lineItemCandidateSchema = lineItemCandidateBaseSchema
+	.refine((item) => (item.itemType === 'DECORATION' ? item.decorationType != null : item.finishingStep != null), {
+		message: 'decorationType is required for DECORATION rows, finishingStep is required for FINISHING rows'
+	})
+	.refine((item) => item.itemType !== 'DECORATION' || item.finishingStep == null, {
+		message: 'finishingStep must be null on DECORATION rows'
+	})
+	.refine((item) => item.itemType !== 'FINISHING' || item.decorationType == null, {
+		message: 'decorationType must be null on FINISHING rows'
+	})
+	.refine((item) => item.itemType !== 'DECORATION' || item.dependsOn == null, {
+		message: 'dependsOn is finishing-rows-only — see CLAUDE.md'
+	})
+	.refine((item) => item.itemType !== 'FINISHING' || (item.dependsOn != null && item.dependsOn.length > 0), {
+		message: 'FINISHING rows must set dependsOn (another localId, or "all_siblings") or they can never be unlocked'
+	});
+
+export type LineItemCandidate = z.infer<typeof lineItemCandidateSchema>;
+
+export const orderCandidateSchema = z.object({
+	hoopsOrderId: z.string().min(1),
+	customerName: z.string().min(1),
+	externalShipDate: z.date(),
+	internalDueDate: z.date(),
+	importedBy: z.string().min(1),
+	lineItems: z.array(lineItemCandidateSchema).min(1),
+	// Free-text notes on anything Claude was unsure about reading this order — not a
+	// schema column, just carried through to the tool's returned confidence_flags[]
+	// (and into the audit log) for the human confirming the import to see.
+	confidenceFlags: z.array(z.string()).optional()
+});
+
+export type OrderCandidate = z.infer<typeof orderCandidateSchema>;
+
+export const ALL_SIBLINGS = ALL_SIBLINGS_DEPENDENCY;
+
+// confirm_import's `corrections?` — field-level edits a human made while reviewing an
+// already-created (needs_review) order/line item, applied just before it's confirmed.
+// Partial and unrefined on purpose: a correction only touching `quantity` shouldn't have
+// to resupply every itemType-consistency invariant lineItemCandidateSchema enforces at
+// creation time.
+export const orderCorrectionSchema = z
+	.object({
+		customerName: z.string().min(1),
+		externalShipDate: z.date(),
+		internalDueDate: z.date()
+	})
+	.partial();
+
+export const lineItemCorrectionSchema = lineItemCandidateBaseSchema.omit({ localId: true, dependsOn: true }).partial();
+
+export type OrderCorrection = z.infer<typeof orderCorrectionSchema>;
+export type LineItemCorrection = z.infer<typeof lineItemCorrectionSchema>;
+
+export interface ImportCorrections {
+	/** Keyed by real Order.id. */
+	orders?: Record<string, OrderCorrection>;
+	/** Keyed by real LineItem.id. dependsOn is deliberately not correctable here — it's
+	 *  cross-row wiring set at import time, not a simple field edit. */
+	lineItems?: Record<string, LineItemCorrection>;
+}
