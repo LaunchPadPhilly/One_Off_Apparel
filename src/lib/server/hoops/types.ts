@@ -55,8 +55,8 @@ export type LineItemCandidate = z.infer<typeof lineItemCandidateSchema>;
 export const orderCandidateSchema = z.object({
 	hoopsOrderId: z.string().min(1),
 	customerName: z.string().min(1),
-	externalShipDate: z.date(),
-	internalDueDate: z.date(),
+	externalShipDate: z.iso.date(),
+	internalDueDate: z.iso.date(),
 	importedBy: z.string().min(1),
 	lineItems: z.array(lineItemCandidateSchema).min(1),
 	// Free-text notes on anything Claude was unsure about reading this order — not a
@@ -77,8 +77,8 @@ export const ALL_SIBLINGS = ALL_SIBLINGS_DEPENDENCY;
 export const orderCorrectionSchema = z
 	.object({
 		customerName: z.string().min(1),
-		externalShipDate: z.date(),
-		internalDueDate: z.date()
+		externalShipDate: z.iso.date(),
+		internalDueDate: z.iso.date()
 	})
 	.partial();
 
@@ -87,10 +87,12 @@ export const lineItemCorrectionSchema = lineItemCandidateBaseSchema.omit({ local
 export type OrderCorrection = z.infer<typeof orderCorrectionSchema>;
 export type LineItemCorrection = z.infer<typeof lineItemCorrectionSchema>;
 
-export interface ImportCorrections {
+export const importCorrectionsSchema = z.object({
 	/** Keyed by real Order.id. */
-	orders?: Record<string, OrderCorrection>;
+	orders: z.record(z.string(), orderCorrectionSchema).optional(),
 	/** Keyed by real LineItem.id. dependsOn is deliberately not correctable here — it's
 	 *  cross-row wiring set at import time, not a simple field edit. */
-	lineItems?: Record<string, LineItemCorrection>;
-}
+	lineItems: z.record(z.string(), lineItemCorrectionSchema).optional()
+});
+
+export type ImportCorrections = z.infer<typeof importCorrectionsSchema>;

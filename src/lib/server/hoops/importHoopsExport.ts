@@ -50,8 +50,11 @@ export async function importHoopsExport(orders: readonly OrderCandidate[]): Prom
 					id: orderId,
 					hoopsOrderId: orderCandidate.hoopsOrderId,
 					customerName: orderCandidate.customerName,
-					externalShipDate: orderCandidate.externalShipDate,
-					internalDueDate: orderCandidate.internalDueDate,
+					// externalShipDate/internalDueDate are z.iso.date() strings ("YYYY-MM-DD") —
+					// Prisma's runtime validation, unlike its TS types, rejects a date-only
+					// string and needs a real Date.
+					externalShipDate: new Date(orderCandidate.externalShipDate),
+					internalDueDate: new Date(orderCandidate.internalDueDate),
 					status: OrderStatus.NEEDS_REVIEW,
 					importedBy: orderCandidate.importedBy
 				}

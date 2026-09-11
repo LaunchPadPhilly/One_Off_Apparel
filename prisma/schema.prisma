@@ -242,6 +242,9 @@ enum RoleName {
 enum McpScope {
   DATA_READ
   REPORTS_READ
+  SCHEDULE_READ
+  IMPORT_WRITE
+  SCHEDULE_WRITE
 }
 
 enum McpAuthorizationRequestStatus {
