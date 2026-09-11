@@ -301,18 +301,17 @@ way.)
 #### `estimate_hours(item)`
 Works out how long one job takes. Each station's formula is a direct port of one table from
 the client's own "Consolidated IT" spreadsheet tab — unit-tested against the spreadsheet's
-own numbers, not re-derived.
+own numbers, not re-derived. Variables throughout: `X` = ink/thread color count
+(`ink_color_count`), `Y` = screen count (screen print only), `Z` = quantity.
 
-```
-function estimate_hours(item):
-  setup  = screens*5 + colors*15 + 30 + 30     // screen print auto, minutes
-  run    = max(0, item.quantity - 100) * (60/rate[item.weight_class])
-  hours  = (setup + run) / 60
-  return { station: "screen_print_auto", hours }
-  // same pattern per station: embroidery, matte, relabel, fold_bag, hang_tag
-  // each a direct port of one Consolidated IT table — unit-tested against
-  // the spreadsheet's own numbers before this replaces it
-```
+**`screen_print_auto`** — per print location. `screens < 5` and `screens > 4` are two
+*different* rate regimes, not one flat table:
+
+<!-- INCOMPLETE — cut off mid-edit. Needs: the actual screen_print_auto rate table for
+both regimes (screens < 5 and screens > 4), then the same per the client's Consolidated
+IT sheet for embroidery, matte, relabel, fold_bag and hang_tag (see Known open items
+below for which of those don't have a portable formula at all yet). Until this is
+filled in, estimate_hours must keep throwing MissingFormulaError rather than guess. -->
 
 #### `check_completion(line_item_id)`
 Runs the moment the "Stop" button fires for the **last** station on a line item. This is
@@ -408,6 +407,24 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   from the client before `depends_on` unlocking is treated as "immediately schedulable."
 - **PDF/export import accuracy** has not been validated against a real Hoops export sample
   — only against the client's spreadsheet formulas.
+- **`LineItem` is missing the categorical fields the Fold & Bag and Matte formulas
+  actually need.** The current schema only has `weightClass` (Thin/Poly/Bulky). Per the
+  client's "Consolidated IT" sheet: Fold & Bag is keyed on "SS Tee" vs "Other," not weight
+  class at all; Matte is keyed on weight class *and* a second dimension, "Surface = Flat"
+  vs "Surface = Specialty," which uses a different formula entirely. Neither category
+  exists in the schema yet. Must be added — as a new nullable field or two, decoration
+  rows leave it null — before the engine PR ports `estimate_hours` for those two stations,
+  or those two formulas will be unimplementable as specified.
+- **Relabel has no formula in the source spreadsheet at all.** Unlike the embroidery
+  poly/bulky gaps (missing constants in an otherwise-real table), the Relabel tab was never
+  built out — there is no table to port. `estimate_hours` must keep throwing
+  `MissingFormulaError` for this station. This is a direct question for Jeff, not something
+  to fill in from a similar-looking station.
+- **DTF and DTG are dropdown values with no backing station or formula.** They appear as
+  valid `decoration_type` choices on the order form, but nothing in the spreadsheet defines a
+  station or production-time formula for either. Needs a scope decision from Jeff: are these
+  actually offered today, and if so, what are their formulas? Do not map them onto an
+  existing station as a stand-in.
 
 ### Domain naming conventions to keep consistent
 
