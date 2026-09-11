@@ -306,3 +306,225 @@ own numbers, not re-derived. Variables throughout: `X` = ink/thread color count
 
 **`screen_print_auto`** — per print location. `screens < 5` and `screens > 4` are two
 *different* rate regimes, not one flat table:
+
+<!-- INCOMPLETE — cut off mid-edit. Needs: the actual screen_print_auto rate table for
+both regimes (screens < 5 and screens > 4), then the same per the client's Consolidated
+IT sheet for embroidery, matte, relabel, fold_bag and hang_tag (see Known open items
+below for which of those don't have a portable formula at all yet). Until this is
+filled in, estimate_hours must keep throwing MissingFormulaError rather than guess. -->
+
+#### `check_completion(line_item_id)`
+Runs the moment the "Stop" button fires for the **last** station on a line item. This is
+part of the start/stop + actuals flow, not the scheduling flow — do not call this from
+inside `propose_schedule`.
+
+```
+function check_completion(line_item_id):
+  mark line_item complete
+
+  for each other line_item under the same order_id:
+    if other.status == blocked:
+      if other.depends_on == line_item_id:
+        unlock other           // e.g. matte was waiting specifically on this one
+      elif other.depends_on == "all_siblings":
+        if every sibling except `other` itself is now complete:
+          unlock other         // e.g. fold & bag was waiting on everyone
+
+  if every line_item under order_id is complete:
+    orders.status = complete
+```
+
+#### `propose_schedule(backlog, capacity)`
+Builds a proposed schedule. Never writes to the live schedule — that only happens in
+`commit_schedule`, after human approval.
+
+```
+function propose_schedule(backlog, capacity):
+  jobs = backlog.map(estimate_hours)     // backlog only ever contains
+                                          // status: needs_review — blocked
+                                          // line items never reach here
+  jobs.sort_by(due_date)                 // due date is the hard floor
+
+  for job in jobs:
+    best_slot = find_slot(job, capacity, prefer: batch_with(job, jobs))
+    // batch_with groups jobs by shared setup — same ink color / screen
+    // count / decoration type — this is the ATCS heuristic, published,
+    // not invented here. This is what sequence_order is for.
+
+    if best_slot is None:
+      flag_at_risk(job)                  // due date can't be met — surfaced
+    else:
+      assign(job, best_slot)
+
+  return { assignments, reasoning: explain(assignments) }
+```
+
+**Do not reintroduce dependency-checking inside `propose_schedule`.** An earlier draft of
+this engine tried to enforce step order here (checking a prior assignment's date before
+placing a job), which caused `sequence_order` to mean two conflicting things at once.
+Dependency ordering is now handled entirely by `line_items.depends_on` + `check_completion`
+— a blocked line item is simply never in the backlog. Keep it that way.
+
+### Domain MCP tools (exposed through this repo's MCP server, distinct from dev-tooling agents/skills above)
+
+| tool | does |
+|---|---|
+| `import_hoops_export(file)` | reads the export, pulls out order info, returns `{ order_ids[], line_items[], confidence_flags[] }` |
+| `confirm_import(order_ids[], corrections?)` | locks the import in as real once a person has checked it |
+| `get_schedule(date_range, station_id?)` | looks up what's currently scheduled |
+| `propose_schedule(date_range)` | builds a suggested schedule, does not save it |
+| `commit_schedule(assignment_ids[], approved_by)` | makes a proposed schedule official, writes to `schedule_assignments` + `audit_log` |
+| `simulate_change(change)` | checks "what if" (a rush order, a moved job) without actually changing anything |
+
+Each of these is a real MCP tool registered the same way as any other tool in
+`src/lib/server/mcp/tools.ts`, gated by `guardedToolResult` and the scope system described
+in Architecture above — these are not a separate auth mechanism.
+
+### Domain skills (conversational, built by composing the tools above)
+
+- **Import Hoops export** — hand Claude the export file, it pulls out orders and flags
+  anything it's unsure of
+- **Data completeness check** — ask what's missing, Claude scans orders for gaps (no due
+  date, no color count, etc.)
+- **Propose the schedule** — ask Claude to build the schedule; it works out a plan and
+  explains why, then waits for approval
+- **Rush / what-if** — "can we get this out by Friday?" — Claude tests it against real
+  capacity via `simulate_change`
+- **Daily brief** — what does today look like; Claude summarizes what's running and what's
+  at risk
+
+Skills are not 1:1 with tools — a skill composes whichever tools it needs.
+
+### Known open items — do not silently resolve these, they need a decision
+
+- **Blank/apparel inventory is not modeled.** Nothing currently confirms stock exists for a
+  given style/color/size before scheduling. Needs a decision with the client: (a) a manual
+  confirmation checkbox at import time, or (b) a real inventory table synced from wherever
+  blanks are tracked. Do not silently add a full inventory system without that conversation
+  happening first.
+- **Cure/dry buffer between a print and a downstream finish** (e.g. how long before a fresh
+  print can be matte-finished or bagged) is not yet captured anywhere. Needs a real number
+  from the client before `depends_on` unlocking is treated as "immediately schedulable."
+- **PDF/export import accuracy** has not been validated against a real Hoops export sample
+  — only against the client's spreadsheet formulas.
+- **`LineItem` is missing the categorical fields the Fold & Bag and Matte formulas
+  actually need.** The current schema only has `weightClass` (Thin/Poly/Bulky). Per the
+  client's "Consolidated IT" sheet: Fold & Bag is keyed on "SS Tee" vs "Other," not weight
+  class at all; Matte is keyed on weight class *and* a second dimension, "Surface = Flat"
+  vs "Surface = Specialty," which uses a different formula entirely. Neither category
+  exists in the schema yet. Must be added — as a new nullable field or two, decoration
+  rows leave it null — before the engine PR ports `estimate_hours` for those two stations,
+  or those two formulas will be unimplementable as specified.
+- **Relabel has no formula in the source spreadsheet at all.** Unlike the embroidery
+  poly/bulky gaps (missing constants in an otherwise-real table), the Relabel tab was never
+  built out — there is no table to port. `estimate_hours` must keep throwing
+  `MissingFormulaError` for this station. This is a direct question for Jeff, not something
+  to fill in from a similar-looking station.
+- **DTF and DTG are dropdown values with no backing station or formula.** They appear as
+  valid `decoration_type` choices on the order form, but nothing in the spreadsheet defines a
+  station or production-time formula for either. Needs a scope decision from Jeff: are these
+  actually offered today, and if so, what are their formulas? Do not map them onto an
+  existing station as a stand-in.
+
+### Domain naming conventions to keep consistent
+
+- Timestamps: `started_at` / `completed_at`, not `start_time` / `end_time` — an earlier
+  draft used both names for the same concept across two tables; keep it to one convention.
+- `apparel_color` vs `ink_color_count` are never the same field. If you see a single
+  `colors` field anywhere, that's stale pre-redesign schema.
+- `sequence_order` = batch ordering within one station's day. `depends_on` =
+  cross-line-item dependency. Never conflate the two.
+
+---
+
+## Environment loading (four mechanisms)
+
+SvelteKit/Vite loads `.env.local` itself; `src/hooks.server.ts` also loads it into
+`process.env` for shared server code. The Prisma CLI does not, so `prisma.config.ts` loads
+it explicitly. The MCP process (`src/mcp-server/load-env.ts`) and `scripts/test.ts` load it
+independently. Every loader uses a path relative to the repository root. A new database
+script must load `.env.local` explicitly before importing anything that instantiates Prisma.
+
+Real local values live only in ignored `.env.local`; never print or commit populated env
+files. Check presence with `grep -c '^NAME=' .env.local`, never `NAME=.*`.
+
+## Infrastructure (Terraform, `infra/`)
+
+Roots: `bootstrap` (state bucket, local state), `global` (ECR + GitHub OIDC deploy role),
+and one per environment copied from `environments/example`.
+
+- **CI owns task-definition revisions.** Services set `ignore_changes = [task_definition]`; `terraform apply` is never a deploy. After changing `image_uris`, an explicit `aws ecs update-service` is still required.
+- **Terraform manages secret containers, never values.** No `aws_secretsmanager_secret_version` resource may be added.
+- Backends take no variables: `terraform init -backend-config=../my.backend.hcl` (see `infra/example.backend.hcl`).
+- Never apply a plan containing a replacement or a destroy without an explicit, recorded decision.
+- The activation gate in `infra/modules/environment/ecs.tf` is a `check` block: it warns, it does not refuse. Play 10's evidence rule is the real gate.
+- All AWS infrastructure for this project — including anything the Domain section above
+  needs — is provisioned via this same Terraform setup. Do not hand-configure resources in
+  the AWS console, and do not stand up a second, parallel Terraform structure for the
+  domain; extend the existing environment roots instead.
+
+## CI/CD Pipeline
+
+`deploy.yml` on push to `main`: `build → deploy-uat → smoke-test-uat`, then **stops**.
+`deploy-production.yml` is `workflow_dispatch` only and promotes an already-built SHA,
+refusing any SHA not in ECR. Both images are built once and promoted unchanged. Do not
+chain production onto the push pipeline.
+
+In each environment: render both task definitions, run `prisma migrate deploy` as a
+**blocking one-off `run-task`** (nonzero exit fails the workflow), then roll out both
+services. The GitHub environment names `UAT` and `Production` are **not cosmetic**: the
+OIDC trust policy checks them in the token subject.
+
+## Database and secrets
+
+One flat JSON secret per environment; ECS injects individual keys via `valueFrom`. The
+authoritative key lists are `web_secret_keys` and `mcp_secret_keys` in the environment
+root's `variables.tf`. A key listed there but absent from the JSON fails task start; a key
+in the JSON but not listed never reaches the container. Nothing enforces the match.
+
+**Both containers read the same `DATABASE_URL`.** ECS resolves secrets at task start, so
+a value change reaches a service only on redeploy — always redeploy both.
+
+## Verification limits
+
+State what was verified and how. `svelte-check` proves types, not behavior; a green smoke
+test proves liveness, not that a secret value is valid (a broken secret fails the *next*
+deploy). RDS is private, so schema and data work runs as one-off ECS tasks. Two
+connection-string faults recur: `terraform output db_endpoint` already ends in `:5432`,
+and RDS-managed passwords contain `#`/`?`/`|` that must be percent-encoded. When live
+state contradicts a document, report both readings rather than "fixing" either.
+
+After any deploy that changes MCP tool definitions, connected MCP clients keep a stale
+tool list until they reconnect; the server is stateless per request and cannot push it.
+
+## Security constraints (non-negotiable)
+
+- Connector credentials load server-side only — never in browser-reachable code paths or `PUBLIC_*` variables.
+- All database queries are parameterized; validate tool inputs with Zod.
+- MCP tools are read-only: no DELETE/UPDATE/INSERT/DROP.
+- Logs never contain tokens, connection strings, raw upstream payloads, or sensitive data.
+- Environment variables are validated at startup/first use without printing values.
+
+**Domain-specific note:** the "Domain MCP tools" listed above (`commit_schedule`,
+`confirm_import`, etc.) do perform writes — `commit_schedule` writes to
+`schedule_assignments` and `audit_log`, `confirm_import` writes to `orders`. This appears to
+conflict with "MCP tools are read-only" above. Do not silently resolve this either
+direction — flag it and get an explicit decision on whether domain write-tools are an
+approved, scoped exception (gated behind their own scope and the human-approval gates
+described in the Domain section) or whether they need to move behind a different boundary
+entirely (e.g. a server action the MCP tool merely triggers with its own auth check, rather
+than being an MCP "tool" in the read-only sense this section defines).
+
+## Git and definition of done
+
+Feature branches only; no direct commits to `main`; a PR with one approving review and
+green CI is required. A change is complete when acceptance criteria are satisfied,
+`db:validate`, `check`, both builds and any existing tests pass, the relevant
+documentation (README, this file, the affected play, `.env.example`, key lists) is
+updated, and the agent's exit gate has passed on pasted evidence.
+
+## Working notes
+
+<!-- Team ownership, pinned versions and why, dataset caveats, open decisions. -->
+
+- Versions pinned to current stable: Node 24, pnpm 11, Prisma 7 (driver-adapter via `@prisma/adapter-pg`), Svelte 5 runes, TypeScript 6. Check `pnpm peers check` before bumping.
