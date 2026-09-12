@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Smoke test for a deployed environment (UAT or production).
 #
-#   scripts/smoke-test.sh https://uat.__PRIMARY_DOMAIN__
-#   scripts/smoke-test.sh https://__PRIMARY_DOMAIN__ --skip-redirect
+#   scripts/smoke-test.sh https://uat.ooa.launchpadphilly.org
+#   scripts/smoke-test.sh https://ooa.launchpadphilly.org --skip-redirect
 #   scripts/smoke-test.sh <base-url> --db-check /api/ready
 #
 # Checks (curl only, no other deps; exits nonzero if any check fails):
