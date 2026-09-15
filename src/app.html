@@ -14,11 +14,11 @@
 			// or the settings page and this bootstrap read different keys and saved
 			// preferences silently stop applying. scripts/init-template.sh rewrites both.
 			try {
-				var theme = localStorage.getItem('__PROJECT_SLUG__:theme');
+				var theme = localStorage.getItem('one-off-apparel:theme');
 				if (theme === 'light' || theme === 'dark' || theme === 'slate') {
 					document.documentElement.dataset.theme = theme;
 				}
-				var density = localStorage.getItem('__PROJECT_SLUG__:density');
+				var density = localStorage.getItem('one-off-apparel:density');
 				if (density === 'compact') {
 					document.documentElement.dataset.density = density;
 				}

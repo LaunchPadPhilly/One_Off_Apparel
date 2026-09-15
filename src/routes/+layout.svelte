@@ -19,6 +19,7 @@
 		if (!user) return [];
 
 		return [
+			{ href: '/orders', label: 'Orders', show: true },
 			{ href: '/admin', label: 'Admin', show: user.isAdmin },
 			{ href: '/settings', label: 'Settings', show: true }
 		].filter((link) => link.show);
