@@ -10,9 +10,9 @@
  */
 export const appConfig = {
 	/** URL-safe, lowercase identifier. Also the default database name and resource prefix. */
-	slug: '__PROJECT_SLUG__',
+	slug: 'one-off-apparel',
 	/** Human-readable name shown in page titles, the header, and invitation emails. */
-	displayName: '__PROJECT_DISPLAY_NAME__'
+	displayName: 'One Off Apparel'
 } as const;
 
 /** Prefix for browser localStorage keys (theme, density, motion preference). */

@@ -1,20 +1,42 @@
 import { prisma } from '$lib/server/prisma';
-import { LineItemStatus, OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import {
+	ArtworkApprovalStatus,
+	BlankOrderingStatus,
+	CustomerApprovalStatus,
+	LineItemStatus,
+	LineItemType,
+	OrderStatus
+} from '../../../../prisma/generated/prisma/enums';
 import type { BacklogItem, CapacitySlot } from '$lib/server/engine/types';
 import type { DateRange } from './types';
 
 /**
- * The real backlog: line items ready to place. Two conditions, both required —
- * LineItem.status alone isn't enough (see CLAUDE.md's engine section: "backlog only
- * ever contains status: needs_review — blocked line items never reach here") because
- * that doesn't account for the *other* human approval gate. A line item can be
- * needs_review while its parent order is still needs_review too (import confirmation
- * hasn't happened yet) — CLAUDE.md's "Two human approval gates" are both required, and
- * nothing else in this codebase enforces the second one, so this is where it happens.
+ * The real backlog: line items ready to place. A line item enters the backlog only when
+ * ALL of the following are true:
+ *   1. LineItem.status is NEEDS_REVIEW (not BLOCKED, not already in production/complete)
+ *   2. Order.status is CONFIRMED (import confirmation gate passed)
+ *   3. Order.blankOrderingStatus is RECEIVED (garments are in hand)
+ *   4. Order.customerApprovalStatus is APPROVED (customer signed off)
+ *   5. For DECORATION rows: artworkApprovalStatus is APPROVED
+ *      For FINISHING rows: artworkApprovalStatus is null (no artwork to approve)
+ *
+ * These gates limit scheduling, not estimates — estimateHours is a pure function that
+ * runs independently of approval status (e.g. at import review time).
  */
 export async function fetchBacklog(): Promise<BacklogItem[]> {
 	const lineItems = await prisma.lineItem.findMany({
-		where: { status: LineItemStatus.NEEDS_REVIEW, order: { status: OrderStatus.CONFIRMED } },
+		where: {
+			status: LineItemStatus.NEEDS_REVIEW,
+			order: {
+				status: OrderStatus.CONFIRMED,
+				blankOrderingStatus: BlankOrderingStatus.RECEIVED,
+				customerApprovalStatus: CustomerApprovalStatus.APPROVED
+			},
+			OR: [
+				{ itemType: LineItemType.FINISHING },
+				{ artworkApprovalStatus: ArtworkApprovalStatus.APPROVED }
+			]
+		},
 		include: { order: { select: { internalDueDate: true } } }
 	});
 

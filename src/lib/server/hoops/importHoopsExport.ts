@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '$lib/server/prisma';
-import { LineItemStatus, LineItemType, OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import { ArtworkApprovalStatus, LineItemStatus, LineItemType, OrderStatus } from '../../../../prisma/generated/prisma/enums';
 import type { LineItem, Order } from '../../../../prisma/generated/prisma/client';
 import { ALL_SIBLINGS, orderCandidateSchema, type OrderCandidate } from './types';
 
@@ -24,16 +24,10 @@ function resolveDependsOn(dependsOn: string | null | undefined, localIdToRealId:
 /**
  * Persists already-extracted Hoops order/line-item candidates (see types.ts for why
  * this doesn't parse a file itself). Creates `Order` rows at status needs_review and
- * `LineItem` rows at needs_review (decoration, and any finishing row with no unmet
- * dependency) or blocked (every other finishing row) — exactly per CLAUDE.md's schema
- * notes. Nothing here is schedulable yet: that gate is confirm_import, not this.
- *
- * This is the persistence half of the `import_hoops_export` MCP tool CLAUDE.md
- * describes. It is deliberately NOT wired into src/lib/server/mcp/tools.ts yet — every
- * tool registered there is hardcoded read-only (see mcp/handler.ts), and CLAUDE.md's
- * Security constraints section explicitly says not to silently resolve that conflict
- * either direction. Call this from wherever that gets decided (a tool once the write
- * exception is approved, or a server action it triggers).
+ * `LineItem` rows at needs_review (decoration) or blocked (finishing) — exactly per
+ * CLAUDE.md's schema notes. Decoration rows get artworkApprovalStatus: NOT_SUBMITTED;
+ * finishing rows leave it null. Nothing here is schedulable yet: that gate is
+ * confirm_import + the three pre-production approval gates in the backlog query.
  */
 export async function importHoopsExport(orders: readonly OrderCandidate[]): Promise<ImportHoopsExportResult> {
 	const validatedOrders = orders.map((order) => orderCandidateSchema.parse(order));
@@ -81,6 +75,7 @@ export async function importHoopsExport(orders: readonly OrderCandidate[]): Prom
 						// Finishing rows always start blocked, whatever they depend on —
 						// check_completion is the only thing that unlocks them.
 						status: isFinishing ? LineItemStatus.BLOCKED : LineItemStatus.NEEDS_REVIEW,
+						artworkApprovalStatus: isFinishing ? null : ArtworkApprovalStatus.NOT_SUBMITTED,
 						weightClass: itemCandidate.weightClass,
 						apparelColor: itemCandidate.apparelColor,
 						inkColorCount: itemCandidate.inkColorCount ?? null,
