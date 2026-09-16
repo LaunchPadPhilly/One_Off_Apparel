@@ -1,0 +1,26 @@
+name: Claude Review
+
+# Thin caller — the actual logic (subscription-first Claude review, API
+# fallback, debounced Slack alert to Christian Kunkel) lives in
+# LaunchPadPhilly/.github's claude-review-reusable.yml so all participating
+# repos share one implementation instead of five copies that can drift.
+# See that file's header comment for the full design, and this org's
+# .github repo README for the secrets this repo must have set.
+#
+# This workflow only ever posts an advisory COMMENT review — it never
+# approves or requests changes. Confirm this repo's branch protection
+# requires a separate human approval before merge; that's the structural
+# backstop, not this workflow.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    uses: LaunchPadPhilly/.github/.github/workflows/claude-review-reusable.yml@main
+    secrets: inherit
