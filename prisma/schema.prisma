@@ -262,34 +262,36 @@ enum McpAuthorizationRequestStatus {
 // changing any of the models below.
 
 model Order {
-  id               String      @id @default(cuid())
-  hoopsOrderId     String      @unique
-  customerName     String
-  externalShipDate DateTime    @db.Date
-  internalDueDate  DateTime    @db.Date
-  status           OrderStatus @default(NEEDS_REVIEW)
-  importedBy       String
-  createdAt        DateTime    @default(now())
-  lineItems        LineItem[]
+  id                     String                 @id @default(cuid())
+  hoopsOrderId           String                 @unique
+  customerName           String
+  externalShipDate       DateTime               @db.Date
+  internalDueDate        DateTime               @db.Date
+  status                 OrderStatus            @default(NEEDS_REVIEW)
+  blankOrderingStatus    BlankOrderingStatus    @default(NOT_ORDERED)
+  customerApprovalStatus CustomerApprovalStatus @default(NOT_SENT)
+  importedBy             String
+  createdAt              DateTime               @default(now())
+  lineItems              LineItem[]
 }
 
 // A physical garment with a print on the front and an embroidery on the back
 // is two rows here sharing one orderId, not one row — see CLAUDE.md.
 model LineItem {
-  id                  String               @id @default(cuid())
-  orderId             String
-  itemType            LineItemType
-  design              String
+  id                    String                 @id @default(cuid())
+  orderId               String
+  itemType              LineItemType
+  design                String
   // Decoration-oriented fields: meaningful when itemType is DECORATION,
   // null on FINISHING rows.
-  printLocation       PrintLocation?
-  decorationType      DecorationType?
-  inkColorCount       Int?
-  screens             Int?
-  stitchCount         Int?
+  printLocation         PrintLocation?
+  decorationType        DecorationType?
+  inkColorCount         Int?
+  screens               Int?
+  stitchCount           Int?
   // Finishing-oriented fields: meaningful when itemType is FINISHING,
   // null on DECORATION rows.
-  finishingStep       FinishingStep?
+  finishingStep         FinishingStep?
   // Either another LineItem's id, or the literal string "all_siblings"
   // (waits on every other line item under the same order). This is
   // deliberately a plain string, not a Prisma relation: a real FK
@@ -297,17 +299,18 @@ model LineItem {
   // is evaluated in application code (check_completion), not the DB.
   // Do not conflate with ScheduleAssignment.sequenceOrder — that is batch
   // ordering within one station's day, this is cross-line-item dependency.
-  dependsOn           String?
-  status              LineItemStatus       @default(NEEDS_REVIEW)
-  weightClass         WeightClass
-  apparelColor        String
-  quantity            Int
-  sizeBreakdown       Json
-  estimatedHours      Json?
-  reviewConfidence    Float?
-  order               Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  scheduleAssignments ScheduleAssignment[]
-  actuals             Actual[]
+  dependsOn             String?
+  status                LineItemStatus         @default(NEEDS_REVIEW)
+  artworkApprovalStatus ArtworkApprovalStatus?
+  weightClass           WeightClass
+  apparelColor          String
+  quantity              Int
+  sizeBreakdown         Json
+  estimatedHours        Json?
+  reviewConfidence      Float?
+  order                 Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  scheduleAssignments   ScheduleAssignment[]
+  actuals               Actual[]
 
   @@index([orderId])
   @@index([status])
@@ -437,4 +440,25 @@ enum ScheduleAssignmentStatus {
   APPROVED
   IN_PROGRESS
   COMPLETE
+}
+
+enum ArtworkApprovalStatus {
+  NOT_SUBMITTED
+  PENDING_APPROVAL
+  REVISION_REQUESTED
+  APPROVED
+}
+
+enum BlankOrderingStatus {
+  NOT_ORDERED
+  ORDERED
+  ISSUE
+  RECEIVED
+}
+
+enum CustomerApprovalStatus {
+  NOT_SENT
+  PENDING_APPROVAL
+  CHANGES_REQUESTED
+  APPROVED
 }
