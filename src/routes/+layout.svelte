@@ -20,6 +20,8 @@
 
 		return [
 			{ href: '/admin', label: 'Admin', show: user.isAdmin },
+			// Provisional route/label — see CLAUDE.md's "Production board (provisional)" open item.
+			{ href: '/schedule', label: 'Schedule', show: user.scopes.includes('SCHEDULE_READ') },
 			{ href: '/settings', label: 'Settings', show: true }
 		].filter((link) => link.show);
 	});
