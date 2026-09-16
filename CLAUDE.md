@@ -80,10 +80,10 @@ promoted from one to the other.
 
 | | Production | UAT |
 |---|---|---|
-| URL | `https://__PRIMARY_DOMAIN__` | `https://uat.__PRIMARY_DOMAIN__` |
-| Cluster | `__PROJECT_SLUG__-cluster` | `__PROJECT_SLUG__-uat-cluster` |
-| Services | `__PROJECT_SLUG__-web`, `__PROJECT_SLUG__-mcp` | `__PROJECT_SLUG__-uat-web`, `__PROJECT_SLUG__-uat-mcp` |
-| Secret | `prod/__PROJECT_SLUG__/app` | `uat/__PROJECT_SLUG__/app` |
+| URL | `https://ooa.launchpadphilly.org` | `https://uat.ooa.launchpadphilly.org` |
+| Cluster | `ooa-cluster` | `ooa-uat-cluster` |
+| Services | `ooa-web`, `ooa-mcp` | `ooa-uat-web`, `ooa-uat-mcp` |
+| Secret | `prod/ooa/app` | `uat/ooa/app` |
 | Terraform root | `infra/environments/production` | `infra/environments/uat` |
 
 ## Commands

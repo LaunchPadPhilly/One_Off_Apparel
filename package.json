@@ -1,5 +1,5 @@
 {
-	"name": "client-platform-template",
+	"name": "ooa",
 	"private": true,
 	"version": "0.0.1",
 	"type": "module",
@@ -47,5 +47,5 @@
 		"prisma": "^7.10.0",
 		"zod": "^4.6.2"
 	},
-	"description": "Template: SvelteKit + Prisma/PostgreSQL + standalone read-only MCP server (OAuth 2.1) + Terraform ECS Fargate + build-once/promote-unchanged pipeline. Run scripts/init-template.sh after generating a repo from it."
+	"description": "One Off Apparel: SvelteKit + Prisma/PostgreSQL + read-only MCP server + Terraform ECS Fargate."
 }

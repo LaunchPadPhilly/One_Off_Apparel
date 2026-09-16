@@ -1,6 +1,6 @@
 variable "aws_region" {
   type    = string
-  default = "__AWS_REGION__"
+  default = "us-east-1"
 }
 
 variable "environment" {
@@ -12,25 +12,25 @@ variable "environment" {
 variable "name_prefix" {
   description = "Prefix for every resource in this environment. Convention: <slug> for production, <slug>-uat for UAT."
   type        = string
-  default     = "__PROJECT_SLUG__-uat"
+  default     = "ooa-uat"
 }
 
 variable "repository" {
   description = "Repository tag applied to every resource."
   type        = string
-  default     = "__GITHUB_REPO__"
+  default     = "One_Off_Apparel"
 }
 
 variable "domain_name" {
   description = "Hostname the ALB certificate is issued for. The registrar CNAME is placed by hand (see infra/README.md)."
   type        = string
-  default     = "uat.__PRIMARY_DOMAIN__"
+  default     = "uat.ooa.launchpadphilly.org"
 }
 
 variable "app_secret_name" {
   description = "Secrets Manager secret holding the flat JSON of runtime keys. Terraform creates the container only; values are always human-written."
   type        = string
-  default     = "uat/__PROJECT_SLUG__/app"
+  default     = "uat/ooa/app"
 }
 
 variable "web_secret_keys" {
@@ -40,20 +40,20 @@ variable "web_secret_keys" {
     "DATABASE_URL",
     "GOOGLE_ALLOWED_DOMAIN", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
     "INITIAL_ADMIN_EMAIL",
-    "MCP_OAUTH_ISSUER_URL", "MCP_OAUTH_SCOPES", "MCP_PUBLIC_URL", "MCP_SERVER_TOKEN",
+    "MCP_OAUTH_ISSUER_URL", "MCP_OAUTH_SCOPES", "MCP_PUBLIC_URL",
   ]
 }
 
 variable "mcp_secret_keys" {
   description = "Secret keys injected into the mcp container. Must include every key the tools in src/lib/server/mcp/tools.ts read."
   type        = list(string)
-  default     = ["DATABASE_URL", "MCP_OAUTH_ISSUER_URL", "MCP_SERVER_TOKEN"]
+  default     = ["DATABASE_URL", "MCP_OAUTH_ISSUER_URL"]
 }
 
 variable "db_name" {
   description = "Initial database name. Must match the path segment of DATABASE_URL in the secret."
   type        = string
-  default     = "__PROJECT_SLUG__"
+  default     = "ooa"
 }
 
 variable "db_engine_version" {
