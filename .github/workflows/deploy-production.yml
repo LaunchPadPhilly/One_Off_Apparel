@@ -37,15 +37,15 @@ permissions:
   id-token: write
 
 env:
-  AWS_REGION: __AWS_REGION__
-  ECR_REPOSITORY: __PROJECT_SLUG__-web
-  ECR_REPOSITORY_MCP: __PROJECT_SLUG__-mcp
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: ooa-web
+  ECR_REPOSITORY_MCP: ooa-mcp
 
   # Production names: <name_prefix>-cluster / -web / -mcp, from infra/environments/production.
-  PROD_CLUSTER: __PROJECT_SLUG__-cluster
-  PROD_WEB_SERVICE: __PROJECT_SLUG__-web
-  PROD_MCP_SERVICE: __PROJECT_SLUG__-mcp
-  PROD_URL: https://__PRIMARY_DOMAIN__
+  PROD_CLUSTER: ooa-cluster
+  PROD_WEB_SERVICE: ooa-web
+  PROD_MCP_SERVICE: ooa-mcp
+  PROD_URL: https://ooa.launchpadphilly.org
 
 jobs:
   deploy-production:
