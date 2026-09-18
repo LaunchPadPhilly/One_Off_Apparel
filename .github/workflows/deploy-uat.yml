@@ -1,0 +1,208 @@
+name: Deploy UAT
+
+# Branch-per-environment: every push to `uat` builds fresh images from that
+# branch's tip and deploys them straight to the UAT ECS services. There is no
+# separate promotion step for UAT — `uat` IS the UAT environment's source of
+# truth. Production has its own trigger and workflow (`deploy.yml`, on pushes
+# to `main`) with structurally the same build/deploy steps, re-pointed at the
+# production ECS resources.
+#
+# NOTE: as of this workflow's introduction, this repository has NO live AWS
+# infrastructure. Every `${{ vars.* }}` reference below is a repository
+# Variable that does not exist yet, and `secrets.AWS_ROLE_ARN` does not exist
+# in the `UAT` GitHub Environment either. This workflow WILL fail until:
+#   1. `infra/environments/uat` (Terraform) is written and applied, and
+#   2. the repository Variables and the `UAT` environment secret referenced
+#      below are created with real values from that Terraform's outputs.
+# See the PR description for the exact list.
+#
+# Infrastructure for this environment is defined in Terraform
+# (infra/environments/uat); the cluster/service/task-family names below are
+# stable outputs of that code, not secrets, once it exists.
+#
+# The job-level `environment: UAT` declarations are load-bearing rather than
+# cosmetic: the AWS OIDC role's trust policy is expected to accept only
+# `environment:UAT` (or `environment:Production`, for the sibling workflow) in
+# the token subject, so a job that assumes AWS credentials MUST declare one of
+# them, and `AWS_ROLE_ARN` has to be readable from whichever environment the
+# job declares.
+
+on:
+  push:
+    branches: [uat]
+  workflow_dispatch: {}
+
+concurrency:
+  # One UAT deploy at a time; a second push should not race the first.
+  group: deploy-uat
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # required for AWS OIDC role assumption
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.PROJECT_SLUG }}-web
+  ECR_REPOSITORY_MCP: ${{ vars.PROJECT_SLUG }}-mcp
+
+  # UAT-specific ECS identifiers. Suffixed `_UAT` because the same conceptual
+  # value (cluster/service name) differs from its production counterpart in
+  # deploy.yml, which reads the unsuffixed repository Variables.
+  UAT_CLUSTER: ${{ vars.ECS_CLUSTER_UAT }}
+  UAT_WEB_SERVICE: ${{ vars.ECS_SERVICE_WEB_UAT }}
+  UAT_MCP_SERVICE: ${{ vars.ECS_SERVICE_MCP_UAT }}
+  UAT_URL: https://uat.${{ vars.PRIMARY_DOMAIN }}
+
+jobs:
+  # ---------------------------------------------------------------- 1. build
+  build:
+    name: Build and push images
+    runs-on: ubuntu-latest
+    environment: UAT # OIDC subject condition; no reviewers on this environment
+    outputs:
+      registry: ${{ steps.ecr-login.outputs.registry }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build and push (web)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (mcp)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.mcp
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY_MCP }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ----------------------------------------------------------- 2. deploy UAT
+  deploy-uat:
+    name: Deploy to UAT
+    needs: build
+    runs-on: ubuntu-latest
+    environment: UAT
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Render both revisions first, then migrate before deploying either one.
+      # MCP reads Prisma-backed models too, so it must not start schema-dependent
+      # code against the previous schema.
+      - name: Download current UAT mcp task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "$UAT_MCP_SERVICE" \
+            --query taskDefinition > uat-mcp-task-definition.json
+
+      - name: Render new image into UAT mcp task definition
+        id: render-uat-mcp
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: uat-mcp-task-definition.json
+          container-name: mcp
+          image: ${{ needs.build.outputs.registry }}/${{ env.ECR_REPOSITORY_MCP }}:${{ github.sha }}
+
+      # web: register the revision explicitly so the migration task and the
+      # service update reference the same one (see deploy.yml's production job
+      # for the full rationale).
+      - name: Download current UAT web task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "$UAT_WEB_SERVICE" \
+            --query taskDefinition > uat-web-task-definition.json
+
+      - name: Render new image into UAT web task definition
+        id: render-uat-web
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: uat-web-task-definition.json
+          container-name: web
+          image: ${{ needs.build.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Register new UAT web task definition revision
+        id: register-uat-web
+        run: |
+          ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://${{ steps.render-uat-web.outputs.task-definition }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Run UAT migrations (one-off ECS task, blocks on failure)
+        run: |
+          set -euo pipefail
+          # Reuse the web service's own network configuration, so the migration task
+          # lands in the same subnets and security group as the app — no ids to keep
+          # in sync here when the environment is rebuilt.
+          NETWORK_CONFIG=$(aws ecs describe-services --cluster "$UAT_CLUSTER" --services "$UAT_WEB_SERVICE" \
+            --query 'services[0].networkConfiguration' --output json)
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$UAT_CLUSTER" \
+            --task-definition "${{ steps.register-uat-web.outputs.arn }}" \
+            --launch-type FARGATE \
+            --network-configuration "$NETWORK_CONFIG" \
+            --overrides '{"containerOverrides":[{"name":"web","command":["node_modules/.bin/prisma","migrate","deploy"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+          echo "UAT migration task: $TASK_ARN"
+          aws ecs wait tasks-stopped --cluster "$UAT_CLUSTER" --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$UAT_CLUSTER" --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "!! UAT migration failed (exit $EXIT_CODE) — stopping before UAT web is updated." >&2
+            aws ecs describe-tasks --cluster "$UAT_CLUSTER" --tasks "$TASK_ARN" \
+              --query 'tasks[0].{StopCode:stopCode,StoppedReason:stoppedReason}'
+            exit 1
+          fi
+          echo "UAT migrations applied cleanly."
+
+      - name: Deploy UAT mcp
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-uat-mcp.outputs.task-definition }}
+          service: ${{ env.UAT_MCP_SERVICE }}
+          cluster: ${{ env.UAT_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Deploy UAT web
+        run: |
+          aws ecs update-service --cluster "$UAT_CLUSTER" --service "$UAT_WEB_SERVICE" \
+            --task-definition "${{ steps.register-uat-web.outputs.arn }}"
+          aws ecs wait services-stable --cluster "$UAT_CLUSTER" --services "$UAT_WEB_SERVICE"
+
+  # -------------------------------------------------------------- 3. verify
+  smoke-test-uat:
+    name: Smoke test UAT
+    needs: deploy-uat
+    runs-on: ubuntu-latest
+    # No AWS credentials needed: this only makes public HTTP requests, so it
+    # declares no environment and cannot touch infrastructure.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Smoke test UAT
+        run: ./scripts/smoke-test.sh "$UAT_URL"
