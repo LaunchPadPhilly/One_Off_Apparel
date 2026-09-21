@@ -272,6 +272,12 @@ model Order {
   customerApprovalStatus CustomerApprovalStatus @default(NOT_SENT)
   importedBy             String
   createdAt              DateTime               @default(now())
+  // Scheduler UI overrides — a shop can rename an order and pick a color
+  // for it on the schedule board without touching customerName / the
+  // deterministic hash palette. Both are optional; null means "use the
+  // default derived value" (customerName for title, hash(id) for color).
+  displayTitle           String?
+  colorHex               String?
   lineItems              LineItem[]
 }
 
@@ -342,6 +348,12 @@ model ScheduleAssignment {
   // Batch ordering only, within one station's day (the ATCS heuristic) —
   // not cross-step dependency. See LineItem.dependsOn.
   sequenceOrder  Int
+  // Wall-clock start, minutes from midnight. Persisted so a placement
+  // dragged onto a specific time (e.g. 9:30 = 570) survives reload.
+  // Nullable because engine-proposed assignments only pin a date and
+  // sequence today — they don't commit to a clock time until a human
+  // drags them. Do NOT conflate with sequenceOrder.
+  startMinuteOfDay Int?
   estimatedHours Float
   status         ScheduleAssignmentStatus @default(PROPOSED)
   proposedBy     String?
@@ -349,12 +361,18 @@ model ScheduleAssignment {
   approvedAt     DateTime?
   startedAt      DateTime?
   completedAt    DateTime?
+  // Optional parent draft. Null means "committed to the live schedule"
+  // (or a legacy row from before drafts existed). onDelete: SetNull so
+  // deleting a draft leaves any committed assignments intact.
+  scheduleDraftId String?
+  scheduleDraft   ScheduleDraft? @relation(fields: [scheduleDraftId], references: [id], onDelete: SetNull)
   lineItem       LineItem                 @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
   station        Station                  @relation(fields: [stationId], references: [id], onDelete: Restrict)
 
   @@index([lineItemId])
   @@index([stationId])
   @@index([date])
+  @@index([scheduleDraftId])
 }
 
 // Historical record of real time taken, for validating the estimate_hours
@@ -375,9 +393,8 @@ model Actual {
 // A named plan for what should run during a date range. This is the multi-draft
 // parent that "propose_schedule" will eventually output into — a real entity so
 // a shop can hold several candidate schedules side-by-side, pick one, and commit
-// it. ScheduleAssignment rows do not FK to this yet; that link lands with the
-// "propose into a specific draft" feature. Today the draft only carries its own
-// configuration (name, window, strategy).
+// it. ScheduleAssignment rows now FK to this draft so the interactive board can
+// place proposed blocks into a specific draft and persist them across reloads.
 model ScheduleDraft {
   id          String              @id @default(cuid())
   name        String
@@ -389,6 +406,7 @@ model ScheduleDraft {
   createdBy   String
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
+  assignments ScheduleAssignment[]
 
   @@index([status])
   @@index([startDate])

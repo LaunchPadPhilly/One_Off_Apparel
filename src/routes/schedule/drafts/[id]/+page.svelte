@@ -150,7 +150,20 @@
 	] as const;
 
 	type OrderOverride = { color?: string; title?: string };
-	let orderOverrides = $state<Record<string, OrderOverride>>({});
+	// Seed from any server-persisted overrides so a reload keeps them.
+	let orderOverrides = $state<Record<string, OrderOverride>>(
+		Object.fromEntries(
+			data.orders
+				.filter((o) => o.displayTitle || o.colorHex)
+				.map((o) => [
+					o.id,
+					{
+						title: o.displayTitle ?? undefined,
+						color: o.colorHex ?? undefined
+					}
+				])
+		)
+	);
 
 	function deterministicColor(id: string): string {
 		let hash = 0;
@@ -182,13 +195,23 @@
 		draftColor = orderColor(order.id);
 	}
 
-	function saveEdit() {
+	async function saveEdit() {
 		if (!editingOrderId) return;
-		orderOverrides = {
-			...orderOverrides,
-			[editingOrderId]: { title: draftTitle.trim(), color: draftColor }
-		};
+		const id = editingOrderId;
+		const title = draftTitle.trim();
+		const color = draftColor;
+		orderOverrides = { ...orderOverrides, [id]: { title, color } };
 		editingOrderId = null;
+		// Persist the override. We only surface the failure in the console for
+		// now — the tray UI already shows the updated title/color; a later pass
+		// will thread errors back to a toast.
+		const body = new FormData();
+		body.set('orderId', id);
+		body.set('displayTitle', title);
+		body.set('colorHex', color);
+		await fetch('?/updateOrderDisplay', { method: 'POST', body }).catch((e) => {
+			console.error('updateOrderDisplay failed', e);
+		});
 	}
 
 	function cancelEdit() {
@@ -212,7 +235,20 @@
 		startMin: number;
 		durationMin: number;
 	};
-	let placements = $state<Placement[]>([]);
+	// Hydrate from server: each ScheduleAssignment tied to this draft becomes a
+	// placement. estimatedHours * 60 is the working duration; startMinuteOfDay
+	// is minutes-from-midnight, aligned with the client's SHIFT_START_MIN.
+	let placements = $state<Placement[]>(
+		data.assignments.map((a) => ({
+			id: a.id,
+			lineItemId: a.lineItemId,
+			orderId: a.orderId,
+			date: a.date,
+			stationName: a.stationName,
+			startMin: a.startMinuteOfDay,
+			durationMin: Math.max(15, Math.round(a.estimatedHours * 60))
+		}))
+	);
 
 	function placementsForDay(date: string): Placement[] {
 		return placements
@@ -357,7 +393,21 @@
 		dragOverDate = null;
 	}
 
-	function handleTrackDrop(event: DragEvent, date: string) {
+	// Server persistence helpers. Every mutation applies optimistically to the
+	// $state array first (so drag feedback is instant), then POSTs to the form
+	// action. On failure we roll back and log. Errors surface in the console
+	// for now; a toast pass comes with the wider save-error UX.
+	async function postAction(action: string, body: FormData): Promise<boolean> {
+		try {
+			const res = await fetch(`?/${action}`, { method: 'POST', body });
+			return res.ok;
+		} catch (e) {
+			console.error(`${action} failed`, e);
+			return false;
+		}
+	}
+
+	async function handleTrackDrop(event: DragEvent, date: string) {
 		event.preventDefault();
 		dragOverDate = null;
 		if (!event.dataTransfer) return;
@@ -384,11 +434,22 @@
 					p.date === date && p.stationName === activeStation && p.id !== existing.id
 			);
 			const startMin = findNonOverlappingStart(desired, existing.durationMin, others);
+			const before = { ...existing };
 			placements = placements.map((p) =>
 				p.id === existing.id
 					? { ...p, date, stationName: activeStation, startMin }
 					: p
 			);
+			const body = new FormData();
+			body.set('id', existing.id);
+			body.set('stationName', activeStation);
+			body.set('date', date);
+			body.set('startMinuteOfDay', String(startMin));
+			const ok = await postAction('moveAssignment', body);
+			if (!ok) {
+				// Roll back to the last known good state.
+				placements = placements.map((p) => (p.id === existing.id ? before : p));
+			}
 			return;
 		}
 
@@ -406,10 +467,13 @@
 			(p) => p.date === date && p.stationName === activeStation
 		);
 		const startMin = findNonOverlappingStart(desired, durationMin, others);
+		// Optimistic: give it a temp id so it can be dragged again immediately;
+		// swap the temp id for the server-assigned one once the POST resolves.
+		const tempId = `tmp:${crypto.randomUUID()}`;
 		placements = [
 			...placements,
 			{
-				id: crypto.randomUUID(),
+				id: tempId,
 				lineItemId: payload.lineItemId,
 				orderId: payload.orderId,
 				date,
@@ -418,10 +482,49 @@
 				durationMin
 			}
 		];
+		const body = new FormData();
+		body.set('lineItemId', payload.lineItemId);
+		body.set('stationName', activeStation);
+		body.set('date', date);
+		body.set('startMinuteOfDay', String(startMin));
+		body.set('hours', String(durationMin / 60));
+		try {
+			const res = await fetch('?/placeAssignment', { method: 'POST', body });
+			if (!res.ok) throw new Error(`placeAssignment failed: ${res.status}`);
+			// SvelteKit form-action fetches return an ActionResult-wrapped JSON.
+			const wire = (await res.json()) as {
+				type: string;
+				data?: string;
+			};
+			const parsed = wire.data ? (JSON.parse(wire.data) as unknown[]) : [];
+			// ActionResult data is a positional array — { success, id } becomes
+			// [success, id] with the actual values at odd indices in the flat
+			// serialization. Walk it defensively.
+			let assignedId: string | null = null;
+			for (const value of parsed) {
+				if (typeof value === 'string' && value.length > 8 && value !== 'success') {
+					assignedId = value;
+					break;
+				}
+			}
+			if (assignedId) {
+				placements = placements.map((p) => (p.id === tempId ? { ...p, id: assignedId! } : p));
+			}
+		} catch (e) {
+			console.error('placeAssignment failed', e);
+			// Roll back.
+			placements = placements.filter((p) => p.id !== tempId);
+		}
 	}
 
-	function removePlacement(id: string) {
+	async function removePlacement(id: string) {
+		const before = placements;
 		placements = placements.filter((p) => p.id !== id);
+		if (id.startsWith('tmp:')) return; // never persisted
+		const body = new FormData();
+		body.set('id', id);
+		const ok = await postAction('removeAssignment', body);
+		if (!ok) placements = before;
 	}
 
 	function formatMinutes(minutes: number): string {
