@@ -8,6 +8,29 @@
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
+
+	// A short, concrete "what does this order still need before it can move" list —
+	// replaces relying on the free-text Notes field for this at review time (Notes
+	// stays, further down, for its own documented purpose per CLAUDE.md: human
+	// observations like "why a job ran late," tied to the add_order_note MCP tool and
+	// surfaced on Reports — not the same thing as "what's blocking this order").
+	// Built from data already on the page: the import-time flags Claude raised, plus
+	// whichever of the pre-production approval gates and per-line-item estimate gaps
+	// are still outstanding right now.
+	const needsAttention = $derived.by(() => {
+		const items: string[] = [...data.order.importFlags];
+		if (data.order.blankOrderingStatus !== 'RECEIVED') items.push('Blanks not yet received.');
+		if (data.order.customerApprovalStatus !== 'APPROVED') items.push('Customer approval not yet received.');
+		for (const item of data.lineItems) {
+			if (item.itemType === 'DECORATION' && item.artworkApprovalStatus !== 'APPROVED') {
+				items.push(`${item.design}: artwork not approved yet.`);
+			}
+			if (!item.estimate.ok) {
+				items.push(`${item.design}: ${item.estimate.reason}`);
+			}
+		}
+		return items;
+	});
 </script>
 
 <svelte:head>
@@ -50,14 +73,23 @@
 				{data.order.status}
 			</span>
 		</div>
-		{#if data.order.importFlags.length > 0}
-			<p class="import-flags">
-				<strong>Flagged at import:</strong> {data.order.importFlags.join(' · ')}
-			</p>
+		<!-- The straight-to-the-point "what does this order still need" list — the
+		     thing to actually look at before an order can move forward. Only shows
+		     while something's outstanding; disappears on its own once everything's
+		     resolved rather than needing to be dismissed. -->
+		{#if needsAttention.length > 0}
+			<div class="needs-attention">
+				<strong>Needs attention:</strong>
+				<ul>
+					{#each needsAttention as reason (reason)}
+						<li>{reason}</li>
+					{/each}
+				</ul>
+			</div>
 		{/if}
 		{#if data.canEdit}
 			<form method="POST" action="?/updateOrder" use:enhance class="fields">
-				<label>Customer <input name="customerName" value={data.order.customerName} /></label>
+				<label>Customer <input name="customerName" value={data.order.customerName} autocomplete="off" /></label>
 				<label>External ship date <input name="externalShipDate" type="date" value={data.order.externalShipDate} /></label>
 				<label>Internal due date <input name="internalDueDate" type="date" value={data.order.internalDueDate} /></label>
 				<label>
@@ -78,12 +110,19 @@
 						<option value="APPROVED" selected={data.order.customerApprovalStatus === 'APPROVED'}>Approved</option>
 					</select>
 				</label>
-				<label class="notes-field">
-					Notes (e.g. why a job ran late — Nate/Toby's call, nothing infers this)
-					<textarea name="notes" rows="3">{data.order.notes ?? ''}</textarea>
-				</label>
 				<button class="button button--secondary" use:pressable type="submit">Save</button>
 			</form>
+			<!-- Kept, but separate from the review flow above — this is a person's own
+			     observation (e.g. why a job ran late), not something the review checklist
+			     surfaces. See add_order_note (MCP) and the Reports page, which both read
+			     this same field. -->
+			<details class="production-notes">
+				<summary>Production notes</summary>
+				<form method="POST" action="?/updateOrder" use:enhance class="fields">
+					<textarea name="notes" rows="3" autocomplete="off">{data.order.notes ?? ''}</textarea>
+					<button class="button button--secondary" use:pressable type="submit">Save note</button>
+				</form>
+			</details>
 		{:else}
 			<dl>
 				<div><dt>Ship date</dt><dd>{data.order.externalShipDate}</dd></div>
@@ -196,11 +235,24 @@
 					{#if item.garmentStyle}· {item.garmentStyle}{#if item.capConstruction} ({item.capConstruction}){/if}{/if}
 				</p>
 				{#if data.canEdit}
-					<form method="POST" action="?/updateLineItem" use:enhance class="fields">
-						<input type="hidden" name="lineItemId" value={item.id} />
-						<label>Design <input name="design" value={item.design} /></label>
-						<label>Color <input name="apparelColor" value={item.apparelColor} /></label>
-						<label>Qty <input name="quantity" type="number" value={item.quantity} /></label>
+					<!--
+						KEYED on the item's own editable fields: every line-item form on this
+						page reuses the same input `name`s ("design", "apparelColor", "quantity")
+						since each form posts independently server-side — but that also makes
+						them look identical to the browser's own form-autofill/restore heuristics,
+						which key off name alone, not which <form> an input belongs to. That let
+						the browser silently swap in a blank (or another row's) remembered value
+						after a save-triggered reload, even though the real data in the database
+						was never touched. Keying the block forces Svelte to tear down and rebuild
+						these exact DOM nodes whenever the item's own data changes, so there's
+						nothing stale left for the browser to "restore" into.
+					-->
+					{#key `${item.id}:${item.design}:${item.apparelColor}:${item.quantity}`}
+						<form method="POST" action="?/updateLineItem" use:enhance class="fields">
+							<input type="hidden" name="lineItemId" value={item.id} />
+							<label>Design <input name="design" value={item.design} autocomplete="off" /></label>
+							<label>Color <input name="apparelColor" value={item.apparelColor} autocomplete="off" /></label>
+							<label>Qty <input name="quantity" type="number" value={item.quantity} autocomplete="off" /></label>
 						<!--
 							NEW (2026-09-21): these two dropdowns let someone set
 							garmentStyle/capConstruction by hand. They only show for
@@ -243,6 +295,7 @@
 						{/if}
 						<button class="button button--secondary" use:pressable type="submit">Save</button>
 					</form>
+					{/key}
 				{/if}
 			</div>
 		{/each}
@@ -264,15 +317,6 @@
 		gap: 0.25rem;
 		font-size: 0.85rem;
 		color: var(--ink-500);
-	}
-
-	.notes-field {
-		flex-basis: 100%;
-	}
-
-	.notes-field textarea {
-		width: 100%;
-		font-family: inherit;
 	}
 
 	dl {
@@ -315,10 +359,37 @@
 		color: var(--danger-fg);
 	}
 
-	.import-flags {
+	.needs-attention {
 		margin: 0.4rem 0 0.75rem;
+		padding: 0.65rem 0.85rem;
+		font-size: 0.9rem;
+		border: 1px solid var(--warm-300);
+		background: var(--warm-100);
+		border-radius: var(--radius-sm);
+	}
+
+	.needs-attention ul {
+		margin: 0.3rem 0 0;
+		padding-left: 1.1rem;
+	}
+
+	.production-notes {
+		margin-top: 0.75rem;
+	}
+
+	.production-notes summary {
+		cursor: pointer;
 		font-size: 0.9rem;
 		color: var(--ink-500);
+	}
+
+	.production-notes .fields {
+		margin-top: 0.5rem;
+	}
+
+	.production-notes textarea {
+		width: 100%;
+		font-family: inherit;
 	}
 
 	table {
