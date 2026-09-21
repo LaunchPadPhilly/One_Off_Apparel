@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '$lib/server/prisma';
-import { LineItemStatus, LineItemType, OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import { ArtworkApprovalStatus, LineItemStatus, LineItemType, OrderStatus } from '../../../../prisma/generated/prisma/enums';
 import type { LineItem, Order } from '../../../../prisma/generated/prisma/client';
 import { ALL_SIBLINGS, orderCandidateSchema, type OrderCandidate } from './types';
 
@@ -46,6 +46,7 @@ async function createLineItemsForOrder(
 				// Finishing rows always start blocked, whatever they depend on —
 				// check_completion is the only thing that unlocks them.
 				status: isFinishing ? LineItemStatus.BLOCKED : LineItemStatus.NEEDS_REVIEW,
+				artworkApprovalStatus: isFinishing ? null : ArtworkApprovalStatus.NOT_SUBMITTED,
 				weightClass: itemCandidate.weightClass,
 				apparelColor: itemCandidate.apparelColor,
 				inkColorCount: itemCandidate.inkColorCount ?? null,
@@ -66,7 +67,9 @@ async function createLineItemsForOrder(
  * this doesn't parse a file itself). Creates `Order` rows at status needs_review and
  * `LineItem` rows at needs_review (decoration, and any finishing row with no unmet
  * dependency) or blocked (every other finishing row) — exactly per CLAUDE.md's schema
- * notes. Nothing here is schedulable yet: that gate is confirm_import, not this.
+ * notes. Decoration rows get artworkApprovalStatus: NOT_SUBMITTED; finishing rows leave
+ * it null. Nothing here is schedulable yet: that gate is confirm_import + the
+ * pre-production approval gates in the backlog query.
  *
  * Re-import (a hoopsOrderId that already exists) is always allowed and always reopens
  * review, regardless of the existing order's current status — this was an explicit

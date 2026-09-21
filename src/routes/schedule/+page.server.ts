@@ -7,6 +7,7 @@ import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersis
 import { groupAtRiskForDisplay } from '$lib/server/schedule/explainAtRisk';
 import { commitSchedule } from '$lib/server/schedule/commitSchedule';
 import { reassignProposedAssignment, removeProposedAssignment } from '$lib/server/schedule/reassignProposedAssignment';
+import { listDrafts } from '$lib/server/schedule/draft';
 import { ScheduleAssignmentStatus } from '../../../prisma/generated/prisma/enums';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -35,7 +36,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 	const from = url.searchParams.get('from') ?? isoDate(today);
 	const to = url.searchParams.get('to') ?? isoDate(defaultTo);
 
-	const [assignments, stations] = await Promise.all([
+	const [assignments, stations, drafts] = await Promise.all([
 		prisma.scheduleAssignment.findMany({
 			where: {
 				date: { gte: new Date(from), lte: new Date(to) },
@@ -57,7 +58,12 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			},
 			orderBy: [{ date: 'asc' }, { stationId: 'asc' }, { sequenceOrder: 'asc' }]
 		}),
-		prisma.station.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
+		prisma.station.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+		// NEW: named draft schedules from the schedule-creation-workflow branch —
+		// a separate precursor flow (build a named candidate schedule at /schedule/new,
+		// review it at /schedule/drafts/[id]) that doesn't replace this page's existing
+		// propose/approve/reassign/remove flow, just gives it another on-ramp.
+		listDrafts()
 	]);
 
 	const byDate = new Map<string, typeof assignments>();
@@ -68,6 +74,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 
 	return {
 		canAct: hasGrantedScope(locals.user, 'SCHEDULE_WRITE'),
+		canCreate: hasGrantedScope(locals.user, 'SCHEDULE_WRITE'),
 		from,
 		to,
 		stations,
@@ -84,7 +91,17 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 					station: assignment.station,
 					lineItem: assignment.lineItem
 				}))
-			}))
+			})),
+		drafts: drafts.map((draft) => ({
+			id: draft.id,
+			name: draft.name,
+			startDate: draft.startDate.toISOString().slice(0, 10),
+			weeks: draft.weeks,
+			strategy: draft.strategy,
+			status: draft.status,
+			createdBy: draft.createdBy,
+			createdAt: draft.createdAt.toISOString()
+		}))
 	};
 };
 

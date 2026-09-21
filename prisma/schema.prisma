@@ -263,50 +263,52 @@ enum McpAuthorizationRequestStatus {
 // changing any of the models below.
 
 model Order {
-  id               String      @id @default(cuid())
-  hoopsOrderId     String      @unique
-  customerName     String
-  externalShipDate DateTime    @db.Date
-  internalDueDate  DateTime    @db.Date
-  status           OrderStatus @default(NEEDS_REVIEW)
-  importedBy       String
-  createdAt        DateTime    @default(now())
+  id                     String                 @id @default(cuid())
+  hoopsOrderId           String                 @unique
+  customerName           String
+  externalShipDate       DateTime               @db.Date
+  internalDueDate        DateTime               @db.Date
+  status                 OrderStatus            @default(NEEDS_REVIEW)
+  blankOrderingStatus    BlankOrderingStatus    @default(NOT_ORDERED)
+  customerApprovalStatus CustomerApprovalStatus @default(NOT_SENT)
+  importedBy             String
+  createdAt              DateTime               @default(now())
   // Free-text, human-entered — e.g. why a job ran late. Not written by any engine or
   // MCP tool; only a person (or a correction applied through updateOrderFields) sets
   // this. Surfaced in Reports next to late orders. See CLAUDE.md's Known open items for
   // the still-undecided recurring-digest idea this was requested alongside.
-  notes            String?
-  lineItems        LineItem[]
+  notes                  String?
+  lineItems              LineItem[]
 }
 
 // A physical garment with a print on the front and an embroidery on the back
 // is two rows here sharing one orderId, not one row — see CLAUDE.md.
 model LineItem {
-  id                  String               @id @default(cuid())
-  orderId             String
-  itemType            LineItemType
-  design              String
+  id                    String                 @id @default(cuid())
+  orderId               String
+  itemType              LineItemType
+  design                String
   // Decoration-oriented fields: meaningful when itemType is DECORATION,
   // null on FINISHING rows.
-  printLocation       PrintLocation?
-  decorationType      DecorationType?
-  inkColorCount       Int?
-  screens             Int?
-  stitchCount         Int?
+  printLocation         PrintLocation?
+  decorationType        DecorationType?
+  inkColorCount         Int?
+  screens               Int?
+  stitchCount           Int?
   // Finishing-oriented fields: meaningful when itemType is FINISHING,
   // null on DECORATION rows.
-  finishingStep       FinishingStep?
+  finishingStep         FinishingStep?
   // NEW (2026-09-21): is this a normal garment ("FLAT" — a t-shirt, hoodie, etc.) or
   // headwear ("CAP")? We added this because embroidery pricing/timing math is
   // completely different for caps vs regular garments — it's not just a different
   // number, it's a different formula. Only matters for DECORATION rows; always null
   // on FINISHING rows. See estimateHours.ts for where this actually gets used.
-  garmentStyle        GarmentStyle?
+  garmentStyle          GarmentStyle?
   // NEW (2026-09-21): only filled in when garmentStyle is "CAP" — is the cap
   // STRUCTURED (has a stiff front panel) or UNSTRUCTURED (soft, no stiff panel)?
   // Caps use a different embroidery formula depending on this. Stays null for
   // every non-cap row.
-  capConstruction     CapConstruction?
+  capConstruction       CapConstruction?
   // Either another LineItem's id, or the literal string "all_siblings"
   // (waits on every other line item under the same order). This is
   // deliberately a plain string, not a Prisma relation: a real FK
@@ -314,17 +316,18 @@ model LineItem {
   // is evaluated in application code (check_completion), not the DB.
   // Do not conflate with ScheduleAssignment.sequenceOrder — that is batch
   // ordering within one station's day, this is cross-line-item dependency.
-  dependsOn           String?
-  status              LineItemStatus       @default(NEEDS_REVIEW)
-  weightClass         WeightClass
-  apparelColor        String
-  quantity            Int
-  sizeBreakdown       Json
-  estimatedHours      Json?
-  reviewConfidence    Float?
-  order               Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  scheduleAssignments ScheduleAssignment[]
-  actuals             Actual[]
+  dependsOn             String?
+  status                LineItemStatus         @default(NEEDS_REVIEW)
+  artworkApprovalStatus ArtworkApprovalStatus?
+  weightClass           WeightClass
+  apparelColor          String
+  quantity              Int
+  sizeBreakdown         Json
+  estimatedHours        Json?
+  reviewConfidence      Float?
+  order                 Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  scheduleAssignments   ScheduleAssignment[]
+  actuals               Actual[]
 
   @@index([orderId])
   @@index([status])
@@ -384,6 +387,28 @@ model Actual {
 
   @@index([lineItemId])
   @@index([stationId])
+}
+
+// A named plan for what should run during a date range. This is the multi-draft
+// parent that "propose_schedule" will eventually output into — a real entity so
+// a shop can hold several candidate schedules side-by-side, pick one, and commit
+// it. ScheduleAssignment rows do not FK to this yet; that link lands with the
+// "propose into a specific draft" feature. Today the draft only carries its own
+// configuration (name, window, strategy).
+model ScheduleDraft {
+  id          String              @id @default(cuid())
+  name        String
+  description String?
+  startDate   DateTime            @db.Date
+  weeks       Int
+  strategy    ScheduleStrategy    @default(BATCH_OPTIMIZE)
+  status      ScheduleDraftStatus @default(DRAFT)
+  createdBy   String
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@index([status])
+  @@index([startDate])
 }
 
 // Domain-specific audit trail for order/line-item/schedule changes. Distinct
@@ -482,4 +507,37 @@ enum ScheduleAssignmentStatus {
   APPROVED
   IN_PROGRESS
   COMPLETE
+}
+
+enum ScheduleStrategy {
+  BATCH_OPTIMIZE
+  STRICT_DUE_DATE
+}
+
+enum ScheduleDraftStatus {
+  DRAFT
+  PROPOSED
+  APPROVED
+  ARCHIVED
+}
+
+enum ArtworkApprovalStatus {
+  NOT_SUBMITTED
+  PENDING_APPROVAL
+  REVISION_REQUESTED
+  APPROVED
+}
+
+enum BlankOrderingStatus {
+  NOT_ORDERED
+  ORDERED
+  ISSUE
+  RECEIVED
+}
+
+enum CustomerApprovalStatus {
+  NOT_SENT
+  PENDING_APPROVAL
+  CHANGES_REQUESTED
+  APPROVED
 }

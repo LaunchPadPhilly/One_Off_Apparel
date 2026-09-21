@@ -19,6 +19,7 @@
 		if (!user) return [];
 
 		return [
+			{ href: '/orders', label: 'Orders', show: true },
 			{ href: '/admin', label: 'Admin', show: user.isAdmin },
 			// Provisional routes/labels — see CLAUDE.md's "Production board (provisional)" open item.
 			{ href: '/orders', label: 'Orders', show: user.scopes.includes('ORDERS_READ') },
