@@ -198,6 +198,11 @@
 	// ─── Placements (drag-drop blocks on the timeline) ─────────────────────────
 	// Client-side only for now — this is the design pass. Persisting to
 	// schedule_assignments comes next, after the shape settles.
+	//
+	// A placement's `durationMin` is *working* minutes; its wall-clock span
+	// stretches to include any breaks it crosses (a 3h task starting at 9:30
+	// finishes at 12:45 wall clock, not 12:30). Rendering emits one <div> per
+	// contiguous working segment so the bar visibly "splits" around a break.
 	type Placement = {
 		id: string;
 		lineItemId: string;
@@ -215,13 +220,99 @@
 			.sort((a, b) => a.startMin - b.startMin);
 	}
 
-	function overlapsBreak(startMin: number, durationMin: number): boolean {
-		const end = startMin + durationMin;
-		return BREAKS.some((brk) => {
-			const bStart = brk.startMin;
-			const bEnd = brk.startMin + brk.durationMin;
-			return startMin < bEnd && end > bStart;
-		});
+	// Wall-clock end of a working span that begins at startMin: walks forward,
+	// jumping across each break it crosses without consuming working budget.
+	function wallClockEnd(startMin: number, workingMin: number): number {
+		let cursor = startMin;
+		let remaining = workingMin;
+		while (remaining > 0 && cursor < SHIFT_END_MIN) {
+			// Inside a break? Jump to its end.
+			const inBrk = BREAKS.find(
+				(b) => cursor >= b.startMin && cursor < b.startMin + b.durationMin
+			);
+			if (inBrk) {
+				cursor = inBrk.startMin + inBrk.durationMin;
+				continue;
+			}
+			const nextBrk = BREAKS.find((b) => b.startMin > cursor);
+			const segmentEnd = nextBrk ? nextBrk.startMin : SHIFT_END_MIN;
+			const available = segmentEnd - cursor;
+			if (remaining <= available) {
+				cursor += remaining;
+				remaining = 0;
+			} else {
+				cursor = segmentEnd;
+				remaining -= available;
+			}
+		}
+		return cursor;
+	}
+
+	// Split a working span into one visible segment per contiguous working slice.
+	function computeSegments(
+		startMin: number,
+		workingMin: number
+	): Array<{ start: number; end: number }> {
+		const segments: Array<{ start: number; end: number }> = [];
+		let cursor = startMin;
+		let remaining = workingMin;
+		while (remaining > 0 && cursor < SHIFT_END_MIN) {
+			const inBrk = BREAKS.find(
+				(b) => cursor >= b.startMin && cursor < b.startMin + b.durationMin
+			);
+			if (inBrk) {
+				cursor = inBrk.startMin + inBrk.durationMin;
+				continue;
+			}
+			const nextBrk = BREAKS.find((b) => b.startMin > cursor);
+			const segmentEnd = nextBrk ? nextBrk.startMin : SHIFT_END_MIN;
+			const available = segmentEnd - cursor;
+			const use = Math.min(remaining, available);
+			if (use > 0) segments.push({ start: cursor, end: cursor + use });
+			remaining -= use;
+			cursor += use;
+		}
+		return segments;
+	}
+
+	// Push-right: snap `desired` forward past any placements it would overlap on
+	// this (date, station). Also skips forward out of a break if the desired
+	// start lands inside one. Bounded loop so a pathological input can't hang.
+	function findNonOverlappingStart(
+		desired: number,
+		workingMin: number,
+		others: Placement[]
+	): number {
+		const extents = others
+			.map((p) => ({ start: p.startMin, end: wallClockEnd(p.startMin, p.durationMin) }))
+			.sort((a, b) => a.start - b.start);
+
+		let candidate = desired;
+		for (let i = 0; i < 40; i++) {
+			// If we're sitting inside a break, jump past it.
+			const inBrk = BREAKS.find(
+				(b) => candidate >= b.startMin && candidate < b.startMin + b.durationMin
+			);
+			if (inBrk) {
+				candidate = inBrk.startMin + inBrk.durationMin;
+				continue;
+			}
+			const end = wallClockEnd(candidate, workingMin);
+			const conflict = extents.find((o) => candidate < o.end && end > o.start);
+			if (!conflict) return candidate;
+			// Snap to just after the conflicting block, rounded up to the next 15m.
+			candidate = Math.ceil(conflict.end / 15) * 15;
+		}
+		return candidate;
+	}
+
+	function snapTo15(dropMin: number, durationMin: number): number {
+		const rawStart = dropMin - durationMin / 2;
+		const clamped = Math.max(
+			SHIFT_START_MIN,
+			Math.min(SHIFT_END_MIN - Math.min(durationMin, SHIFT_LENGTH_MIN), rawStart)
+		);
+		return Math.round(clamped / 15) * 15;
 	}
 
 	function handleDragStart(
@@ -238,12 +329,27 @@
 		);
 	}
 
+	function handlePlacementDragStart(event: DragEvent, placementId: string) {
+		if (!event.dataTransfer) return;
+		event.stopPropagation();
+		event.dataTransfer.effectAllowed = 'move';
+		event.dataTransfer.setData(
+			'application/x-placement',
+			JSON.stringify({ placementId })
+		);
+	}
+
 	let dragOverDate = $state<string | null>(null);
 
 	function handleTrackDragOver(event: DragEvent, date: string) {
-		if (!event.dataTransfer?.types.includes('application/x-line-item')) return;
+		const types = event.dataTransfer?.types;
+		if (
+			!types?.includes('application/x-line-item') &&
+			!types?.includes('application/x-placement')
+		)
+			return;
 		event.preventDefault();
-		event.dataTransfer.dropEffect = 'move';
+		event.dataTransfer!.dropEffect = 'move';
 		dragOverDate = date;
 	}
 
@@ -255,26 +361,51 @@
 		event.preventDefault();
 		dragOverDate = null;
 		if (!event.dataTransfer) return;
-		const raw = event.dataTransfer.getData('application/x-line-item');
-		if (!raw) return;
-		let payload: { lineItemId: string; orderId: string; hours: number };
-		try {
-			payload = JSON.parse(raw);
-		} catch {
-			return;
-		}
 		const track = event.currentTarget as HTMLElement;
 		const rect = track.getBoundingClientRect();
 		const relative = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
 		const dropMin = SHIFT_START_MIN + (relative / rect.width) * SHIFT_LENGTH_MIN;
+
+		// Moving an existing placement wins over adding a new one — some browsers
+		// leave stale getData from a prior transfer, so check payloads by priority.
+		const placementRaw = event.dataTransfer.getData('application/x-placement');
+		if (placementRaw) {
+			let payload: { placementId: string };
+			try {
+				payload = JSON.parse(placementRaw);
+			} catch {
+				return;
+			}
+			const existing = placements.find((p) => p.id === payload.placementId);
+			if (!existing) return;
+			const desired = snapTo15(dropMin, existing.durationMin);
+			const others = placements.filter(
+				(p) =>
+					p.date === date && p.stationName === activeStation && p.id !== existing.id
+			);
+			const startMin = findNonOverlappingStart(desired, existing.durationMin, others);
+			placements = placements.map((p) =>
+				p.id === existing.id
+					? { ...p, date, stationName: activeStation, startMin }
+					: p
+			);
+			return;
+		}
+
+		const lineItemRaw = event.dataTransfer.getData('application/x-line-item');
+		if (!lineItemRaw) return;
+		let payload: { lineItemId: string; orderId: string; hours: number };
+		try {
+			payload = JSON.parse(lineItemRaw);
+		} catch {
+			return;
+		}
 		const durationMin = Math.max(15, Math.round((payload.hours || 1) * 60));
-		// Center the block on the drop point, clamp inside the shift, snap to 15m.
-		const rawStart = dropMin - durationMin / 2;
-		const clamped = Math.max(
-			SHIFT_START_MIN,
-			Math.min(SHIFT_END_MIN - durationMin, rawStart)
+		const desired = snapTo15(dropMin, durationMin);
+		const others = placements.filter(
+			(p) => p.date === date && p.stationName === activeStation
 		);
-		const startMin = Math.round(clamped / 15) * 15;
+		const startMin = findNonOverlappingStart(desired, durationMin, others);
 		placements = [
 			...placements,
 			{
@@ -501,22 +632,35 @@
 									{@const parent = findOrder(placement.orderId)}
 									{@const bg = orderColor(placement.orderId)}
 									{@const title = parent ? orderTitle(parent) : 'Order'}
-									{@const bad = overlapsBreak(placement.startMin, placement.durationMin)}
-									<div
-										class="placement"
-										class:placement--bad={bad}
-										style="left: {pctFromShiftStart(placement.startMin)}%; width: {pctWidth(placement.durationMin)}%; --block-color: {bg};"
-										title="{title} · {formatClock(placement.startMin)} → {formatClock(placement.startMin + placement.durationMin)} ({formatMinutes(placement.durationMin)})"
-									>
-										<span class="placement__label">{title}</span>
-										<span class="placement__time">{formatMinutes(placement.durationMin)}</span>
-										<button
-											type="button"
-											class="placement__remove"
-											aria-label="Remove"
-											onclick={() => removePlacement(placement.id)}
-										>×</button>
-									</div>
+									{@const segments = computeSegments(placement.startMin, placement.durationMin)}
+									{@const wallEnd = wallClockEnd(placement.startMin, placement.durationMin)}
+									{#each segments as seg, i (seg.start)}
+										{@const isFirst = i === 0}
+										{@const isLast = i === segments.length - 1}
+										<div
+											class="placement"
+											class:placement--first={isFirst}
+											class:placement--last={isLast}
+											class:placement--middle={!isFirst && !isLast}
+											role="button"
+											tabindex="0"
+											draggable="true"
+											ondragstart={(event) => handlePlacementDragStart(event, placement.id)}
+											style="left: {pctFromShiftStart(seg.start)}%; width: {pctWidth(seg.end - seg.start)}%; --block-color: {bg};"
+											title="{title} · {formatClock(placement.startMin)} → {formatClock(wallEnd)} ({formatMinutes(placement.durationMin)} of work{segments.length > 1 ? `, split across ${segments.length} slices` : ''})"
+										>
+											{#if isFirst}
+												<span class="placement__label">{title}</span>
+												<span class="placement__time">{formatMinutes(placement.durationMin)}</span>
+												<button
+													type="button"
+													class="placement__remove"
+													aria-label="Remove"
+													onclick={() => removePlacement(placement.id)}
+												>×</button>
+											{/if}
+										</div>
+									{/each}
 								{/each}
 								<div class="bar__ticks">
 									{#each HOUR_TICKS as tick (tick.minutes)}
@@ -1021,7 +1165,7 @@
 		bottom: 3px;
 		background: var(--block-color, var(--warm-500));
 		border: 1px solid rgb(0 0 0 / 20%);
-		border-radius: 4px;
+		border-radius: 0;
 		color: white;
 		padding: 0 0.4rem;
 		display: flex;
@@ -1034,9 +1178,32 @@
 		cursor: grab;
 	}
 
-	.placement--bad {
-		background: var(--danger-fg);
-		outline: 2px solid var(--danger-fg);
+	.placement:active {
+		cursor: grabbing;
+	}
+
+	/* A single-segment block has both --first and --last, so its four
+	   corners round; a split block rounds only its outer edges. */
+	.placement--first {
+		border-top-left-radius: 4px;
+		border-bottom-left-radius: 4px;
+	}
+
+	.placement--last {
+		border-top-right-radius: 4px;
+		border-bottom-right-radius: 4px;
+	}
+
+	/* Give split continuations a subtle chevron edge hint so the eye reads
+	   them as "same block, continued past the break". */
+	.placement--last:not(.placement--first)::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		top: 0;
+		bottom: 0;
+		width: 3px;
+		background: rgb(255 255 255 / 40%);
 	}
 
 	.placement__label {
