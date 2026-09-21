@@ -315,7 +315,7 @@
 		padding: var(--space-4);
 		position: sticky;
 		top: var(--space-4);
-		max-height: calc(100vh - var(--space-6));
+		height: calc(100vh - var(--space-6));
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-3);
@@ -511,6 +511,10 @@
 		padding: 0.35rem;
 		background: var(--warm-100);
 		border-radius: var(--radius-md);
+		position: sticky;
+		top: var(--space-4);
+		z-index: 2;
+		box-shadow: 0 4px 8px rgb(0 0 0 / 12%);
 	}
 
 	.station-tab {
