@@ -278,6 +278,12 @@ model Order {
   // this. Surfaced in Reports next to late orders. See CLAUDE.md's Known open items for
   // the still-undecided recurring-digest idea this was requested alongside.
   notes                  String?
+  // Scheduler UI overrides — a shop can rename an order and pick a color for it on
+  // the schedule board without touching customerName / the deterministic hash
+  // palette. Both optional; null means "use the default derived value"
+  // (customerName for title, hash(id) for color).
+  displayTitle           String?
+  colorHex               String?
   lineItems              LineItem[]
 }
 
@@ -352,26 +358,38 @@ model CapacityCalendar {
 }
 
 model ScheduleAssignment {
-  id             String                   @id @default(cuid())
-  lineItemId     String
-  stationId      String
-  date           DateTime                 @db.Date
+  id               String                   @id @default(cuid())
+  lineItemId       String
+  stationId        String
+  date             DateTime                 @db.Date
   // Batch ordering only, within one station's day (the ATCS heuristic) —
   // not cross-step dependency. See LineItem.dependsOn.
-  sequenceOrder  Int
-  estimatedHours Float
-  status         ScheduleAssignmentStatus @default(PROPOSED)
-  proposedBy     String?
-  approvedBy     String?
-  approvedAt     DateTime?
-  startedAt      DateTime?
-  completedAt    DateTime?
-  lineItem       LineItem                 @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
-  station        Station                  @relation(fields: [stationId], references: [id], onDelete: Restrict)
+  sequenceOrder    Int
+  // Wall-clock start, minutes from midnight. Persisted so a placement dragged
+  // onto a specific time (e.g. 9:30 = 570) survives reload. Nullable because
+  // engine-proposed assignments only pin a date and sequence today — they don't
+  // commit to a clock time until a human drags them. Do NOT conflate with
+  // sequenceOrder.
+  startMinuteOfDay Int?
+  estimatedHours   Float
+  status           ScheduleAssignmentStatus @default(PROPOSED)
+  proposedBy       String?
+  approvedBy       String?
+  approvedAt       DateTime?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  // Optional parent draft. Null means "committed to the live schedule" (or a
+  // legacy row from before drafts existed). onDelete: SetNull so deleting a
+  // draft leaves any committed assignments intact.
+  scheduleDraftId  String?
+  scheduleDraft    ScheduleDraft?           @relation(fields: [scheduleDraftId], references: [id], onDelete: SetNull)
+  lineItem         LineItem                 @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
+  station          Station                  @relation(fields: [stationId], references: [id], onDelete: Restrict)
 
   @@index([lineItemId])
   @@index([stationId])
   @@index([date])
+  @@index([scheduleDraftId])
 }
 
 // Historical record of real time taken, for validating the estimate_hours
@@ -396,16 +414,17 @@ model Actual {
 // "propose into a specific draft" feature. Today the draft only carries its own
 // configuration (name, window, strategy).
 model ScheduleDraft {
-  id          String              @id @default(cuid())
+  id          String               @id @default(cuid())
   name        String
   description String?
-  startDate   DateTime            @db.Date
+  startDate   DateTime             @db.Date
   weeks       Int
-  strategy    ScheduleStrategy    @default(BATCH_OPTIMIZE)
-  status      ScheduleDraftStatus @default(DRAFT)
+  strategy    ScheduleStrategy     @default(BATCH_OPTIMIZE)
+  status      ScheduleDraftStatus  @default(DRAFT)
   createdBy   String
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @updatedAt
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  assignments ScheduleAssignment[]
 
   @@index([status])
   @@index([startDate])
