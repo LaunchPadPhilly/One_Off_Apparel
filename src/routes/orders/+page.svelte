@@ -10,6 +10,44 @@
 	let { data, form }: PageProps = $props();
 	let uploading = $state(false);
 
+	// NEW: a native <input type="file" multiple> REPLACES its whole selection every
+	// time "Choose Files" is used again — clicking it a second time to add one more
+	// PDF silently drops whatever was picked first. Keeping our own accumulated list
+	// (deduped by name+size+lastModified) and writing it back into the input via a
+	// DataTransfer on every change is the standard workaround: the input still holds
+	// the full set for the form to submit, but picking again always ADDS instead of
+	// replacing. Each PDF still becomes its own order — this only fixes selection.
+	let fileInput: HTMLInputElement = $state()!;
+	let selectedFiles = $state<File[]>([]);
+
+	function fileKey(file: File) {
+		return `${file.name}:${file.size}:${file.lastModified}`;
+	}
+
+	function syncInputFromSelection() {
+		const transfer = new DataTransfer();
+		for (const file of selectedFiles) transfer.items.add(file);
+		fileInput.files = transfer.files;
+	}
+
+	function onFilesChosen() {
+		const picked = fileInput.files ? [...fileInput.files] : [];
+		const seen = new Set(selectedFiles.map(fileKey));
+		for (const file of picked) {
+			const key = fileKey(file);
+			if (!seen.has(key)) {
+				selectedFiles.push(file);
+				seen.add(key);
+			}
+		}
+		syncInputFromSelection();
+	}
+
+	function removeFile(index: number) {
+		selectedFiles.splice(index, 1);
+		syncInputFromSelection();
+	}
+
 	// NEW (2026-09-21): formats an order's live estimate summary (see
 	// estimateForDisplay.ts) into one short string for the "Est. hours" column.
 	function formatEstimate(estimate: { totalHours: number; estimableCount: number; unestimableCount: number }): string {
@@ -64,14 +102,43 @@
 					return async ({ update }) => {
 						await update();
 						uploading = false;
+						selectedFiles = [];
 					};
 				}}
 			>
-				<input type="file" name="files" accept="application/pdf" multiple required />
-				<button class="button" use:pressable type="submit" disabled={uploading}>
-					{uploading ? 'Reading PDFs…' : 'Import'}
+				<input
+					bind:this={fileInput}
+					onchange={onFilesChosen}
+					type="file"
+					name="files"
+					accept="application/pdf"
+					multiple
+					required
+				/>
+				<button class="button" use:pressable type="submit" disabled={uploading || selectedFiles.length === 0}>
+					{#if uploading}
+						Reading PDFs…
+					{:else if selectedFiles.length === 0}
+						Import
+					{:else}
+						Import {selectedFiles.length} PDF{selectedFiles.length === 1 ? '' : 's'}
+					{/if}
 				</button>
 			</form>
+
+			{#if selectedFiles.length > 0}
+				<ul class="picked-files">
+					{#each selectedFiles as file, i (fileKey(file))}
+						<li>
+							<span>{file.name}</span>
+							<button type="button" class="picked-files__remove" onclick={() => removeFile(i)} disabled={uploading}>
+								Remove
+							</button>
+						</li>
+					{/each}
+				</ul>
+				<p class="muted">Each PDF becomes its own order. Click "Choose Files" again to add more — it won't clear what's already picked.</p>
+			{/if}
 
 			{#if form?.message}
 				<p class="error">{form.message}</p>
@@ -218,6 +285,39 @@
 	.job-cell {
 		font-variant-numeric: tabular-nums;
 		font-weight: 600;
+	}
+
+	.picked-files {
+		list-style: none;
+		margin: 0.75rem 0 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+	}
+
+	.picked-files li {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 0.4rem 0.6rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		font-size: 0.9rem;
+	}
+
+	.picked-files__remove {
+		background: none;
+		border: none;
+		color: var(--ink-500);
+		cursor: pointer;
+		font-size: 0.85rem;
+		padding: 0;
+	}
+
+	.picked-files__remove:hover {
+		color: var(--danger-fg);
 	}
 
 	.estimate {
