@@ -436,6 +436,17 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   station or production-time formula for either. Needs a scope decision from Jeff: are these
   actually offered today, and if so, what are their formulas? Do not map them onto an
   existing station as a stand-in.
+- **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is a bare,
+  unstyled scaffold — a flat list of every `approved`/`in_progress` `schedule_assignments`
+  row with Start/Stop buttons, gated on the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already
+  used by the domain MCP tools. It exists only so Start/Stop → `started_at`/`completed_at`
+  → `check_completion` (on the last incomplete assignment for a line item) has somewhere to
+  run from. Not decided, not invented: the route path (`/schedule` is a placeholder, rename
+  freely), the actual layout/grouping (per-station queue? per-day? per-order? nothing says),
+  any visual design, and whether/when `LineItem.status` should move to `in_production` (Start
+  currently leaves it untouched — same category of gap as "when does `Order.status` become
+  `scheduled`," left alone rather than guessed). Do not treat this route's current shape as
+  a real spec — it's scaffolding pending a real answer on all four points above.
 
 ### Domain naming conventions to keep consistent
 
