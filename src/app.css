@@ -416,6 +416,25 @@ tbody tr:hover {
 	border-color: transparent;
 }
 
+/* Was referenced (orders/[id]/+page.svelte's CANCELLED badge) but never defined —
+   fixed as part of the schedule/orders redesign. Same danger palette as .badge--warn,
+   kept as its own class since "needs review" and "cancelled" are different meanings
+   even though today's token set only has one red pairing to draw from. */
+.badge--danger {
+	background: var(--danger-bg);
+	color: var(--danger-fg);
+	border-color: transparent;
+}
+
+/* A calmer, positive badge for "this is known/good" states — used for successful hour
+   estimates and non-warning schedule statuses, so those don't accidentally look like a
+   status closer to warm/attention-orange (which .badge's default already leans toward). */
+.badge--success {
+	background: var(--success-bg);
+	color: var(--success-fg);
+	border-color: transparent;
+}
+
 .alert {
 	padding: 0.85rem 1rem;
 	border-radius: var(--radius);

@@ -1,4 +1,4 @@
-import { estimateHours, MissingFormulaError } from './estimateHours';
+import { estimateHours, EstimationError } from './estimateHours';
 import type { AtRiskFlag, BacklogItem, CapacitySlot, ProposedAssignment, ProposeScheduleResult } from './types';
 
 // Shared-setup family a job belongs to, for the ATCS-style batching preference:
@@ -57,7 +57,14 @@ export function proposeSchedule(backlog: readonly BacklogItem[], capacity: reado
 		try {
 			estimate = estimateHours(item);
 		} catch (error) {
-			if (error instanceof MissingFormulaError) {
+			// NEW (2026-09-21): this used to only catch MissingFormulaError specifically.
+			// It now catches EstimationError instead, which is the shared parent class of
+			// BOTH MissingFormulaError ("we have no formula for this station at all") and
+			// MissingLineItemDataError ("the formula exists, but this one job is missing a
+			// field it needs"). Either way, the effect here is the same: we can't estimate
+			// this job's hours right now, so it gets flagged "at risk" and skipped, instead
+			// of crashing the whole schedule proposal for every other job too.
+			if (error instanceof EstimationError) {
 				atRisk.push({
 					lineItemId: item.id,
 					requiredStation: item.decorationType ?? item.finishingStep ?? 'unknown',
@@ -67,6 +74,9 @@ export function proposeSchedule(backlog: readonly BacklogItem[], capacity: reado
 				reasoning.push(`${item.id}: AT RISK — cannot estimate hours (${error.message})`);
 				continue;
 			}
+			// Any OTHER kind of error (a genuine bug, not "we can't estimate this yet") is
+			// re-thrown as-is, rather than swallowed — we only want to treat the two
+			// expected/known error types above as "just flag it and move on."
 			throw error;
 		}
 

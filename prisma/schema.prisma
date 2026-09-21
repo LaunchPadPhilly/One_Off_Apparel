@@ -245,6 +245,7 @@ enum McpScope {
   SCHEDULE_READ
   IMPORT_WRITE
   SCHEDULE_WRITE
+  ORDERS_READ
 }
 
 enum McpAuthorizationRequestStatus {
@@ -270,6 +271,11 @@ model Order {
   status           OrderStatus @default(NEEDS_REVIEW)
   importedBy       String
   createdAt        DateTime    @default(now())
+  // Free-text, human-entered — e.g. why a job ran late. Not written by any engine or
+  // MCP tool; only a person (or a correction applied through updateOrderFields) sets
+  // this. Surfaced in Reports next to late orders. See CLAUDE.md's Known open items for
+  // the still-undecided recurring-digest idea this was requested alongside.
+  notes            String?
   lineItems        LineItem[]
 }
 
@@ -290,6 +296,17 @@ model LineItem {
   // Finishing-oriented fields: meaningful when itemType is FINISHING,
   // null on DECORATION rows.
   finishingStep       FinishingStep?
+  // NEW (2026-09-21): is this a normal garment ("FLAT" — a t-shirt, hoodie, etc.) or
+  // headwear ("CAP")? We added this because embroidery pricing/timing math is
+  // completely different for caps vs regular garments — it's not just a different
+  // number, it's a different formula. Only matters for DECORATION rows; always null
+  // on FINISHING rows. See estimateHours.ts for where this actually gets used.
+  garmentStyle        GarmentStyle?
+  // NEW (2026-09-21): only filled in when garmentStyle is "CAP" — is the cap
+  // STRUCTURED (has a stiff front panel) or UNSTRUCTURED (soft, no stiff panel)?
+  // Caps use a different embroidery formula depending on this. Stays null for
+  // every non-cap row.
+  capConstruction     CapConstruction?
   // Either another LineItem's id, or the literal string "all_siblings"
   // (waits on every other line item under the same order). This is
   // deliberately a plain string, not a Prisma relation: a real FK
@@ -391,6 +408,17 @@ enum OrderStatus {
   SCHEDULED
   IN_PRODUCTION
   COMPLETE
+  // NEW (2026-09-21): this is what "deleting" an order actually does — we never
+  // remove the row from the database. Instead we just flip its status to
+  // CANCELLED. Why not a real delete? Because the order might already have line
+  // items, a proposed/approved schedule, or recorded actual hours attached to it,
+  // and deleting the order would delete all of that too (thanks to "cascade"
+  // rules on the foreign keys) — wiping out real production history. Setting
+  // status to CANCELLED instead just makes the order disappear from the active
+  // Orders list and stop showing up as something that can be scheduled, while
+  // everything about it stays in the database if anyone needs to look back at
+  // it later. See cancelOrder.ts for the code that does this.
+  CANCELLED
 }
 
 enum LineItemType {
@@ -430,6 +458,23 @@ enum WeightClass {
   THIN
   POLY
   BULKY
+}
+
+// NEW (2026-09-21): the two "shapes" of thing we decorate. A regular garment
+// (t-shirt, hoodie, sweatshirt...) is FLAT. A hat/beanie/etc. is CAP — caps get
+// hooped and sewn differently on the embroidery machine, so they need their own
+// formula instead of reusing the FLAT one.
+enum GarmentStyle {
+  FLAT
+  CAP
+}
+
+// NEW (2026-09-21): only relevant when GarmentStyle is CAP. A STRUCTURED cap has
+// a stiffened front panel; an UNSTRUCTURED cap doesn't. This changes how long the
+// embroidery machine setup takes.
+enum CapConstruction {
+  STRUCTURED
+  UNSTRUCTURED
 }
 
 enum ScheduleAssignmentStatus {

@@ -20,6 +20,13 @@ export const lineItemCandidateBaseSchema = z.object({
 	printLocation: z.enum(['FRONT', 'BACK', 'LEFT', 'RIGHT']).nullish(),
 	decorationType: z.enum(['SCREEN_PRINT', 'EMBROIDERY', 'DTF', 'DTG']).nullish(),
 	finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG']).nullish(),
+	// NEW (2026-09-21): flat garment vs headwear — decoration-only, meaningful today for
+	// embroidery's estimate_hours formula. See prisma/schema.prisma's
+	// LineItem.garmentStyle comment. `.nullish()` means this field is optional and can
+	// be null/undefined — most existing line items won't have it set yet.
+	garmentStyle: z.enum(['FLAT', 'CAP']).nullish(),
+	// NEW (2026-09-21): only meaningful when garmentStyle above is 'CAP'.
+	capConstruction: z.enum(['STRUCTURED', 'UNSTRUCTURED']).nullish(),
 	// Another line item's `localId` in this same order candidate, or the literal
 	// "all_siblings" sentinel — never a real LineItem.id (none exist yet at import time).
 	dependsOn: z.string().nullish(),
@@ -78,10 +85,19 @@ export const orderCorrectionSchema = z
 	.object({
 		customerName: z.string().min(1),
 		externalShipDate: z.iso.date(),
-		internalDueDate: z.iso.date()
+		internalDueDate: z.iso.date(),
+		// Free-text, human-entered only — e.g. why a job ran late. See CLAUDE.md.
+		notes: z.string()
 	})
 	.partial();
 
+// This line builds a "correction" schema by starting from the base schema above and
+// removing two fields that don't make sense to edit after the fact (localId,
+// dependsOn), then making everything else optional (.partial()) so a correction can
+// touch just one field without having to resupply every other one. Because it's
+// DERIVED from lineItemCandidateBaseSchema rather than a separate hand-written list of
+// fields, the new garmentStyle/capConstruction fields added above automatically became
+// editable here too — nothing extra had to be added in this specific line.
 export const lineItemCorrectionSchema = lineItemCandidateBaseSchema.omit({ localId: true, dependsOn: true }).partial();
 
 export type OrderCorrection = z.infer<typeof orderCorrectionSchema>;

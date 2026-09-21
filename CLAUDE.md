@@ -17,18 +17,24 @@ read it before touching any order/schedule/line-item logic.
 
 **Build status:** schema (`prisma/schema.prisma`), the engine (`src/lib/server/engine/`),
 the Hoops import persistence layer (`src/lib/server/hoops/`), the schedule persistence
-layer (`src/lib/server/schedule/`), and all six domain MCP tools
-(`src/lib/server/mcp/tools.ts`) are built and merged. **Still a shell, not end-to-end
-schedulable:** `estimate_hours` has real numbers for none of the six stations — every
-station still throws `MissingFormulaError` (see the engine section and Known open items)
-— so `propose_schedule`/`simulate_change` will flag every real job at_risk until the
-client's actual Consolidated IT rate tables land. No file parser exists for the Hoops
-export itself (format still undocumented); `import_hoops_export` takes already-structured
-data, not a raw file. Also record here the decisions Play 13 asks for: the
-MCP_SERVER_TOKEN choice, which scopes replace DATA_READ / REPORTS_READ and the default
-grant (three domain scopes — `SCHEDULE_READ`, `IMPORT_WRITE`, `SCHEDULE_WRITE` — were added
-alongside the originals for the six domain tools, not yet a full replacement/default-grant
-decision), and who owns deployment, data and UI.
+layer (`src/lib/server/schedule/`), all six domain MCP tools (`src/lib/server/mcp/tools.ts`),
+and a first UI pass — Orders (`src/routes/orders/`, plus `/orders/archive`), an extended
+Schedule/Production board (`src/routes/schedule/`), and a minimal Reports page
+(`src/routes/reports/`) — are built and merged. Real Hoops PDF extraction now exists
+(`src/lib/server/hoops/extractOrderFromPdf.ts`, via the Claude Messages API — needs
+`ANTHROPIC_API_KEY`) rather than a deterministic parser. **Still not end-to-end
+schedulable:** `estimate_hours` has real numbers for two of the six stations
+(`screen_print_auto`, `embroidery`) — the other four (matte, relabel, fold_bag, hang_tag)
+still throw `MissingFormulaError` (see the engine section and Known open items). Even for
+the two real formulas, `propose_schedule` still needs `Station`/`CapacityCalendar` rows
+that don't exist anywhere in the real database yet — no station or its daily capacity has
+ever been entered, and nothing in the app can create one today — so every real job still
+comes back at_risk, just with an honest reason (no formula / no capacity / this job is
+missing a required field) instead of one blanket cause. Also record here the decisions Play 13
+asks for: the MCP_SERVER_TOKEN choice, which scopes replace DATA_READ / REPORTS_READ and
+the default grant (four domain scopes now — `SCHEDULE_READ`, `IMPORT_WRITE`,
+`SCHEDULE_WRITE`, `ORDERS_READ` — added alongside the originals, not yet a full
+replacement/default-grant decision), and who owns deployment, data and UI.
 
 ## Human Activation Gate Policy
 
@@ -210,12 +216,20 @@ One row per order.
 | `customer_name` | |
 | `external_ship_date` | promised to the customer |
 | `internal_due_date` | what production actually works toward |
-| `status` | `needs_review`, `confirmed`, `scheduled`, `in_production`, `complete` |
+| `status` | `needs_review`, `confirmed`, `scheduled`, `in_production`, `complete`, `cancelled` |
 | `imported_by` | who brought it in (usually "claude") |
 | `created_at` | |
 
 `orders.status` only flips to `complete` automatically, via `check_completion()` — see
 Engine section. Never set it to `complete` directly from application code.
+
+`cancelled` is Orders' "delete" (`cancelOrder.ts`, 2026-09-21) — deliberately
+non-destructive: it only changes `status`, never removes the order or its line items,
+schedule assignments or actuals. Blocked once an order is already `complete` (nothing
+left to cancel) or already `cancelled`. A cancelled order drops out of the active
+`/orders` list and `fetchBacklog()` (which only ever selects `confirmed` orders) with no
+extra code, and shows up in `/orders/archive` alongside `complete` orders — that route
+is a filtered view over both terminal statuses now, not a second archiving mechanism.
 
 #### `line_items`
 One row per **design/print job or finishing step** on an order.
@@ -231,11 +245,13 @@ One row per **design/print job or finishing step** on an order.
 | `finishing_step` | matte / relabel / fold & bag / hang tag — **finishing rows only**, blank on decoration rows |
 | `depends_on` | **finishing rows only.** Either another `line_items.id` (this finish waits on one specific job — e.g. matte waits on the print it's finishing) or the literal string `"all_siblings"` (this finish waits on every other line item under the same order — this is how fold & bag / final packaging works: it can't start until every decoration *and* every other finish on that order is done) |
 | `status` | `needs_review`, `blocked`, `in_production`, `complete`. Finishing rows are created with `status: blocked` and only become schedulable once `check_completion()` unlocks them. |
-| `weight_class` | thin, poly, or bulky |
+| `weight_class` | thin, poly, or bulky — meaningful for **flat** garments; null/ignored when `garment_style` is `cap` |
+| `garment_style` | `flat` or `cap` — **decoration rows only**, meaningful today for embroidery's formula (flat and cap use genuinely different rate tables, not a weight-class variant — see estimate_hours below) |
+| `cap_construction` | `structured` or `unstructured` — **only meaningful when `garment_style` is `cap`**, null otherwise |
 | `apparel_color` | text — the garment color (e.g. "Grey") |
-| `ink_color_count` | int — number of colors in the decoration itself. This is the "X" variable in the spreadsheet formulas, used for both screen-print ink setup and embroidery thread-change time. Do not confuse with `apparel_color` — they used to be conflated into one ambiguous `colors` field; they are not the same thing. |
+| `ink_color_count` | int — number of colors in the decoration itself. Used for screen-print ink setup and embroidery thread-change time — but is the "X" variable in screen print's formula and the **"Y" variable in embroidery's** (the letter mapping isn't consistent across stations — see estimate_hours below). Do not confuse with `apparel_color` — they used to be conflated into one ambiguous `colors` field; they are not the same thing. |
 | `screens` | how many screens (screen print only) |
-| `stitch_count` | embroidery only |
+| `stitch_count` | embroidery only — the "X" variable in embroidery's formula (not `ink_color_count`) |
 | `quantity` | total units |
 | `size_breakdown` | units per size |
 | `estimated_hours` | jsonb — how long it should take, per station |
@@ -312,17 +328,80 @@ way.)
 #### `estimate_hours(item)`
 Works out how long one job takes. Each station's formula is a direct port of one table from
 the client's own "Consolidated IT" spreadsheet tab — unit-tested against the spreadsheet's
-own numbers, not re-derived. Variables throughout: `X` = ink/thread color count
-(`ink_color_count`), `Y` = screen count (screen print only), `Z` = quantity.
+own numbers, not re-derived. Variables are **not consistent across stations** — confirmed
+directly with the client per station, do not assume one station's letter mapping applies to
+another:
+- `screen_print_auto`: `X` = ink color count (`ink_color_count`), `Y` = screen count
+  (`screens`), `Z` = quantity.
+- `embroidery`: `X` = stitch count (`stitch_count`), `Y` = thread/ink color count
+  (`ink_color_count`), `Z` = quantity — the **opposite** pairing of X/Y from screen print.
 
 **`screen_print_auto`** — per print location. `screens < 5` and `screens > 4` are two
-*different* rate regimes, not one flat table:
+*different* rate regimes, not one flat table. Confirmed with the client (2026-09-18) and
+implemented in `estimateHours.ts`:
 
-<!-- INCOMPLETE — cut off mid-edit. Needs: the actual screen_print_auto rate table for
-both regimes (screens < 5 and screens > 4), then the same per the client's Consolidated
-IT sheet for embroidery, matte, relabel, fold_bag and hang_tag (see Known open items
-below for which of those don't have a portable formula at all yet). Until this is
-filled in, estimate_hours must keep throwing MissingFormulaError rather than guess. -->
+```
+initial_units = { thin: 100, poly: 80, bulky: 50 }        // does not vary by regime
+rate_per_hr (screens < 5)  = { thin: 360, poly: 288, bulky: 180 }
+rate_per_hr (screens > 4)  = { thin: 180, poly: 144, bulky: 90 }
+
+setup = screens*5 + ink_color_count*15 + 30 + 30           // minutes
+run   = max(0, quantity - initial_units[weight_class]) * (60 / rate_per_hr[weight_class])
+hours = (setup + run) / 60
+```
+
+**`embroidery`** — confirmed with the client (2026-09-21) and implemented in
+`estimateHours.ts`. Flat garments and headwear ("Cap") are genuinely different formulas,
+not a weight-class variant of one table — this is why `LineItem` gained `garmentStyle`
+(`flat`/`cap`) and `capConstruction` (`structured`/`unstructured`, cap-only) fields. Blank
+cells in the client's table were confirmed to mean "identical to the row above," not
+zero/N/A — several rows below intentionally share a constant for that reason:
+
+```
+thread_change = ink_color_count * 5                          // minutes, same for flat and cap
+
+// flat (by weight_class)
+setup_boxing_divisor = { thin: 240, poly: 180, bulky: 120 }
+hooping_factor        = { thin: 1.5, poly: 2,   bulky: 1.5 }
+load_unload_factor    = 2                                     // same across all three
+cleanup_factor         = { thin: 4,   poly: 6,   bulky: 4 }
+sew_rate_divisor       = 850                                   // same across all three
+
+// cap (by cap_construction)
+setup_boxing_divisor = 240                                     // same for both
+hooping_factor        = { structured: 1,   unstructured: 2.5 }
+load_unload_factor    = 1                                       // same for both
+cleanup_factor         = 1.5                                    // same for both
+sew_rate_divisor       = 650                                    // same for both, lower than flat's 850
+
+setup_boxing = quantity * (60 / setup_boxing_divisor)
+hooping      = (quantity/6) * hooping_factor
+load_unload  = (quantity/6) * load_unload_factor
+cleanup      = (quantity/6) * cleanup_factor
+sew_time     = (quantity/6) * (stitch_count / sew_rate_divisor)
+
+hours = (setup_boxing + thread_change + hooping + load_unload + cleanup + sew_time) / 60
+```
+
+**Not implemented: "Steaming (IF Dark/Pigment)".** The client's table has a real Steaming
+step for flat garments (`quantity * (60/360)` minutes, N/A for caps), conditional on the
+garment being dark or using pigment ink. Nothing in the schema signals that today —
+`apparel_color` is free text, not a light/dark flag — and inferring "dark" from a color
+string would be exactly the kind of guessed business logic CLAUDE.md says to ask about
+instead. Every embroidery estimate is therefore a slight underestimate for dark/pigment
+jobs until a real signal exists (a new boolean field, most likely). `estimateHours.ts`
+flags this in a doc comment; it is not silently wrong, just deliberately incomplete.
+
+Still open, per Known open items below: `screen_print_auto`'s "Manual" variant (the
+client's own sheet marks it "never fully developed" — every cell blank, nothing to port),
+matte and fold_bag (blocked on new schema fields, not just an unported formula), relabel
+(no formula exists in the source spreadsheet at all — a question for the client, not a
+port), and DTF/DTG (no station or formula defined at all). `estimate_hours` keeps throwing
+`MissingFormulaError` for all of those until each is resolved. Separately,
+`MissingLineItemDataError` (not a station-level gap) fires when a station's formula is
+real but one specific job is missing a required field — e.g. an embroidery line item with
+no `garmentStyle` set yet; a human resolves this by editing the line item, not by a
+schema/decision change.
 
 #### `check_completion(line_item_id)`
 Runs the moment the "Stop" button fires for the **last** station on a line item. This is
@@ -386,6 +465,7 @@ Dependency ordering is now handled entirely by `line_items.depends_on` + `check_
 | `propose_schedule(date_range)` | builds a suggested schedule, does not save it |
 | `commit_schedule(assignment_ids[], approved_by)` | makes a proposed schedule official, writes to `schedule_assignments` + `audit_log` |
 | `simulate_change(change)` | checks "what if" (a rush order, a moved job) without actually changing anything |
+| `add_order_note(hoops_order_id, note)` | *(added 2026-09-18, not in the original design)* appends a dated, attributed note to an order — the way a note given in conversation reaches `Order.notes` (and from there the order's page and Reports) without the web form |
 
 Each of these is a real MCP tool registered the same way as any other tool in
 `src/lib/server/mcp/tools.ts`, gated by `guardedToolResult` and the scope system described
@@ -436,17 +516,100 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   station or production-time formula for either. Needs a scope decision from Jeff: are these
   actually offered today, and if so, what are their formulas? Do not map them onto an
   existing station as a stand-in.
-- **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is a bare,
-  unstyled scaffold — a flat list of every `approved`/`in_progress` `schedule_assignments`
-  row with Start/Stop buttons, gated on the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already
-  used by the domain MCP tools. It exists only so Start/Stop → `started_at`/`completed_at`
-  → `check_completion` (on the last incomplete assignment for a line item) has somewhere to
-  run from. Not decided, not invented: the route path (`/schedule` is a placeholder, rename
-  freely), the actual layout/grouping (per-station queue? per-day? per-order? nothing says),
-  any visual design, and whether/when `LineItem.status` should move to `in_production` (Start
-  currently leaves it untouched — same category of gap as "when does `Order.status` become
-  `scheduled`," left alone rather than guessed). Do not treat this route's current shape as
-  a real spec — it's scaffolding pending a real answer on all four points above.
+- **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
+  the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
+  covers the whole flow, not just Start/Stop: a date window (default 28 days from
+  today — an arbitrary "3-4 weeks" pick, not a spec), grouped by date, showing
+  proposed/approved/in-progress assignments with Propose, Approve (`commit_schedule`),
+  Edit/Remove (proposed only — reassigning station/date, or deleting the draft so its
+  line item returns to the backlog), and Start/Stop → `started_at`/`completed_at` →
+  `check_completion`. Received a visual/UX pass (2026-09-21): a stat-tile summary
+  (jobs placed / jobs at risk) instead of a plain sentence, at-risk jobs grouped into
+  three collapsible cards by *why* they're blocked (no formula / missing job data / no
+  capacity — the same three-way split `explainAtRisk.ts`'s `AtRiskCategory` already
+  made, now with an icon+color per category instead of one undifferentiated list), and
+  a standing banner when zero `Station`/`CapacityCalendar` rows exist at all (rather
+  than only surfacing that after a Propose click). Still not decided, not invented: the
+  route path (`/schedule` is a placeholder, rename freely), the actual layout/grouping
+  (per-station queue? per-day? per-order? this is still a day-grouped flat list, just a
+  better-looking one), the 28-day default window, and whether/when `LineItem.status`
+  should move to `in_production` (Start currently leaves it untouched — same category
+  of gap as "when does `Order.status` become `scheduled`," left alone rather than
+  guessed). Do not treat this route's current shape as a real spec — it's scaffolding
+  pending a real answer on all four points above, just no longer an unstyled one.
+- **Per-line-item and per-order hour estimates, shown before scheduling
+  (2026-09-21).** `estimateForDisplay.ts` wraps the same `estimateHours()` the engine
+  uses and turns its result (or `MissingFormulaError`/`MissingLineItemDataError`) into
+  a display-ready shape. Shown on the Orders list (a live per-order total + a "N
+  pending" count) and on an order's detail page (a per-line-item badge, plus an
+  order-level stat row). Deliberately **not persisted** to `LineItem.estimatedHours`
+  (that column stays dormant/unused, as it already was) — computed fresh on every page
+  load instead, so it can never go stale relative to a line item a human just edited.
+  Claude is not involved in computing any of these numbers or in building
+  `propose_schedule`'s output — both stay 100% deterministic engine code, per this
+  file's non-negotiable design principles; "Claude helps" here means explaining
+  already-computed results in conversation, not an LLM call added to either page.
+- **Real Hoops export samples now exist** (4 PDFs, provided 2026-09-18: Jobs 100127,
+  100128, 100113, 100110) — the format is no longer undocumented in the sense of "we've
+  never seen one," but extraction still has no deterministic parser and isn't validated at
+  scale; treat these as one reference set, not a guarantee every future export looks the
+  same. They confirmed the "Job <number>" line is the order identifier (`hoopsOrderId`) and
+  the decoration+finishing line-item grouping — but also surfaced five concrete gaps the
+  schema doesn't cover yet, each needing a real answer, not a guess:
+  - **"Patch Install" (Job 100113) matches no `decoration_type` or `finishing_step` value.**
+    Not screen print/embroidery/DTF/DTG, not matte/relabel/fold&bag/hang tag. No station,
+    no formula. Needs a decision from Jeff on what it is and where it runs.
+  - **No `weight_class` signal for headwear** (Job 100128's caps) — **partially
+    resolved (2026-09-21)**: `LineItem.garmentStyle` (`flat`/`cap`) and
+    `capConstruction` (`structured`/`unstructured`, cap-only) now exist and embroidery's
+    formula uses them instead of `weight_class` when `garment_style` is `cap` (see
+    estimate_hours above). What's still open: `extractOrderFromPdf.ts` does not populate
+    these new fields yet — every sample's weight-class hint ("Thin - Trail Network",
+    "Fleece/Bulky") still reads as textile-specific, and caps still default `weightClass`
+    to `THIN` with a flagged low-confidence guess, same interim behavior as before. Real
+    caps therefore still hit `MissingLineItemDataError` (garment_style not set) until
+    either extraction is taught to recognize headwear, or a person sets `garmentStyle`
+    manually via the order's line-item edit form (now exposed there).
+  - **Only one date ("Deadline") appears per job, not two.** The schema wants
+    `external_ship_date` (promised to customer) and `internal_due_date` (production's real
+    target) as distinct fields; every sample gives one date. Interim behavior: extraction
+    maps the one date to both fields and always flags this in `confidenceFlags`. There may
+    be a buffer policy (see the cure/dry-buffer open item above) that should separate them
+    instead — this hasn't been confirmed either way.
+  - **Administrative fee rows** ("One-Time Digitizing Fee," "Ink Color Change") appear in
+    the job details table but aren't production work — they must not become `LineItem`
+    rows. Extraction must exclude them (and flag that they were excluded), not force them
+    into a decoration/finishing shape.
+  - **`print_location` (front/back/left/right) doesn't cover every real position** — "Right
+    of Back Seam," "Sleeve/Collar" appear in samples and fit none of the four values.
+    Extraction should leave `printLocation` null and flag the raw text rather than guess
+    the closest enum value.
+- **PDF extraction cost/model choice not confirmed with the client.**
+  `extractOrderFromPdf.ts` calls the Claude Messages API (`claude-sonnet-5`) per uploaded
+  PDF — real per-import cost, no caching, no cheaper-model fallback considered. Needs
+  `ANTHROPIC_API_KEY` in `.env.example`/`web_secret_keys` (added) but not yet in any real
+  deployed secret. Revisit the model choice once real import volume/cost is known.
+- **Reports (minimal) gaps.** `/reports` only shows what the schema already supports
+  (estimate-vs-actual variance by station and by line item, on-time completion,
+  currently-blocked count, a recent-changes feed off `audit_log`). One thing it still
+  can't show without new work: a historical at-risk trend — `propose_schedule`'s
+  `flag_at_risk` results are never persisted (see the engine section), so only a live
+  snapshot is possible, not a trend over time. Not added silently; needs a decision on
+  whether it's worth new persistence.
+- **`Order.notes` is free-text, human-entered only** — e.g. why a job ran late. Nothing
+  writes it automatically. Two paths reach it, both landing in the same field (no
+  separate write path): the order's page (`updateOrderFields`), or telling Claude in
+  conversation (the `add_order_note` MCP tool, matched by `hoops_order_id` since that's
+  what a person actually says) — the latter appends a dated, attributed line rather than
+  overwriting, since conversational notes are observations stacking up, not a field
+  someone's deliberately rewriting. `/reports` surfaces it next to late orders. Two
+  things this still doesn't do, both explicitly deferred rather than built: (1) any actual
+  pattern-mining across accumulated notes ("Claude can learn off of that") — today a human
+  or a future Claude session just reads the raw text; nothing summarizes trends across
+  orders; (2) a recurring daily/weekly digest — no delivery mechanism (email/Slack/
+  in-app), no scheduler, and no cadence decided (the request itself said "maybe daily
+  maybe weekly"). Needs an actual decision on cadence + delivery before building, not a
+  guess.
 
 ### Domain naming conventions to keep consistent
 

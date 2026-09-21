@@ -38,6 +38,7 @@ variable "web_secret_keys" {
   type        = list(string)
   default = [
     "DATABASE_URL",
+    "ANTHROPIC_API_KEY",
     "GOOGLE_ALLOWED_DOMAIN", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
     "INITIAL_ADMIN_EMAIL",
     "MCP_OAUTH_ISSUER_URL", "MCP_OAUTH_SCOPES", "MCP_PUBLIC_URL",

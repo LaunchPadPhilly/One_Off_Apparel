@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "McpScope" ADD VALUE 'ORDERS_READ';

@@ -1,6 +1,8 @@
 import type {
+	CapConstruction,
 	DecorationType,
 	FinishingStep,
+	GarmentStyle,
 	LineItemType,
 	WeightClass
 } from '../../../../prisma/generated/prisma/enums';
@@ -25,6 +27,12 @@ export interface EstimateHoursInput {
 	stitchCount?: number | null;
 	quantity: number;
 	weightClass: WeightClass;
+	// NEW (2026-09-21): decoration-only, meaningful today for embroidery's
+	// estimate_hours formula — see prisma/schema.prisma's LineItem.garmentStyle
+	// comment. The `?` marks these as optional and `| null` allows null too, matching
+	// how they're stored in the database (a line item might not have these set yet).
+	garmentStyle?: GarmentStyle | null;
+	capConstruction?: CapConstruction | null;
 }
 
 export interface EstimateHoursResult {

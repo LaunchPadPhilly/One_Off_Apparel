@@ -15,7 +15,8 @@ import type { DateRange } from './types';
 export async function fetchBacklog(): Promise<BacklogItem[]> {
 	const lineItems = await prisma.lineItem.findMany({
 		where: { status: LineItemStatus.NEEDS_REVIEW, order: { status: OrderStatus.CONFIRMED } },
-		include: { order: { select: { internalDueDate: true } } }
+		include: { order: { select: { internalDueDate: true } } },
+		distinct: ['id']
 	});
 
 	return lineItems.map((item) => ({
