@@ -39,7 +39,12 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			internalDueDate: order.internalDueDate.toISOString().slice(0, 10),
 			status: order.status,
 			importedBy: order.importedBy,
-			notes: order.notes
+			notes: order.notes,
+			// NEW: pre-production approval gates — see buildBacklogAndCapacity.ts's
+			// fetchBacklog(). Until these are set, a CONFIRMED order still can't be
+			// scheduled; exposed here so there's actually a way to set them.
+			blankOrderingStatus: order.blankOrderingStatus,
+			customerApprovalStatus: order.customerApprovalStatus
 		},
 		// NEW (2026-09-21): shape each raw database row into exactly the fields the
 		// Svelte template needs, in plain, display-ready formats (e.g. the date gets
@@ -75,6 +80,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			// change them. They'll be null for line items nobody has set them on yet.
 			garmentStyle: item.garmentStyle,
 			capConstruction: item.capConstruction,
+			// NEW: the artwork-approval gate — decoration rows only, null on finishing
+			// rows. Same fetchBacklog() reasoning as Order.blankOrderingStatus above.
+			artworkApprovalStatus: item.artworkApprovalStatus,
 			apparelColor: item.apparelColor,
 			inkColorCount: item.inkColorCount,
 			screens: item.screens,
@@ -100,7 +108,7 @@ export const actions: Actions = {
 		const user = requireScopePage(locals.user, 'IMPORT_WRITE', url.pathname);
 		const data = await request.formData();
 		const patch: Record<string, string> = {};
-		for (const key of ['customerName', 'externalShipDate', 'internalDueDate']) {
+		for (const key of ['customerName', 'externalShipDate', 'internalDueDate', 'blankOrderingStatus', 'customerApprovalStatus']) {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = value.trim();
 		}
@@ -124,7 +132,7 @@ export const actions: Actions = {
 		// up a field if the form actually sent a non-empty value for it, so leaving a
 		// dropdown on its blank "—" option just means "don't change this field," not
 		// "set it to empty."
-		for (const key of ['design', 'apparelColor', 'weightClass', 'garmentStyle', 'capConstruction']) {
+		for (const key of ['design', 'apparelColor', 'weightClass', 'garmentStyle', 'capConstruction', 'artworkApprovalStatus']) {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = value.trim();
 		}

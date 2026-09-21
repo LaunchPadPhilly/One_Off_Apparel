@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
+import { ArtworkApprovalStatus, BlankOrderingStatus, CustomerApprovalStatus } from '../../../../prisma/generated/prisma/enums';
 
 /**
  * Candidate data for one line item, as already extracted from a Hoops export — by
@@ -87,7 +88,15 @@ export const orderCorrectionSchema = z
 		externalShipDate: z.iso.date(),
 		internalDueDate: z.iso.date(),
 		// Free-text, human-entered only — e.g. why a job ran late. See CLAUDE.md.
-		notes: z.string()
+		notes: z.string(),
+		// NEW: the pre-production approval gates buildBacklogAndCapacity.ts's
+		// fetchBacklog() requires (adopted from the schedule-creation-workflow branch).
+		// Not part of the Hoops import candidate — these aren't read off the export,
+		// they're set afterward as the shop actually orders blanks / gets customer
+		// sign-off. Without a way to set them, no order could ever reach the schedule
+		// backlog through the UI.
+		blankOrderingStatus: z.enum(BlankOrderingStatus),
+		customerApprovalStatus: z.enum(CustomerApprovalStatus)
 	})
 	.partial();
 
@@ -98,7 +107,16 @@ export const orderCorrectionSchema = z
 // DERIVED from lineItemCandidateBaseSchema rather than a separate hand-written list of
 // fields, the new garmentStyle/capConstruction fields added above automatically became
 // editable here too — nothing extra had to be added in this specific line.
-export const lineItemCorrectionSchema = lineItemCandidateBaseSchema.omit({ localId: true, dependsOn: true }).partial();
+export const lineItemCorrectionSchema = lineItemCandidateBaseSchema
+	.omit({ localId: true, dependsOn: true })
+	.extend({
+		// NEW: same reasoning as Order.blankOrderingStatus/customerApprovalStatus above —
+		// the artwork-approval gate, but per decoration line item rather than per order.
+		// Null on finishing rows (checked by the caller, not enforced here — same pattern
+		// updateLineItemFields already uses for every other field).
+		artworkApprovalStatus: z.enum(ArtworkApprovalStatus)
+	})
+	.partial();
 
 export type OrderCorrection = z.infer<typeof orderCorrectionSchema>;
 export type LineItemCorrection = z.infer<typeof lineItemCorrectionSchema>;

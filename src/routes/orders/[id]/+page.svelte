@@ -55,6 +55,24 @@
 				<label>Customer <input name="customerName" value={data.order.customerName} /></label>
 				<label>External ship date <input name="externalShipDate" type="date" value={data.order.externalShipDate} /></label>
 				<label>Internal due date <input name="internalDueDate" type="date" value={data.order.internalDueDate} /></label>
+				<label>
+					Blanks ordering
+					<select name="blankOrderingStatus">
+						<option value="NOT_ORDERED" selected={data.order.blankOrderingStatus === 'NOT_ORDERED'}>Not ordered</option>
+						<option value="ORDERED" selected={data.order.blankOrderingStatus === 'ORDERED'}>Ordered</option>
+						<option value="ISSUE" selected={data.order.blankOrderingStatus === 'ISSUE'}>Issue</option>
+						<option value="RECEIVED" selected={data.order.blankOrderingStatus === 'RECEIVED'}>Received</option>
+					</select>
+				</label>
+				<label>
+					Customer approval
+					<select name="customerApprovalStatus">
+						<option value="NOT_SENT" selected={data.order.customerApprovalStatus === 'NOT_SENT'}>Not sent</option>
+						<option value="PENDING_APPROVAL" selected={data.order.customerApprovalStatus === 'PENDING_APPROVAL'}>Pending</option>
+						<option value="CHANGES_REQUESTED" selected={data.order.customerApprovalStatus === 'CHANGES_REQUESTED'}>Changes requested</option>
+						<option value="APPROVED" selected={data.order.customerApprovalStatus === 'APPROVED'}>Approved</option>
+					</select>
+				</label>
 				<label class="notes-field">
 					Notes (e.g. why a job ran late — Nate/Toby's call, nothing infers this)
 					<textarea name="notes" rows="3">{data.order.notes ?? ''}</textarea>
@@ -65,6 +83,8 @@
 			<dl>
 				<div><dt>Ship date</dt><dd>{data.order.externalShipDate}</dd></div>
 				<div><dt>Due date</dt><dd>{data.order.internalDueDate}</dd></div>
+				<div><dt>Blanks</dt><dd>{data.order.blankOrderingStatus}</dd></div>
+				<div><dt>Customer approval</dt><dd>{data.order.customerApprovalStatus}</dd></div>
 			</dl>
 			{#if data.order.notes}
 				<p><strong>Notes:</strong> {data.order.notes}</p>
@@ -144,6 +164,11 @@
 					{#if item.reviewConfidence !== null && item.reviewConfidence < 0.6}
 						<span class="badge badge--warn">low confidence ({item.reviewConfidence})</span>
 					{/if}
+					{#if item.artworkApprovalStatus}
+						<span class="badge" class:badge--success={item.artworkApprovalStatus === 'APPROVED'} class:badge--warn={item.artworkApprovalStatus !== 'APPROVED'}>
+							artwork: {item.artworkApprovalStatus}
+						</span>
+					{/if}
 					<!-- NEW (2026-09-21): this job's own live estimate — a plain success-toned
 					     badge when we can compute it, or a warn-toned badge with the reason in
 					     a hover tooltip when we can't yet (missing formula vs missing job data;
@@ -195,6 +220,19 @@
 									<option value="" selected={!item.capConstruction}>—</option>
 									<option value="STRUCTURED" selected={item.capConstruction === 'STRUCTURED'}>Structured</option>
 									<option value="UNSTRUCTURED" selected={item.capConstruction === 'UNSTRUCTURED'}>Unstructured</option>
+								</select>
+							</label>
+							<!-- NEW: the artwork-approval gate fetchBacklog() requires before this
+							     row can be scheduled. Blank "—" means "don't change," same pattern
+							     as garmentStyle/capConstruction above. -->
+							<label>
+								Artwork approval
+								<select name="artworkApprovalStatus">
+									<option value="" selected={!item.artworkApprovalStatus}>—</option>
+									<option value="NOT_SUBMITTED" selected={item.artworkApprovalStatus === 'NOT_SUBMITTED'}>Not submitted</option>
+									<option value="PENDING_APPROVAL" selected={item.artworkApprovalStatus === 'PENDING_APPROVAL'}>Pending</option>
+									<option value="REVISION_REQUESTED" selected={item.artworkApprovalStatus === 'REVISION_REQUESTED'}>Revision requested</option>
+									<option value="APPROVED" selected={item.artworkApprovalStatus === 'APPROVED'}>Approved</option>
 								</select>
 							</label>
 						{/if}
