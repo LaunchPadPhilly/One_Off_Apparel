@@ -3,6 +3,7 @@ import { prisma } from '$lib/server/prisma';
 import { hasGrantedScope, requireScopePage } from '$lib/server/auth/guards';
 import { startAssignment } from '$lib/server/schedule/startAssignment';
 import { stopAssignment } from '$lib/server/schedule/stopAssignment';
+import { listDrafts } from '$lib/server/schedule/draft';
 import { ScheduleAssignmentStatus } from '../../../prisma/generated/prisma/enums';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -17,17 +18,21 @@ import type { Actions, PageServerLoad } from './$types';
 export const load: PageServerLoad = async ({ locals, url }) => {
 	requireScopePage(locals.user, 'SCHEDULE_READ', url.pathname);
 
-	const assignments = await prisma.scheduleAssignment.findMany({
-		where: { status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] } },
-		include: {
-			lineItem: { select: { id: true, design: true, itemType: true, decorationType: true, finishingStep: true, orderId: true } },
-			station: { select: { id: true, name: true } }
-		},
-		orderBy: [{ stationId: 'asc' }, { sequenceOrder: 'asc' }]
-	});
+	const [assignments, drafts] = await Promise.all([
+		prisma.scheduleAssignment.findMany({
+			where: { status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] } },
+			include: {
+				lineItem: { select: { id: true, design: true, itemType: true, decorationType: true, finishingStep: true, orderId: true } },
+				station: { select: { id: true, name: true } }
+			},
+			orderBy: [{ stationId: 'asc' }, { sequenceOrder: 'asc' }]
+		}),
+		listDrafts()
+	]);
 
 	return {
 		canAct: hasGrantedScope(locals.user, 'SCHEDULE_WRITE'),
+		canCreate: hasGrantedScope(locals.user, 'SCHEDULE_WRITE'),
 		assignments: assignments.map((assignment) => ({
 			id: assignment.id,
 			status: assignment.status,
@@ -36,6 +41,16 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			startedAt: assignment.startedAt?.toISOString() ?? null,
 			station: assignment.station,
 			lineItem: assignment.lineItem
+		})),
+		drafts: drafts.map((draft) => ({
+			id: draft.id,
+			name: draft.name,
+			startDate: draft.startDate.toISOString().slice(0, 10),
+			weeks: draft.weeks,
+			strategy: draft.strategy,
+			status: draft.status,
+			createdBy: draft.createdBy,
+			createdAt: draft.createdAt.toISOString()
 		}))
 	};
 };

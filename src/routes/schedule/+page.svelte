@@ -14,8 +14,15 @@
 </svelte:head>
 
 <div class="page" in:fly={screenEnter} out:fade={screenExit}>
-	<span class="eyebrow">Production board</span>
-	<h1>Schedule</h1>
+	<div class="header-row">
+		<div>
+			<span class="eyebrow">Production board</span>
+			<h1>Schedule</h1>
+		</div>
+		{#if data.canCreate}
+			<a class="button" use:pressable href="/schedule/new">Create schedule</a>
+		{/if}
+	</div>
 	<p class="muted">
 		Provisional scaffolding — no layout, grouping or route path has been decided yet. See
 		CLAUDE.md's "Production board (provisional)" open item.
@@ -24,6 +31,38 @@
 	{#if form?.message}
 		<p class="error">{form.message}</p>
 	{/if}
+
+	<section class="card">
+		<div class="card__title">
+			<h2>Drafts</h2>
+			<span class="muted">{data.drafts.length} {data.drafts.length === 1 ? 'draft' : 'drafts'}</span>
+		</div>
+		{#if data.drafts.length === 0}
+			<p class="muted">
+				No drafts yet.
+				{#if data.canCreate}
+					<a href="/schedule/new">Create one</a> to hold a candidate schedule window.
+				{/if}
+			</p>
+		{:else}
+			<ul class="draft-list">
+				{#each data.drafts as draft (draft.id)}
+					<li class="draft-card">
+						<a href="/schedule/drafts/{draft.id}" class="draft-card__link">
+							<div class="draft-card__head">
+								<span class="draft-card__name">{draft.name}</span>
+								<span class="badge">{draft.status}</span>
+							</div>
+							<div class="draft-card__meta muted">
+								{draft.startDate} · {draft.weeks} {draft.weeks === 1 ? 'week' : 'weeks'} ·
+								{draft.strategy === 'BATCH_OPTIMIZE' ? 'Batch-optimize' : 'Strict due-date'}
+							</div>
+						</a>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</section>
 
 	<section class="card">
 		{#if data.assignments.length === 0}
@@ -94,5 +133,58 @@
 
 	.error {
 		color: var(--danger-fg);
+	}
+
+	.header-row {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
+		margin-bottom: 0.25rem;
+	}
+
+	.draft-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: grid;
+		gap: 0.6rem;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+	}
+
+	.draft-card {
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		background: var(--surface);
+		transition: border-color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+	}
+
+	.draft-card:hover {
+		border-color: var(--warm-300);
+		background: var(--warm-100);
+	}
+
+	.draft-card__link {
+		display: block;
+		padding: 0.85rem 1rem;
+		color: inherit;
+		text-decoration: none;
+	}
+
+	.draft-card__head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		margin-bottom: 0.35rem;
+	}
+
+	.draft-card__name {
+		font-weight: 600;
+		color: var(--ink-900);
+	}
+
+	.draft-card__meta {
+		font-size: 0.85rem;
 	}
 </style>
