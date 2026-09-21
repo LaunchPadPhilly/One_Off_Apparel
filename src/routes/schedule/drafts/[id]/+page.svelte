@@ -133,13 +133,179 @@
 		return `${time} · ${durationMin}m`;
 	}
 
-	function handleDragStart(event: DragEvent, lineItemId: string, hours: number | null) {
+	// ─── Order colors + title overrides ────────────────────────────────────────
+	// A small palette of hues chosen to sit next to the warm base without clashing.
+	// Deterministic hash → color assignment gives each order a stable default; the
+	// user can override via the inline edit UI. Overrides live in $state and are not
+	// persisted to the database yet — this pass is design only.
+	const ORDER_COLORS = [
+		'#c96f4a', // rust
+		'#4a8fc9', // sky
+		'#7ba055', // olive
+		'#c9a54a', // gold
+		'#8b5cb0', // plum
+		'#4ab09e', // teal
+		'#c94a7f', // rose
+		'#5a6ba8' // indigo
+	] as const;
+
+	type OrderOverride = { color?: string; title?: string };
+	let orderOverrides = $state<Record<string, OrderOverride>>({});
+
+	function deterministicColor(id: string): string {
+		let hash = 0;
+		for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
+		return ORDER_COLORS[Math.abs(hash) % ORDER_COLORS.length];
+	}
+
+	function orderColor(orderId: string): string {
+		return orderOverrides[orderId]?.color ?? deterministicColor(orderId);
+	}
+
+	function orderTitle(order: { id: string; customerName: string; hoopsOrderId: string }): string {
+		return orderOverrides[order.id]?.title ?? order.customerName ?? order.hoopsOrderId;
+	}
+
+	let ordersById = $derived(new Map(data.orders.map((o) => [o.id, o] as const)));
+	function findOrder(orderId: string) {
+		return ordersById.get(orderId);
+	}
+
+	// ─── Inline edit state ─────────────────────────────────────────────────────
+	let editingOrderId = $state<string | null>(null);
+	let draftTitle = $state('');
+	let draftColor = $state('');
+
+	function beginEdit(order: (typeof data.orders)[number]) {
+		editingOrderId = order.id;
+		draftTitle = orderTitle(order);
+		draftColor = orderColor(order.id);
+	}
+
+	function saveEdit() {
+		if (!editingOrderId) return;
+		orderOverrides = {
+			...orderOverrides,
+			[editingOrderId]: { title: draftTitle.trim(), color: draftColor }
+		};
+		editingOrderId = null;
+	}
+
+	function cancelEdit() {
+		editingOrderId = null;
+	}
+
+	// ─── Placements (drag-drop blocks on the timeline) ─────────────────────────
+	// Client-side only for now — this is the design pass. Persisting to
+	// schedule_assignments comes next, after the shape settles.
+	type Placement = {
+		id: string;
+		lineItemId: string;
+		orderId: string;
+		date: string;
+		stationName: string;
+		startMin: number;
+		durationMin: number;
+	};
+	let placements = $state<Placement[]>([]);
+
+	function placementsForDay(date: string): Placement[] {
+		return placements
+			.filter((p) => p.date === date && p.stationName === activeStation)
+			.sort((a, b) => a.startMin - b.startMin);
+	}
+
+	function overlapsBreak(startMin: number, durationMin: number): boolean {
+		const end = startMin + durationMin;
+		return BREAKS.some((brk) => {
+			const bStart = brk.startMin;
+			const bEnd = brk.startMin + brk.durationMin;
+			return startMin < bEnd && end > bStart;
+		});
+	}
+
+	function handleDragStart(
+		event: DragEvent,
+		lineItemId: string,
+		orderId: string,
+		hours: number | null
+	) {
 		if (!event.dataTransfer) return;
 		event.dataTransfer.effectAllowed = 'move';
 		event.dataTransfer.setData(
 			'application/x-line-item',
-			JSON.stringify({ lineItemId, hours: hours ?? 0 })
+			JSON.stringify({ lineItemId, orderId, hours: hours ?? 1 })
 		);
+	}
+
+	let dragOverDate = $state<string | null>(null);
+
+	function handleTrackDragOver(event: DragEvent, date: string) {
+		if (!event.dataTransfer?.types.includes('application/x-line-item')) return;
+		event.preventDefault();
+		event.dataTransfer.dropEffect = 'move';
+		dragOverDate = date;
+	}
+
+	function handleTrackDragLeave() {
+		dragOverDate = null;
+	}
+
+	function handleTrackDrop(event: DragEvent, date: string) {
+		event.preventDefault();
+		dragOverDate = null;
+		if (!event.dataTransfer) return;
+		const raw = event.dataTransfer.getData('application/x-line-item');
+		if (!raw) return;
+		let payload: { lineItemId: string; orderId: string; hours: number };
+		try {
+			payload = JSON.parse(raw);
+		} catch {
+			return;
+		}
+		const track = event.currentTarget as HTMLElement;
+		const rect = track.getBoundingClientRect();
+		const relative = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+		const dropMin = SHIFT_START_MIN + (relative / rect.width) * SHIFT_LENGTH_MIN;
+		const durationMin = Math.max(15, Math.round((payload.hours || 1) * 60));
+		// Center the block on the drop point, clamp inside the shift, snap to 15m.
+		const rawStart = dropMin - durationMin / 2;
+		const clamped = Math.max(
+			SHIFT_START_MIN,
+			Math.min(SHIFT_END_MIN - durationMin, rawStart)
+		);
+		const startMin = Math.round(clamped / 15) * 15;
+		placements = [
+			...placements,
+			{
+				id: crypto.randomUUID(),
+				lineItemId: payload.lineItemId,
+				orderId: payload.orderId,
+				date,
+				stationName: activeStation,
+				startMin,
+				durationMin
+			}
+		];
+	}
+
+	function removePlacement(id: string) {
+		placements = placements.filter((p) => p.id !== id);
+	}
+
+	function formatMinutes(minutes: number): string {
+		if (minutes < 60) return `${minutes}m`;
+		const h = Math.floor(minutes / 60);
+		const m = minutes % 60;
+		return m === 0 ? `${h}h` : `${h}h${m}m`;
+	}
+
+	function formatClock(minutes: number): string {
+		const h = Math.floor(minutes / 60);
+		const m = minutes % 60;
+		const h12 = ((h + 11) % 12) + 1;
+		const suffix = h < 12 ? 'a' : 'p';
+		return m === 0 ? `${h12}${suffix}` : `${h12}:${String(m).padStart(2, '0')}${suffix}`;
 	}
 </script>
 
@@ -178,51 +344,103 @@
 			/>
 			<div class="tray__list" role="list">
 				{#each filteredOrders as order (order.id)}
-					<article class="order" role="listitem">
-						<header class="order__head">
-							<div class="order__title">
-								<span class="order__customer">{order.customerName || order.hoopsOrderId}</span>
-								<span class="muted order__job">#{order.hoopsOrderId}</span>
-							</div>
-							<div class="order__meta">
-								<span class="muted">Due {order.internalDueDate}</span>
-								<span class="hours-total">{formatHours(orderTotalHours(order))}</span>
-							</div>
-						</header>
-						<ul class="line-items">
-							{#each order.lineItems as item (item.id)}
-								{@const hours = estimateHours(item.estimatedHours)}
-								{@const err = estimateError(item.estimatedHours)}
-								{@const stationName = estimateStation(item.estimatedHours)}
-								<li
-									class="line-item"
-									class:line-item--error={err}
-									draggable="true"
-									ondragstart={(event) => handleDragStart(event, item.id, hours)}
-								>
-									<div class="line-item__row">
-										<span class="line-item__design">{item.design || '(no design)'}</span>
-										{#if hours != null}
-											<span class="line-item__hours">{formatHours(hours)}</span>
-										{:else if err}
-											<span class="line-item__hours line-item__hours--muted" title={err}>—</span>
-										{/if}
+					{@const color = orderColor(order.id)}
+					<article
+						class="order"
+						role="listitem"
+						style="--order-color: {color}"
+					>
+						<span class="order__swatch" aria-hidden="true"></span>
+						{#if editingOrderId === order.id}
+							<div class="order__edit">
+								<label class="order__edit-label">
+									Title
+									<input
+										class="order__edit-input"
+										type="text"
+										bind:value={draftTitle}
+										aria-label="Order title"
+									/>
+								</label>
+								<div class="order__edit-label">
+									<span>Color</span>
+									<div class="palette" role="radiogroup" aria-label="Order color">
+										{#each ORDER_COLORS as swatch (swatch)}
+											<button
+												type="button"
+												class="palette__swatch"
+												class:palette__swatch--active={draftColor === swatch}
+												style="background: {swatch}"
+												aria-label={swatch}
+												aria-checked={draftColor === swatch}
+												role="radio"
+												onclick={() => (draftColor = swatch)}
+											></button>
+										{/each}
 									</div>
-									<div class="line-item__chips">
-										<span class="chip">{stepChip(item)}</span>
-										{#if item.quantity}
-											<span class="chip chip--muted">×{item.quantity}</span>
-										{/if}
-										{#if item.apparelColor}
-											<span class="chip chip--muted">{item.apparelColor}</span>
-										{/if}
-										{#if stationName}
-											<span class="chip chip--station">{stationLabel(stationName)}</span>
-										{/if}
-									</div>
-								</li>
-							{/each}
-						</ul>
+								</div>
+								<div class="order__edit-actions">
+									<button type="button" class="button button--secondary" onclick={cancelEdit}>
+										Cancel
+									</button>
+									<button type="button" class="button" onclick={saveEdit}>Save</button>
+								</div>
+							</div>
+						{:else}
+							<header class="order__head">
+								<div class="order__title">
+									<span class="order__customer">{orderTitle(order)}</span>
+									<span class="muted order__job">#{order.hoopsOrderId}</span>
+								</div>
+								<div class="order__meta">
+									<button
+										type="button"
+										class="order__edit-btn"
+										title="Edit title & color"
+										aria-label="Edit order title and color"
+										onclick={() => beginEdit(order)}
+									>
+										Edit
+									</button>
+									<span class="muted">Due {order.internalDueDate}</span>
+									<span class="hours-total">{formatHours(orderTotalHours(order))}</span>
+								</div>
+							</header>
+							<ul class="line-items">
+								{#each order.lineItems as item (item.id)}
+									{@const hours = estimateHours(item.estimatedHours)}
+									{@const err = estimateError(item.estimatedHours)}
+									{@const stationName = estimateStation(item.estimatedHours)}
+									<li
+										class="line-item"
+										class:line-item--error={err}
+										draggable="true"
+										ondragstart={(event) => handleDragStart(event, item.id, order.id, hours)}
+									>
+										<div class="line-item__row">
+											<span class="line-item__design">{item.design || '(no design)'}</span>
+											{#if hours != null}
+												<span class="line-item__hours">{formatHours(hours)}</span>
+											{:else if err}
+												<span class="line-item__hours line-item__hours--muted" title={err}>—</span>
+											{/if}
+										</div>
+										<div class="line-item__chips">
+											<span class="chip">{stepChip(item)}</span>
+											{#if item.quantity}
+												<span class="chip chip--muted">×{item.quantity}</span>
+											{/if}
+											{#if item.apparelColor}
+												<span class="chip chip--muted">{item.apparelColor}</span>
+											{/if}
+											{#if stationName}
+												<span class="chip chip--station">{stationLabel(stationName)}</span>
+											{/if}
+										</div>
+									</li>
+								{/each}
+							</ul>
+						{/if}
 					</article>
 				{:else}
 					<p class="muted empty">No orders match.</p>
@@ -249,6 +467,7 @@
 			<div class="days">
 				{#each data.capacity as day (day.date)}
 					{@const label = formatDayLabel(day.date)}
+					{@const dayPlacements = placementsForDay(day.date)}
 					<article class="day" class:day--weekend={isWeekend(day.date)}>
 						<header class="day__head">
 							<div class="day__label">
@@ -260,7 +479,14 @@
 							</span>
 						</header>
 						<div class="bar" aria-label="{WORKING_HOURS} working hours available on {day.date}">
-							<div class="bar__track">
+							<div
+								class="bar__track"
+								class:bar__track--drag={dragOverDate === day.date}
+								role="presentation"
+								ondragover={(event) => handleTrackDragOver(event, day.date)}
+								ondragleave={handleTrackDragLeave}
+								ondrop={(event) => handleTrackDrop(event, day.date)}
+							>
 								<div class="bar__fill"></div>
 								{#each BREAKS as brk (brk.startMin)}
 									<div
@@ -269,6 +495,27 @@
 										title="{brk.label} — {formatBreakLabel(brk.startMin, brk.durationMin)}"
 									>
 										<span class="bar__break-label">{brk.label}</span>
+									</div>
+								{/each}
+								{#each dayPlacements as placement (placement.id)}
+									{@const parent = findOrder(placement.orderId)}
+									{@const bg = orderColor(placement.orderId)}
+									{@const title = parent ? orderTitle(parent) : 'Order'}
+									{@const bad = overlapsBreak(placement.startMin, placement.durationMin)}
+									<div
+										class="placement"
+										class:placement--bad={bad}
+										style="left: {pctFromShiftStart(placement.startMin)}%; width: {pctWidth(placement.durationMin)}%; --block-color: {bg};"
+										title="{title} · {formatClock(placement.startMin)} → {formatClock(placement.startMin + placement.durationMin)} ({formatMinutes(placement.durationMin)})"
+									>
+										<span class="placement__label">{title}</span>
+										<span class="placement__time">{formatMinutes(placement.durationMin)}</span>
+										<button
+											type="button"
+											class="placement__remove"
+											aria-label="Remove"
+											onclick={() => removePlacement(placement.id)}
+										>×</button>
 									</div>
 								{/each}
 								<div class="bar__ticks">
@@ -292,9 +539,10 @@
 			</div>
 
 			<p class="muted footnote">
-				Drop targets and proposed blocks are coming next — the drag handle on each order
-				line item is wired to <code>application/x-line-item</code> already, so it will hook
-				up once the day drop-zones ship.
+				Drag line items from the tray onto a day's bar. Blocks snap to 15-minute
+				increments; drop over a break and the block turns red to flag the conflict.
+				Placements live in the browser for now — persisting to
+				<code>schedule_assignments</code> comes next.
 			</p>
 		</section>
 	</div>
@@ -405,8 +653,110 @@
 	.order {
 		border: 1px solid var(--border);
 		border-radius: var(--radius-sm);
-		padding: 0.75rem;
+		padding: 0.75rem 0.75rem 0.75rem 1rem;
 		background: var(--surface);
+		position: relative;
+	}
+
+	.order__swatch {
+		position: absolute;
+		top: 0;
+		left: 0;
+		bottom: 0;
+		width: 4px;
+		background: var(--order-color, var(--warm-500));
+		border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+	}
+
+	.order__edit-btn {
+		background: none;
+		border: 1px solid var(--border);
+		color: var(--ink-500);
+		padding: 0.1rem 0.4rem;
+		border-radius: 4px;
+		font-size: var(--fs-xs);
+		cursor: pointer;
+		margin-bottom: 0.2rem;
+		transition: color var(--motion-fast) var(--ease-standard),
+			border-color var(--motion-fast) var(--ease-standard);
+	}
+
+	.order__edit-btn:hover {
+		color: var(--warm-700);
+		border-color: var(--warm-300);
+	}
+
+	.order__edit {
+		display: flex;
+		flex-direction: column;
+		gap: 0.55rem;
+	}
+
+	.order__edit-label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		font-size: var(--fs-xs);
+		color: var(--ink-500);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		font-weight: 600;
+	}
+
+	.order__edit-input {
+		padding: 0.4rem 0.55rem;
+		border: 1px solid var(--border);
+		background: var(--surface);
+		border-radius: var(--radius-sm);
+		color: var(--ink-900);
+		font-size: var(--fs-sm);
+		text-transform: none;
+		letter-spacing: 0;
+		font-weight: 400;
+	}
+
+	.order__edit-input:focus-visible {
+		outline: none;
+		box-shadow: var(--focus);
+		border-color: var(--warm-500);
+	}
+
+	.palette {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
+	}
+
+	.palette__swatch {
+		width: 1.5rem;
+		height: 1.5rem;
+		border-radius: 50%;
+		border: 2px solid transparent;
+		padding: 0;
+		cursor: pointer;
+		transition: transform var(--motion-fast) var(--ease-standard),
+			box-shadow var(--motion-fast) var(--ease-standard);
+	}
+
+	.palette__swatch:hover {
+		transform: scale(1.1);
+	}
+
+	.palette__swatch--active {
+		border-color: var(--ink-900);
+		box-shadow: 0 0 0 2px var(--surface) inset;
+		transform: scale(1.1);
+	}
+
+	.order__edit-actions {
+		display: flex;
+		gap: 0.35rem;
+		justify-content: flex-end;
+	}
+
+	.order__edit-actions .button {
+		padding: 0.35rem 0.75rem;
+		font-size: var(--fs-sm);
 	}
 
 	.order__head {
@@ -658,6 +1008,79 @@
 			var(--warm-200) 8px
 		);
 		border-style: dotted;
+	}
+
+	.bar__track--drag {
+		outline: 2px dashed var(--warm-500);
+		outline-offset: 2px;
+	}
+
+	.placement {
+		position: absolute;
+		top: 3px;
+		bottom: 3px;
+		background: var(--block-color, var(--warm-500));
+		border: 1px solid rgb(0 0 0 / 20%);
+		border-radius: 4px;
+		color: white;
+		padding: 0 0.4rem;
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		min-width: 0;
+		z-index: 2;
+		box-shadow: 0 1px 3px rgb(0 0 0 / 25%);
+		overflow: hidden;
+		cursor: grab;
+	}
+
+	.placement--bad {
+		background: var(--danger-fg);
+		outline: 2px solid var(--danger-fg);
+	}
+
+	.placement__label {
+		flex: 1;
+		min-width: 0;
+		font-size: 0.72rem;
+		font-weight: 600;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.placement__time {
+		font-size: 0.65rem;
+		opacity: 0.85;
+		font-variant-numeric: tabular-nums;
+		flex-shrink: 0;
+	}
+
+	.placement__remove {
+		background: rgb(0 0 0 / 25%);
+		color: white;
+		border: none;
+		width: 1.05rem;
+		height: 1.05rem;
+		border-radius: 50%;
+		font-size: 0.85rem;
+		line-height: 1;
+		padding: 0;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		opacity: 0;
+		transition: opacity var(--motion-fast) var(--ease-standard);
+	}
+
+	.placement:hover .placement__remove {
+		opacity: 1;
+	}
+
+	.placement__remove:hover {
+		background: rgb(0 0 0 / 45%);
 	}
 
 	.bar__break {
