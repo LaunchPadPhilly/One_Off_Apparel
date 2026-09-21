@@ -48,6 +48,23 @@
 		syncInputFromSelection();
 	}
 
+	// Bulk-cancel: a Set of selected order ids, checkboxes per row, and a
+	// select-all checkbox scoped to whatever's currently in `data.orders` (the
+	// active list — cancelling drops an order out of it, so nothing here can go stale
+	// mid-selection without a page reload also clearing the selection).
+	let selectedOrderIds = $state<Set<string>>(new Set());
+	let cancelling = $state(false);
+	const allSelected = $derived(data.orders.length > 0 && selectedOrderIds.size === data.orders.length);
+
+	function toggleOrder(orderId: string) {
+		if (selectedOrderIds.has(orderId)) selectedOrderIds.delete(orderId);
+		else selectedOrderIds.add(orderId);
+	}
+
+	function toggleSelectAll() {
+		selectedOrderIds = allSelected ? new Set() : new Set(data.orders.map((order) => order.id));
+	}
+
 	// NEW (2026-09-21): formats an order's live estimate summary (see
 	// estimateForDisplay.ts) into one short string for the "Est. hours" column.
 	function formatEstimate(estimate: { totalHours: number; estimableCount: number; unestimableCount: number }): string {
@@ -166,56 +183,114 @@
 		{#if data.orders.length === 0}
 			<p class="muted">No active orders.</p>
 		{:else}
-			<table>
-				<thead>
-					<tr>
-						<th>Job</th>
-						<th>Customer</th>
-						<th>Due</th>
-						<th>Status</th>
-						<th>Line items</th>
-						<!-- NEW (2026-09-21): a live "how long will this take" figure, computed
-						     from whatever line items currently have enough data to estimate —
-						     see estimateForDisplay.ts / summarizeOrderEstimate(). -->
-						<th>Est. hours</th>
-						<th></th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each data.orders as order (order.id)}
+			<form
+				method="POST"
+				action="?/cancelSelected"
+				use:enhance={({ cancel }) => {
+					if (!confirm(`Cancel ${selectedOrderIds.size} order${selectedOrderIds.size === 1 ? '' : 's'}? They drop out of this list; nothing is deleted.`)) {
+						cancel();
+						return;
+					}
+					cancelling = true;
+					return async ({ update }) => {
+						await update();
+						cancelling = false;
+						selectedOrderIds = new Set();
+					};
+				}}
+			>
+				{#each [...selectedOrderIds] as id (id)}
+					<input type="hidden" name="orderIds" value={id} />
+				{/each}
+
+				{#if data.canCancel && selectedOrderIds.size > 0}
+					<div class="bulk-bar">
+						<span>{selectedOrderIds.size} selected</span>
+						<button class="button button--danger" use:pressable type="submit" disabled={cancelling}>
+							{cancelling ? 'Cancelling…' : `Cancel ${selectedOrderIds.size} order${selectedOrderIds.size === 1 ? '' : 's'}`}
+						</button>
+					</div>
+				{/if}
+				{#if form?.cancelled !== undefined}
+					<p class="success">Cancelled {form.cancelled} order{form.cancelled === 1 ? '' : 's'}.</p>
+				{/if}
+				{#if form?.cancelFailures?.length}
+					<div class="flags flags--error">
+						<strong>Couldn't cancel:</strong>
+						<ul>
+							{#each form.cancelFailures as failure (failure)}
+								<li>{failure}</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+
+				<table>
+					<thead>
 						<tr>
-							<td class="job-cell">{order.hoopsOrderId}</td>
-							<td>{order.customerName}</td>
-							<td>{order.internalDueDate}</td>
-							<td><span class="badge" class:badge--warn={order.status === 'NEEDS_REVIEW'}>{order.status}</span></td>
-							<td>{order.lineItemCount}</td>
-							<td>
-								{#if order.estimate.estimableCount > 0}
-									<span class="estimate">{formatEstimate(order.estimate)}</span>
-									{#if order.estimate.unestimableCount > 0}
+							{#if data.canCancel}
+								<th>
+									<input type="checkbox" checked={allSelected} onchange={toggleSelectAll} aria-label="Select all orders" />
+								</th>
+							{/if}
+							<th>Job</th>
+							<th>Customer</th>
+							<th>Due</th>
+							<th>Status</th>
+							<th>Line items</th>
+							<!-- NEW (2026-09-21): a live "how long will this take" figure, computed
+							     from whatever line items currently have enough data to estimate —
+							     see estimateForDisplay.ts / summarizeOrderEstimate(). -->
+							<th>Est. hours</th>
+							<th></th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each data.orders as order (order.id)}
+							<tr>
+								{#if data.canCancel}
+									<td>
+										<input
+											type="checkbox"
+											checked={selectedOrderIds.has(order.id)}
+											onchange={() => toggleOrder(order.id)}
+											aria-label="Select order {order.hoopsOrderId}"
+										/>
+									</td>
+								{/if}
+								<td class="job-cell">{order.hoopsOrderId}</td>
+								<td>{order.customerName}</td>
+								<td>{order.internalDueDate}</td>
+								<td><span class="badge" class:badge--warn={order.status === 'NEEDS_REVIEW'}>{order.status}</span></td>
+								<td>{order.lineItemCount}</td>
+								<td>
+									{#if order.estimate.estimableCount > 0}
+										<span class="estimate">{formatEstimate(order.estimate)}</span>
+										{#if order.estimate.unestimableCount > 0}
+											<span
+												class="badge badge--off estimate-pending"
+												title="{order.estimate.unestimableCount} line item{order.estimate.unestimableCount === 1
+													? ''
+													: 's'} can't be estimated yet — open the order to see why."
+											>
+												+{order.estimate.unestimableCount} pending
+											</span>
+										{/if}
+									{:else}
 										<span
-											class="badge badge--off estimate-pending"
-											title="{order.estimate.unestimableCount} line item{order.estimate.unestimableCount === 1
-												? ''
-												: 's'} can't be estimated yet — open the order to see why."
+											class="badge badge--off"
+											title="None of this order's line items can be estimated yet — open the order to see why."
 										>
-											+{order.estimate.unestimableCount} pending
+											Not yet estimable
 										</span>
 									{/if}
-								{:else}
-									<span
-										class="badge badge--off"
-										title="None of this order's line items can be estimated yet — open the order to see why."
-									>
-										Not yet estimable
-									</span>
-								{/if}
-							</td>
-							<td><a class="button button--secondary" href="/orders/{order.id}">{order.status === 'NEEDS_REVIEW' ? 'Review' : 'View'}</a></td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
+								</td>
+								<td><a class="button button--secondary" href="/orders/{order.id}">{order.status === 'NEEDS_REVIEW' ? 'Review' : 'View'}</a></td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</form>
 		{/if}
 	</section>
 </div>
@@ -311,6 +386,13 @@
 
 	.picked-files__remove:hover {
 		color: var(--danger-fg);
+	}
+
+	.bulk-bar {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		margin-bottom: 0.75rem;
 	}
 
 	.estimate {

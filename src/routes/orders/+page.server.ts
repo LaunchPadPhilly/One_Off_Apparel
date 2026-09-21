@@ -3,6 +3,7 @@ import { prisma } from '$lib/server/prisma';
 import { hasGrantedScope, requireScopePage } from '$lib/server/auth/guards';
 import { summarizeOrderEstimate } from '$lib/server/engine/estimateForDisplay';
 import { extractOrderFromPdf, PdfExtractionError } from '$lib/server/hoops/extractOrderFromPdf';
+import { cancelOrder, CancelOrderError } from '$lib/server/hoops/cancelOrder';
 import { importHoopsExport } from '$lib/server/hoops/importHoopsExport';
 import type { OrderCandidate } from '$lib/server/hoops/types';
 import { OrderStatus } from '../../../prisma/generated/prisma/enums';
@@ -49,6 +50,9 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 
 	return {
 		canImport: hasGrantedScope(locals.user, 'IMPORT_WRITE'),
+		// Same scope cancelOrder.ts is gated on for the per-order "Cancel order"
+		// button — bulk-cancel here is that same action, just looped over a selection.
+		canCancel: hasGrantedScope(locals.user, 'IMPORT_WRITE'),
 		orders: orders.map((order) => ({
 			id: order.id,
 			hoopsOrderId: order.hoopsOrderId,
@@ -96,5 +100,30 @@ export const actions: Actions = {
 		} catch (error) {
 			return fail(500, { message: (error as Error).message });
 		}
+	},
+	// Bulk version of the per-order "Cancel order" button (cancelOrder.ts) — same
+	// non-destructive status-flip, same guard rails, just looped over a checkbox
+	// selection instead of one order at a time. Continues past individual failures
+	// (e.g. one order in the selection is already CANCELLED) rather than aborting the
+	// whole batch, and reports which ones failed and why.
+	cancelSelected: async ({ request, locals, url }) => {
+		const user = requireScopePage(locals.user, 'IMPORT_WRITE', url.pathname);
+		const data = await request.formData();
+		const orderIds = data.getAll('orderIds').filter((value): value is string => typeof value === 'string' && value.length > 0);
+		if (orderIds.length === 0) return fail(400, { message: 'Select at least one order to cancel.' });
+
+		let cancelledCount = 0;
+		const failures: string[] = [];
+		for (const orderId of orderIds) {
+			try {
+				await cancelOrder(orderId, user.email);
+				cancelledCount++;
+			} catch (err) {
+				const message = err instanceof CancelOrderError ? err.message : 'Could not cancel this order.';
+				failures.push(`${orderId}: ${message}`);
+			}
+		}
+
+		return { cancelled: cancelledCount, cancelFailures: failures };
 	}
 };
