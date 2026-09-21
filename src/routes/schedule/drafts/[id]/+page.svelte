@@ -90,21 +90,48 @@
 		return order.lineItems.reduce((sum, item) => sum + (estimateHours(item.estimatedHours) ?? 0), 0);
 	}
 
-	function stationHoursForDay(day: (typeof data.capacity)[number]): number {
-		return day.stations.find((s) => s.name === activeStation)?.availableHrs ?? 0;
+	// The floor plan's daily shift: 8:00 → 16:30, with three unavailable segments.
+	// Working time = shift length − break minutes = 510 − 60 = 450 min = 7h30m.
+	const SHIFT_START_MIN = 8 * 60; // 08:00
+	const SHIFT_END_MIN = 16 * 60 + 30; // 16:30
+	const SHIFT_LENGTH_MIN = SHIFT_END_MIN - SHIFT_START_MIN;
+	const BREAKS = [
+		{ startMin: 10 * 60, durationMin: 15, label: 'Break' },
+		{ startMin: 12 * 60 + 30, durationMin: 30, label: 'Lunch' },
+		{ startMin: 15 * 60, durationMin: 15, label: 'Break' }
+	];
+	const WORKING_MIN = SHIFT_LENGTH_MIN - BREAKS.reduce((sum, b) => sum + b.durationMin, 0);
+	const WORKING_HOURS = WORKING_MIN / 60;
+
+	// One hour marker per hour boundary that falls inside the shift.
+	const HOUR_TICKS = (() => {
+		const ticks: Array<{ minutes: number; label: string }> = [];
+		const first = Math.ceil(SHIFT_START_MIN / 60) * 60;
+		for (let m = first; m <= SHIFT_END_MIN; m += 60) {
+			const hour24 = Math.floor(m / 60);
+			const hour12 = ((hour24 + 11) % 12) + 1;
+			const suffix = hour24 < 12 ? 'a' : 'p';
+			ticks.push({ minutes: m, label: `${hour12}${suffix}` });
+		}
+		return ticks;
+	})();
+
+	function pctFromShiftStart(minutes: number): number {
+		return ((minutes - SHIFT_START_MIN) / SHIFT_LENGTH_MIN) * 100;
 	}
 
-	// Tick marks span the largest capacity across the window so every day's bar shares
-	// a scale. Falls back to the default day length so an empty capacity_calendar still
-	// draws a sensible ruler.
-	let maxHours = $derived(
-		Math.max(
-			data.defaultStationDayHours,
-			...data.capacity.map((day) => stationHoursForDay(day))
-		)
-	);
+	function pctWidth(minutes: number): number {
+		return (minutes / SHIFT_LENGTH_MIN) * 100;
+	}
 
-	let ticks = $derived(Array.from({ length: Math.ceil(maxHours) + 1 }, (_, i) => i));
+	function formatBreakLabel(startMin: number, durationMin: number): string {
+		const h = Math.floor(startMin / 60);
+		const m = startMin % 60;
+		const h12 = ((h + 11) % 12) + 1;
+		const suffix = h < 12 ? 'a' : 'p';
+		const time = m === 0 ? `${h12}${suffix}` : `${h12}:${String(m).padStart(2, '0')}${suffix}`;
+		return `${time} · ${durationMin}m`;
+	}
 
 	function handleDragStart(event: DragEvent, lineItemId: string, hours: number | null) {
 		if (!event.dataTransfer) return;
@@ -221,7 +248,6 @@
 
 			<div class="days">
 				{#each data.capacity as day (day.date)}
-					{@const hours = stationHoursForDay(day)}
 					{@const label = formatDayLabel(day.date)}
 					<article class="day" class:day--weekend={isWeekend(day.date)}>
 						<header class="day__head">
@@ -229,21 +255,35 @@
 								<span class="day__weekday">{label.weekday}</span>
 								<span class="day__date">{label.date}</span>
 							</div>
-							<span class="day__capacity muted">{formatHours(hours)} available</span>
+							<span class="day__capacity muted">
+								{formatHours(WORKING_HOURS)} available · 8a–4:30p
+							</span>
 						</header>
-						<div class="bar" aria-label="{hours} hours available on {day.date}">
+						<div class="bar" aria-label="{WORKING_HOURS} working hours available on {day.date}">
 							<div class="bar__track">
-								<div class="bar__fill" style="width: {(hours / maxHours) * 100}%"></div>
+								<div class="bar__fill"></div>
+								{#each BREAKS as brk (brk.startMin)}
+									<div
+										class="bar__break"
+										style="left: {pctFromShiftStart(brk.startMin)}%; width: {pctWidth(brk.durationMin)}%;"
+										title="{brk.label} — {formatBreakLabel(brk.startMin, brk.durationMin)}"
+									>
+										<span class="bar__break-label">{brk.label}</span>
+									</div>
+								{/each}
 								<div class="bar__ticks">
-									{#each ticks as tick (tick)}
+									{#each HOUR_TICKS as tick (tick.minutes)}
 										<span
-											class="tick"
-											class:tick--major={tick % 2 === 0}
-											style="left: {(tick / maxHours) * 100}%"
+											class="tick tick--major"
+											style="left: {pctFromShiftStart(tick.minutes)}%"
 										>
-											<span class="tick__label">{tick}h</span>
+											<span class="tick__label">{tick.label}</span>
 										</span>
 									{/each}
+									<!-- half-hour end marker so 4:30 shows -->
+									<span class="tick" style="left: 100%">
+										<span class="tick__label">4:30p</span>
+									</span>
 								</div>
 							</div>
 						</div>
@@ -618,6 +658,54 @@
 			var(--warm-200) 8px
 		);
 		border-style: dotted;
+	}
+
+	.bar__break {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		background: repeating-linear-gradient(
+			45deg,
+			var(--ink-500) 0,
+			var(--ink-500) 2px,
+			transparent 2px,
+			transparent 6px
+		);
+		background-color: rgb(122 101 88 / 20%);
+		border-left: 1px solid var(--ink-500);
+		border-right: 1px solid var(--ink-500);
+		opacity: 0.55;
+		z-index: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		overflow: hidden;
+	}
+
+	.bar__break-label {
+		font-size: 0.6rem;
+		color: var(--ink-500);
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		white-space: nowrap;
+		background: var(--surface);
+		padding: 0 0.2rem;
+		border-radius: 3px;
+		opacity: 0.9;
+	}
+
+	/* Hide labels in tight break slots (15m at ~3% width can't fit "Break") */
+	.bar__break:not(:hover) .bar__break-label {
+		opacity: 0;
+	}
+
+	.bar__break:hover {
+		opacity: 0.75;
+	}
+
+	.bar__break:hover .bar__break-label {
+		opacity: 1;
 	}
 
 	.bar__ticks {

@@ -5,7 +5,10 @@ import { prisma } from '$lib/server/prisma';
 import { OrderStatus } from '../../../../../prisma/generated/prisma/enums';
 import type { PageServerLoad } from './$types';
 
-const DEFAULT_STATION_DAY_HOURS = 8;
+// Working time in the shop's standard shift: 8:00–4:30 (8.5h) minus one
+// 30-minute lunch and two 15-minute breaks. Kept in sync with the SHIFT
+// constants on the client bar renderer.
+const DEFAULT_STATION_DAY_HOURS = 7.5;
 const KNOWN_STATIONS = [
 	'screen_print_auto',
 	'embroidery',
