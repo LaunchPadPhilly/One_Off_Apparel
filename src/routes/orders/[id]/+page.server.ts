@@ -29,6 +29,18 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// approved jobs).
 	const scheduleAssignments = await getScheduleForOrder(params.id);
 
+	// The confidence flags Claude raised while reading this order's Hoops export —
+	// written into the audit log's diff at import time (importHoopsExport.ts), not a
+	// separate column. Per-order display replaces the old batch-wide "flagged for
+	// review" list shown right after upload: reading it back per-order here, from
+	// whichever import action (created or a later re-import) is most recent, means it
+	// naturally reflects the last time this specific order was imported.
+	const lastImportLog = await prisma.domainAuditLog.findFirst({
+		where: { entity: 'Order', entityId: params.id, action: { in: ['hoops_import_created', 'hoops_import_reopened'] } },
+		orderBy: { at: 'desc' }
+	});
+	const importFlags = ((lastImportLog?.diff as { confidenceFlags?: string[] } | null)?.confidenceFlags ?? []) as string[];
+
 	return {
 		canEdit: hasGrantedScope(locals.user, 'IMPORT_WRITE'),
 		order: {
@@ -44,7 +56,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			// fetchBacklog(). Until these are set, a CONFIRMED order still can't be
 			// scheduled; exposed here so there's actually a way to set them.
 			blankOrderingStatus: order.blankOrderingStatus,
-			customerApprovalStatus: order.customerApprovalStatus
+			customerApprovalStatus: order.customerApprovalStatus,
+			importFlags
 		},
 		// NEW (2026-09-21): shape each raw database row into exactly the fields the
 		// Svelte template needs, in plain, display-ready formats (e.g. the date gets

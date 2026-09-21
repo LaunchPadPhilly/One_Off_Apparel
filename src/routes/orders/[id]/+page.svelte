@@ -50,6 +50,11 @@
 				{data.order.status}
 			</span>
 		</div>
+		{#if data.order.importFlags.length > 0}
+			<p class="import-flags">
+				<strong>Flagged at import:</strong> {data.order.importFlags.join(' · ')}
+			</p>
+		{/if}
 		{#if data.canEdit}
 			<form method="POST" action="?/updateOrder" use:enhance class="fields">
 				<label>Customer <input name="customerName" value={data.order.customerName} /></label>
@@ -308,6 +313,12 @@
 
 	.error {
 		color: var(--danger-fg);
+	}
+
+	.import-flags {
+		margin: 0.4rem 0 0.75rem;
+		font-size: 0.9rem;
+		color: var(--ink-500);
 	}
 
 	table {

@@ -144,17 +144,10 @@
 				<p class="error">{form.message}</p>
 			{/if}
 			{#if form?.imported}
-				<p class="success">Imported {form.imported} order{form.imported === 1 ? '' : 's'} — needs review below.</p>
-			{/if}
-			{#if form?.confidenceFlags?.length}
-				<div class="flags">
-					<strong>Flagged for review:</strong>
-					<ul>
-						{#each form.confidenceFlags as flag (flag)}
-							<li>{flag}</li>
-						{/each}
-					</ul>
-				</div>
+				<p class="success">
+					Imported {form.imported} order{form.imported === 1 ? '' : 's'} — needs review below. Anything Claude flagged
+					is noted on each order's own page, not listed here.
+				</p>
 			{/if}
 			{#if form?.extractionErrors?.length}
 				<div class="flags flags--error">

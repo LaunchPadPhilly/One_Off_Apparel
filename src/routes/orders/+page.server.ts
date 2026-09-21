@@ -91,7 +91,6 @@ export const actions: Actions = {
 			const result = await importHoopsExport(candidates);
 			return {
 				imported: result.orderIds.length,
-				confidenceFlags: result.confidenceFlags,
 				extractionErrors: errors
 			};
 		} catch (error) {
