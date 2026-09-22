@@ -4,6 +4,8 @@ import { hasGrantedScope, requireScopePage } from '$lib/server/auth/guards';
 import { estimateForDisplay, summarizeOrderEstimate } from '$lib/server/engine/estimateForDisplay';
 import { cancelOrder, CancelOrderError } from '$lib/server/hoops/cancelOrder';
 import { confirmImport } from '$lib/server/hoops/confirmImport';
+import { fillNeedsAttentionFromNotes, FillFromNotesError } from '$lib/server/hoops/fillNeedsAttentionFromNotes';
+import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { updateLineItemFields, updateOrderFields } from '$lib/server/hoops/updateOrderFields';
 import { getScheduleForOrder } from '$lib/server/schedule/getScheduleForOrder';
 import type { Actions, PageServerLoad } from './$types';
@@ -41,6 +43,12 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	});
 	const importFlags = ((lastImportLog?.diff as { confidenceFlags?: string[] } | null)?.confidenceFlags ?? []) as string[];
 
+	// NEW: split into `questions` (map to a real, settable field — order approval gates,
+	// artwork approval, missing estimate data) and `infoNotes` (everything else — import
+	// flags, and estimate gaps with no backing field yet). Only `questions` are answerable
+	// via the notes box below; `infoNotes` are shown for awareness only. See orderGaps.ts.
+	const gaps = computeOrderGaps({ blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags }, order.lineItems);
+
 	return {
 		canEdit: hasGrantedScope(locals.user, 'IMPORT_WRITE'),
 		order: {
@@ -59,6 +67,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			customerApprovalStatus: order.customerApprovalStatus,
 			importFlags
 		},
+		gaps,
 		// NEW (2026-09-21): shape each raw database row into exactly the fields the
 		// Svelte template needs, in plain, display-ready formats (e.g. the date gets
 		// turned from a full timestamp into a simple "YYYY-MM-DD" string).
@@ -115,6 +124,24 @@ export const actions: Actions = {
 			await confirmImport([params.id], user.email);
 		} catch (err) {
 			return fail(400, { message: (err as Error).message });
+		}
+	},
+	// NEW: the "answer these to fill in what's needed" notes box below the Needs
+	// attention checklist. Applies through the same updateOrderFields/updateLineItemFields
+	// this page's per-field forms already use — see fillNeedsAttentionFromNotes.ts for why
+	// that keeps this a faster way to fill in those forms, not a second write path or a
+	// bypass of Confirm import.
+	fillFromNotes: async ({ params, request, locals, url }) => {
+		const user = requireScopePage(locals.user, 'IMPORT_WRITE', url.pathname);
+		const data = await request.formData();
+		const note = data.get('note');
+		if (typeof note !== 'string') return fail(400, { message: 'note is required' });
+		try {
+			const result = await fillNeedsAttentionFromNotes(params.id, note, user.email);
+			return { filled: result };
+		} catch (err) {
+			const message = err instanceof FillFromNotesError ? err.message : 'Could not answer questions from that note.';
+			return fail(400, { message });
 		}
 	},
 	updateOrder: async ({ params, request, locals, url }) => {

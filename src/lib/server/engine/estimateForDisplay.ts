@@ -1,4 +1,4 @@
-import { estimateHours, MissingFormulaError, MissingLineItemDataError } from './estimateHours';
+import { estimateHours, MissingFormulaError, MissingLineItemDataError, type MissingLineItemField } from './estimateHours';
 import type { EstimateHoursInput } from './types';
 
 /**
@@ -15,7 +15,8 @@ import type { EstimateHoursInput } from './types';
  */
 export type DisplayEstimate =
 	| { ok: true; hours: number; station: string }
-	| { ok: false; category: 'missing_formula' | 'missing_data'; reason: string };
+	| { ok: false; category: 'missing_formula'; reason: string }
+	| { ok: false; category: 'missing_data'; reason: string; field: MissingLineItemField };
 
 export function estimateForDisplay(item: EstimateHoursInput): DisplayEstimate {
 	try {
@@ -23,7 +24,7 @@ export function estimateForDisplay(item: EstimateHoursInput): DisplayEstimate {
 		return { ok: true, hours: result.hours, station: result.station };
 	} catch (err) {
 		if (err instanceof MissingFormulaError) return { ok: false, category: 'missing_formula', reason: err.message };
-		if (err instanceof MissingLineItemDataError) return { ok: false, category: 'missing_data', reason: err.message };
+		if (err instanceof MissingLineItemDataError) return { ok: false, category: 'missing_data', reason: err.message, field: err.field };
 		throw err;
 	}
 }

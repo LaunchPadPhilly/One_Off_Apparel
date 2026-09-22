@@ -28,15 +28,24 @@ export class MissingFormulaError extends EstimationError {
 	}
 }
 
+/** The exact LineItem field a MissingLineItemDataError is missing — lets a caller (the
+ *  order page's "needs attention" gaps, the notes-based fill-in) target the real field
+ *  precisely instead of parsing it back out of the human-readable message. */
+export type MissingLineItemField = 'inkColorCount' | 'stitchCount' | 'garmentStyle' | 'capConstruction';
+
 /**
  * Thrown when a station's formula is real, but *this specific job* is missing a field
  * the formula needs (e.g. an embroidery line item with no garmentStyle set yet). Never
  * silently defaulted — see CLAUDE.md's "when unsure, ask" principle. A human resolves
- * this by editing the line item (the Orders page's existing per-item edit form), not by
- * a schema/decision change, which is what distinguishes it from MissingFormulaError.
+ * this by editing the line item (the Orders page's existing per-item edit form, or the
+ * notes-based fill-in — see fillNeedsAttentionFromNotes.ts), not by a schema/decision
+ * change, which is what distinguishes it from MissingFormulaError.
  */
 export class MissingLineItemDataError extends EstimationError {
-	constructor(what: string) {
+	constructor(
+		what: string,
+		public readonly field: MissingLineItemField
+	) {
 		super(`missing_data: ${what} is required to estimate this job's hours but is not set on this line item. Edit the line item to set it.`);
 		this.name = 'MissingLineItemDataError';
 	}
@@ -186,9 +195,9 @@ function estimateEmbroideryHours(item: EstimateHoursInput): EstimateHoursResult 
 	// silently treating a missing value as 0 (which would produce a wrong, misleadingly
 	// confident-looking answer).
 	const inkColorCount = item.inkColorCount; // "Y" — number of thread colors
-	if (inkColorCount == null) throw new MissingLineItemDataError('ink_color_count (thread color count)');
+	if (inkColorCount == null) throw new MissingLineItemDataError('ink_color_count (thread color count)', 'inkColorCount');
 	const stitchCount = item.stitchCount; // "X" — total stitches in the design
-	if (stitchCount == null) throw new MissingLineItemDataError('stitch_count');
+	if (stitchCount == null) throw new MissingLineItemDataError('stitch_count', 'stitchCount');
 
 	// Pick which set of rate numbers (the "plan") applies to this specific job. A cap
 	// needs its capConstruction (structured/unstructured) set too, since that's what
@@ -198,12 +207,12 @@ function estimateEmbroideryHours(item: EstimateHoursInput): EstimateHoursResult 
 	if (item.garmentStyle === GarmentStyle.FLAT) {
 		plan = EMBROIDERY_FLAT_PLAN[item.weightClass];
 	} else if (item.garmentStyle === GarmentStyle.CAP) {
-		if (!item.capConstruction) throw new MissingLineItemDataError('cap_construction (structured vs unstructured)');
+		if (!item.capConstruction) throw new MissingLineItemDataError('cap_construction (structured vs unstructured)', 'capConstruction');
 		plan = EMBROIDERY_CAP_PLAN[item.capConstruction];
 	} else {
 		// garmentStyle wasn't set to either FLAT or CAP (it's probably just null,
 		// meaning nobody has filled it in yet on this line item).
-		throw new MissingLineItemDataError('garment_style (flat vs cap)');
+		throw new MissingLineItemDataError('garment_style (flat vs cap)', 'garmentStyle');
 	}
 
 	// Now the actual formula — six separate steps of the embroidery process, each

@@ -1,5 +1,6 @@
 import { prisma } from '$lib/server/prisma';
 import { OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import { computeInternalDueDate } from '$lib/internalDueDate';
 import { lineItemCorrectionSchema, orderCorrectionSchema, type ImportCorrections } from './types';
 
 /**
@@ -52,13 +53,20 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 		for (const [orderId, patch] of Object.entries(corrections?.orders ?? {})) {
 			const validated = orderCorrectionSchema.parse(patch);
 			// externalShipDate/internalDueDate, if present, are z.iso.date() strings —
-			// Prisma's runtime validation needs a real Date (see getSchedule.ts).
+			// Prisma's runtime validation needs a real Date (see getSchedule.ts). A
+			// directly-given internalDueDate always wins; only fall back to the
+			// 14-days-before default (internalDueDate.ts) when externalShipDate is being
+			// corrected without an explicit internalDueDate alongside it.
 			await tx.order.update({
 				where: { id: orderId },
 				data: {
 					...validated,
 					...(validated.externalShipDate ? { externalShipDate: new Date(validated.externalShipDate) } : {}),
-					...(validated.internalDueDate ? { internalDueDate: new Date(validated.internalDueDate) } : {})
+					...(validated.internalDueDate
+						? { internalDueDate: new Date(validated.internalDueDate) }
+						: validated.externalShipDate
+							? { internalDueDate: new Date(computeInternalDueDate(validated.externalShipDate)) }
+							: {})
 				}
 			});
 		}

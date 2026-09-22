@@ -1,6 +1,7 @@
 import { env } from '$env/dynamic/private';
 import Anthropic from '@anthropic-ai/sdk';
 import { orderCandidateSchema, lineItemCandidateSchema, type OrderCandidate } from './types';
+import { computeInternalDueDate } from '$lib/internalDueDate';
 
 /**
  * There is no deterministic Hoops export parser — CLAUDE.md's Known open items are
@@ -38,13 +39,16 @@ const extractionTool: Anthropic.Tool = {
 		properties: {
 			hoopsOrderId: { type: 'string', description: 'The "Job <number>" identifier, e.g. "100127".' },
 			customerName: { type: 'string' },
-			externalShipDate: { type: 'string', description: 'ISO date YYYY-MM-DD. Use the "Deadline" date.' },
-			internalDueDate: { type: 'string', description: 'ISO date YYYY-MM-DD. Same as externalShipDate — the export gives only one date; always flag this in confidenceFlags.' },
+			externalShipDate: {
+				type: 'string',
+				description:
+					'ISO date YYYY-MM-DD. Use the "Deadline" date. Do not emit an internal due date — this system computes it deterministically as 14 days before this date; never guess or duplicate it yourself.'
+			},
 			confidenceFlags: {
 				type: 'array',
 				items: { type: 'string' },
 				description:
-					'Free-text notes on anything uncertain or excluded: unmapped decoration/finishing types (e.g. "Patch Install" has no schema match), administrative fee rows excluded (e.g. digitizing fee, ink color change), missing weight_class signal, print_location that did not fit front/back/left/right, or the single-date assumption above. Always include at least the single-date note.'
+					'Free-text notes on anything uncertain or excluded: unmapped decoration/finishing types (e.g. "Patch Install" has no schema match), administrative fee rows excluded (e.g. digitizing fee, ink color change), missing weight_class signal, print_location that did not fit front/back/left/right.'
 			},
 			lineItems: {
 				type: 'array',
@@ -89,7 +93,7 @@ const extractionTool: Anthropic.Tool = {
 				}
 			}
 		},
-		required: ['hoopsOrderId', 'customerName', 'externalShipDate', 'internalDueDate', 'lineItems']
+		required: ['hoopsOrderId', 'customerName', 'externalShipDate', 'lineItems']
 	}
 };
 
@@ -160,7 +164,10 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 	}
 
 	try {
-		const validated = orderCandidateSchema.parse({ ...raw, importedBy, lineItems });
+		// internalDueDate is never asked of the model (see extractionTool above) — it's
+		// always computed from externalShipDate, per CLAUDE.md's resolved lead-time policy.
+		const internalDueDate = typeof raw.externalShipDate === 'string' ? computeInternalDueDate(raw.externalShipDate) : raw.externalShipDate;
+		const validated = orderCandidateSchema.parse({ ...raw, internalDueDate, importedBy, lineItems });
 		return { ...validated, confidenceFlags };
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);

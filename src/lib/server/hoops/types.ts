@@ -85,6 +85,11 @@ export const ALL_SIBLINGS = ALL_SIBLINGS_DEPENDENCY;
 export const orderCorrectionSchema = z
 	.object({
 		customerName: z.string().min(1),
+		// internalDueDate defaults to 14 days before externalShipDate (see
+		// internalDueDate.ts) whenever externalShipDate changes without an explicit
+		// internalDueDate alongside it — but a human reviewing the order can still
+		// override it directly; the default is a starting point, not a lock. See
+		// updateOrderFields.ts / confirmImport.ts for exactly how the two interact.
 		externalShipDate: z.iso.date(),
 		internalDueDate: z.iso.date(),
 		// Free-text, human-entered only — e.g. why a job ran late. See CLAUDE.md.

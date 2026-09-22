@@ -5,30 +5,80 @@
 	import { pressable } from '$lib/actions/pressable.svelte';
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig } from '$lib/appConfig';
+	import { computeInternalDueDate } from '$lib/internalDueDate';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
 
-	// A short, concrete "what does this order still need before it can move" list —
-	// replaces relying on the free-text Notes field for this at review time (Notes
-	// stays, further down, for its own documented purpose per CLAUDE.md: human
-	// observations like "why a job ran late," tied to the add_order_note MCP tool and
-	// surfaced on Reports — not the same thing as "what's blocking this order").
-	// Built from data already on the page: the import-time flags Claude raised, plus
-	// whichever of the pre-production approval gates and per-line-item estimate gaps
-	// are still outstanding right now.
-	const needsAttention = $derived.by(() => {
-		const items: string[] = [...data.order.importFlags];
-		if (data.order.blankOrderingStatus !== 'RECEIVED') items.push('Blanks not yet received.');
-		if (data.order.customerApprovalStatus !== 'APPROVED') items.push('Customer approval not yet received.');
-		for (const item of data.lineItems) {
-			if (item.itemType === 'DECORATION' && item.artworkApprovalStatus !== 'APPROVED') {
-				items.push(`${item.design}: artwork not approved yet.`);
-			}
-			if (!item.estimate.ok) {
-				items.push(`${item.design}: ${item.estimate.reason}`);
-			}
+	// Internal due date defaults to 14 days before external ship date (see
+	// internalDueDate.ts) but stays a real, independently editable field — a human
+	// reviewing the order can set it to whatever they want. This only re-suggests the
+	// default when the ship date changes AND the due date still matches the default for
+	// the *previous* ship date — so editing the ship date after someone has already
+	// deliberately overridden the due date doesn't clobber their override.
+	let externalShipDate = $state(data.order.externalShipDate);
+	let internalDueDate = $state(data.order.internalDueDate);
+
+	function onExternalShipDateChange(newValue: string) {
+		const wasDefault = internalDueDate === computeInternalDueDate(externalShipDate);
+		externalShipDate = newValue;
+		if (wasDefault) internalDueDate = computeInternalDueDate(newValue);
+	}
+
+	// data.gaps (see orderGaps.ts, computed server-side and shared with the notes-box
+	// fill-in action so both read the exact same outstanding-gap logic) splits into two
+	// very differently-treated things:
+	//
+	// - `answerableQuestions`: map to a real, settable field — the whole point of the
+	//   notes box below. Grouped for display (many line items can share the exact same
+	//   outstanding field, e.g. two dozen embroidery rows all missing ink_color_count,
+	//   and one bullet per line item defeated the point of a short list) — the full,
+	//   ungrouped per-line-item question list still goes to Claude when the notes box is
+	//   submitted (recomputed fresh server-side from the database), so grouping here only
+	//   affects what's shown, never what an answer can target.
+	// - `data.gaps.infoNotes` (rendered directly, further down, collapsed by default): the
+	//   import-time context Claude flagged and estimate gaps with no backing field at all
+	//   (a station with no formula yet) — nothing to answer here, so it stays out of the
+	//   way rather than crowding the actual questions.
+	const FIELD_QUESTION_LABELS: Record<string, string> = {
+		inkColorCount: 'What is the ink/thread color count',
+		stitchCount: 'What is the stitch count',
+		garmentStyle: 'Is it a flat garment or a cap',
+		capConstruction: 'Is it a structured or unstructured cap'
+	};
+
+	const answerableQuestions = $derived.by(() => {
+		const items: { key: string; text: string }[] = [];
+
+		for (const q of data.gaps.questions) {
+			if (q.target.level === 'order') items.push({ key: q.key, text: q.question });
 		}
+
+		const lineItemQuestions = data.gaps.questions.filter((q) => q.target.level === 'lineItem');
+
+		const artworkQs = lineItemQuestions.filter((q) => q.target.field === 'artworkApprovalStatus');
+		if (artworkQs.length > 0) {
+			items.push({
+				key: 'artwork-group',
+				text: artworkQs.length === 1 ? artworkQs[0].question : `Has artwork been approved for these ${artworkQs.length} line items?`
+			});
+		}
+
+		const byField = new Map<string, typeof lineItemQuestions>();
+		for (const q of lineItemQuestions) {
+			if (q.target.field === 'artworkApprovalStatus') continue;
+			const list = byField.get(q.target.field) ?? [];
+			list.push(q);
+			byField.set(q.target.field, list);
+		}
+		for (const [field, qs] of byField) {
+			const label = FIELD_QUESTION_LABELS[field] ?? 'What is the answer';
+			items.push({
+				key: `field-group:${field}`,
+				text: qs.length === 1 ? qs[0].question : `${label} for each of these ${qs.length} line items? (name them in your note if the answers differ)`
+			});
+		}
+
 		return items;
 	});
 </script>
@@ -76,22 +126,81 @@
 		<!-- The straight-to-the-point "what does this order still need" list — the
 		     thing to actually look at before an order can move forward. Only shows
 		     while something's outstanding; disappears on its own once everything's
-		     resolved rather than needing to be dismissed. -->
-		{#if needsAttention.length > 0}
+		     resolved rather than needing to be dismissed. Split into the questions the
+		     notes box can actually answer (prominent, right above it) and everything
+		     else Claude flagged at import time (collapsed by default — context, not
+		     something to act on). -->
+		{#if answerableQuestions.length > 0}
 			<div class="needs-attention">
 				<strong>Needs attention:</strong>
 				<ul>
-					{#each needsAttention as reason (reason)}
-						<li>{reason}</li>
+					{#each answerableQuestions as { key, text } (key)}
+						<li>{text}</li>
 					{/each}
 				</ul>
 			</div>
 		{/if}
+		<!-- NEW: answer the questions above in one note instead of filling in each field
+		     by hand. Claude reads the note against the exact outstanding question list
+		     (recomputed fresh from the database, not from anything sent by the browser)
+		     and only fills in fields the note actually answers — see
+		     fillNeedsAttentionFromNotes.ts. This never touches Confirm import (still a
+		     separate, explicit click below) and never removes the per-field "Save"
+		     forms further down — anything this gets wrong, or anything you'd rather
+		     type directly, stays editable by hand exactly as before. -->
+		{#if data.canEdit && answerableQuestions.length > 0}
+			<form method="POST" action="?/fillFromNotes" use:enhance class="fill-from-notes">
+				<label>
+					Answer the questions above
+					<textarea name="note" rows="3" placeholder="e.g. Blanks are in, customer approved it, and all four screen prints use 2 colors."
+					></textarea>
+				</label>
+				<button class="button button--secondary" use:pressable type="submit">Fill in from note</button>
+				{#if form?.filled}
+					<p class="success">
+						Answered {form.filled.answeredCount} question{form.filled.answeredCount === 1 ? '' : 's'}
+						{#if form.filled.unansweredCount > 0}— {form.filled.unansweredCount} left unanswered.{/if}
+					</p>
+				{/if}
+			</form>
+		{/if}
+		<!-- Import-time context — nothing here maps to a settable field, so it's not
+		     part of the questions above and can't be answered via the notes box.
+		     Collapsed by default so it reads as background, not a checklist. -->
+		{#if data.gaps.infoNotes.length > 0}
+			<details class="import-notes">
+				<summary>Import notes ({data.gaps.infoNotes.length})</summary>
+				<ul>
+					{#each data.gaps.infoNotes as { key, text } (key)}
+						<li>{text}</li>
+					{/each}
+				</ul>
+			</details>
+		{/if}
 		{#if data.canEdit}
-			<form method="POST" action="?/updateOrder" use:enhance class="fields">
+			<form
+				method="POST"
+				action="?/updateOrder"
+				use:enhance={() => async ({ update }) => update({ reset: false })}
+				class="fields"
+			>
 				<label>Customer <input name="customerName" value={data.order.customerName} autocomplete="off" /></label>
-				<label>External ship date <input name="externalShipDate" type="date" value={data.order.externalShipDate} /></label>
-				<label>Internal due date <input name="internalDueDate" type="date" value={data.order.internalDueDate} /></label>
+				<label>
+					External ship date
+					<input
+						name="externalShipDate"
+						type="date"
+						value={externalShipDate}
+						onchange={(e) => onExternalShipDateChange(e.currentTarget.value)}
+					/>
+				</label>
+				<!-- Defaults to 14 days before external ship date (see internalDueDate.ts /
+				     onExternalShipDateChange above) but stays a real, editable field — a
+				     person reviewing the order can set it to whatever they want. -->
+				<label>
+					Internal due date
+					<input name="internalDueDate" type="date" bind:value={internalDueDate} title="Defaults to 14 days before external ship date; edit freely to override." />
+				</label>
 				<label>
 					Blanks ordering
 					<select name="blankOrderingStatus">
@@ -370,6 +479,45 @@
 
 	.needs-attention ul {
 		margin: 0.3rem 0 0;
+		padding-left: 1.1rem;
+	}
+
+	.fill-from-notes {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		margin: 0 0 1rem;
+	}
+
+	.fill-from-notes label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		font-size: 0.85rem;
+		color: var(--ink-500);
+	}
+
+	.fill-from-notes textarea {
+		width: 100%;
+		font-family: inherit;
+	}
+
+	.fill-from-notes button {
+		align-self: start;
+	}
+
+	.import-notes {
+		margin: 0 0 1rem;
+		font-size: 0.85rem;
+		color: var(--ink-500);
+	}
+
+	.import-notes summary {
+		cursor: pointer;
+	}
+
+	.import-notes ul {
+		margin: 0.4rem 0 0;
 		padding-left: 1.1rem;
 	}
 

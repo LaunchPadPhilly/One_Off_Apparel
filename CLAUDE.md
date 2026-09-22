@@ -215,7 +215,7 @@ One row per order.
 | `hoops_order_id` | back-reference to Hoops |
 | `customer_name` | |
 | `external_ship_date` | promised to the customer |
-| `internal_due_date` | what production actually works toward |
+| `internal_due_date` | what production actually works toward — always computed as `external_ship_date` − 14 days, never an independent input (see Known open items) |
 | `status` | `needs_review`, `confirmed`, `scheduled`, `in_production`, `complete`, `cancelled` |
 | `imported_by` | who brought it in (usually "claude") |
 | `created_at` | |
@@ -549,6 +549,21 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   `propose_schedule`'s output — both stay 100% deterministic engine code, per this
   file's non-negotiable design principles; "Claude helps" here means explaining
   already-computed results in conversation, not an LLM call added to either page.
+- **"Needs attention" is now answerable in one note, not just field-by-field
+  (2026-09-22).** `orderGaps.ts` (`computeOrderGaps`) splits an order's outstanding gaps
+  into `questions` (order approval gates, artwork approval, and per-line-item missing
+  estimate data — each tagged with the exact field it maps to; `MissingLineItemDataError`
+  now carries a `field` for this) and `infoNotes` (import-time flags, and estimate gaps
+  with no backing field at all — a station with no formula yet — which no note can
+  resolve). The order page phrases `questions` as questions and offers a notes textarea
+  (`fillNeedsAttentionFromNotes.ts`) where a reviewer answers some or all of them in plain
+  language; Claude reads the note against the exact outstanding question list (recomputed
+  fresh from the database at submit time, not from anything the browser sends) and returns
+  only the fields the note actually answers — never guessing an unaddressed one — applied
+  through the same `updateOrderFields`/`updateLineItemFields` the per-field "Save" forms
+  already use. This is a faster way to fill in those forms, not a second write path or a
+  bypass of either human approval gate: every field stays directly editable by hand
+  afterward, and "Confirm import" is still a separate, explicit click.
 - **Real Hoops export samples now exist** (4 PDFs, provided 2026-09-18: Jobs 100127,
   100128, 100113, 100110) — the format is no longer undocumented in the sense of "we've
   never seen one," but extraction still has no deterministic parser and isn't validated at
@@ -570,12 +585,20 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     caps therefore still hit `MissingLineItemDataError` (garment_style not set) until
     either extraction is taught to recognize headwear, or a person sets `garmentStyle`
     manually via the order's line-item edit form (now exposed there).
-  - **Only one date ("Deadline") appears per job, not two.** The schema wants
-    `external_ship_date` (promised to customer) and `internal_due_date` (production's real
-    target) as distinct fields; every sample gives one date. Interim behavior: extraction
-    maps the one date to both fields and always flags this in `confidenceFlags`. There may
-    be a buffer policy (see the cure/dry-buffer open item above) that should separate them
-    instead — this hasn't been confirmed either way.
+  - **Only one date ("Deadline") appears per job, not two — resolved (2026-09-22).**
+    Confirmed with the client: `internal_due_date` is never an independent value: the shop
+    wants to be ready for an order two weeks before it's actually due, so
+    `internal_due_date` = `external_ship_date` − 14 days, always. Implemented as a pure,
+    deterministic computation (`computeInternalDueDate` in
+    `src/lib/server/hoops/internalDueDate.ts`), never left to the extraction model and
+    never a directly-editable field — Claude's extraction tool no longer asks for or emits
+    `internalDueDate` at all (`extractOrderFromPdf.ts` computes it from the extracted
+    `externalShipDate` after the model call returns); the order edit page shows it as a
+    disabled/read-only field; `updateOrderFields.ts` and `confirmImport.ts` recompute it
+    whenever `externalShipDate` changes and `orderCorrectionSchema` no longer accepts
+    `internalDueDate` as a correction at all. The cure/dry-buffer open item below is a
+    separate, still-unresolved question (a gap between a print and a downstream finishing
+    step) — do not conflate the two.
   - **Administrative fee rows** ("One-Time Digitizing Fee," "Ink Color Change") appear in
     the job details table but aren't production work — they must not become `LineItem`
     rows. Extraction must exclude them (and flag that they were excluded), not force them
