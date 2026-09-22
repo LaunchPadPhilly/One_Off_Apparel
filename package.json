@@ -30,9 +30,9 @@
 		"@sveltejs/adapter-node": "^5.5.7",
 		"@sveltejs/kit": "^2.70.3",
 		"@sveltejs/vite-plugin-svelte": "^7.3.0",
-		"@types/node": "^26.5.1",
+		"@types/node": "^26.6.1",
 		"@types/pg": "^8.23.1",
-		"svelte": "^5.57.0",
+		"svelte": "^5.57.1",
 		"svelte-check": "^4.7.6",
 		"tsx": "^4.23.13",
 		"typescript": "^6.0.3",
@@ -45,7 +45,7 @@
 		"jose": "^6.2.12",
 		"pg": "^8.23.0",
 		"prisma": "^7.10.0",
-		"zod": "^4.6.2"
+		"zod": "^4.6.5"
 	},
 	"description": "One Off Apparel: SvelteKit + Prisma/PostgreSQL + read-only MCP server + Terraform ECS Fargate."
 }
