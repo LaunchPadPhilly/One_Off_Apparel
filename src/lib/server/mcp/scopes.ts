@@ -12,7 +12,8 @@ const scopeToWire: Record<McpScope, string> = {
 	REPORTS_READ: 'reports:read',
 	SCHEDULE_READ: 'schedule:read',
 	IMPORT_WRITE: 'import:write',
-	SCHEDULE_WRITE: 'schedule:write'
+	SCHEDULE_WRITE: 'schedule:write',
+	ORDERS_READ: 'orders:read'
 };
 
 const wireToScope: Record<string, McpScope> = Object.fromEntries(

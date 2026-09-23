@@ -16,10 +16,14 @@ export const simulateChangeSchema = z.discriminatedUnion('type', [
 		lineItem: z.object({
 			itemType: z.enum(['DECORATION', 'FINISHING']),
 			decorationType: z.enum(['SCREEN_PRINT', 'EMBROIDERY', 'DTF', 'DTG']).nullish(),
-			finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG']).nullish(),
+			finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG', 'WOVENS']).nullish(),
 			inkColorCount: z.number().int().nonnegative().nullish(),
 			screens: z.number().int().nonnegative().nullish(),
 			stitchCount: z.number().int().nonnegative().nullish(),
+			garmentStyle: z.enum(['FLAT', 'CAP']).nullish(),
+			capConstruction: z.enum(['STRUCTURED', 'UNSTRUCTURED']).nullish(),
+			matteSurface: z.enum(['FLAT', 'SPECIALTY']).nullish(),
+			foldBagGarment: z.enum(['SS_TEE', 'OTHER']).nullish(),
 			quantity: z.number().int().positive(),
 			weightClass: z.enum(['THIN', 'POLY', 'BULKY']),
 			dueDate: z.iso.date()

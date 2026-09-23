@@ -3,6 +3,7 @@ import type { McpToolDefinition } from '$lib/server/mcp/handler';
 import { principalIdentity } from '$lib/server/mcp/handler';
 import { importHoopsExport } from '$lib/server/hoops/importHoopsExport';
 import { confirmImport } from '$lib/server/hoops/confirmImport';
+import { addOrderNote } from '$lib/server/hoops/addOrderNote';
 import { orderCandidateSchema, importCorrectionsSchema } from '$lib/server/hoops/types';
 import { getSchedule } from '$lib/server/schedule/getSchedule';
 import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersistSchedule';
@@ -17,23 +18,25 @@ import { simulateChange, simulateChangeSchema } from '$lib/server/schedule/simul
  * Rules for every tool, enforced by review rather than by the type system:
  *  - Set `readOnly` truthfully (see McpToolDefinition in mcp/handler.ts). Read-only is
  *    the default expectation; `readOnly: false` is an approved, scoped exception for the
- *    three domain write-tools below (import_hoops_export, confirm_import,
- *    commit_schedule) — each sits behind its own scope and one of CLAUDE.md's two human
- *    approval gates, never a bare write. See CLAUDE.md's Security constraints section
- *    for the decision record.
+ *    write-tools below (import_hoops_export, confirm_import, add_order_note,
+ *    commit_schedule) — each sits behind its own scope, and the first three write to
+ *    data that's still human-editable/reversible afterward, never a bare irreversible
+ *    write. See CLAUDE.md's Security constraints section for the decision record.
  *  - Parameterized queries only. Prisma's query builder does this; `$queryRaw` must use
  *    tagged-template parameters, never string interpolation.
  *  - Validate input with the Zod shape; the handler receives the parsed object.
  *  - Never return secrets, raw upstream payloads, or another user's private data.
  *
- * These six are CLAUDE.md's "Domain MCP tools". import_hoops_export and confirm_import
- * are the persistence half of the Hoops import feature (src/lib/server/hoops/) — this
- * repo still has no file parser (no documented Hoops export format exists), so
- * import_hoops_export takes already-structured order/line-item data, not a raw file.
- * get_schedule/propose_schedule/commit_schedule/simulate_change wrap the deterministic
- * engine (src/lib/server/engine/) plus the schedule persistence layer
- * (src/lib/server/schedule/) — Claude never computes hours or a schedule itself, only
- * calls these.
+ * The first six are CLAUDE.md's "Domain MCP tools". import_hoops_export and
+ * confirm_import are the persistence half of the Hoops import feature
+ * (src/lib/server/hoops/) — this repo still has no file parser (no documented Hoops
+ * export format exists), so import_hoops_export takes already-structured order/line-item
+ * data, not a raw file. get_schedule/propose_schedule/commit_schedule/simulate_change
+ * wrap the deterministic engine (src/lib/server/engine/) plus the schedule persistence
+ * layer (src/lib/server/schedule/) — Claude never computes hours or a schedule itself,
+ * only calls these. add_order_note is a seventh, added later, so a note given in
+ * conversation reaches Order.notes (and from there, the order's page and Reports)
+ * without requiring the web form — same field, no separate write path.
  */
 
 // A plain `readonly McpToolDefinition[]` annotation on the array below would force every
@@ -77,6 +80,25 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		handler: async ({ orderIds, corrections }, principal) => {
 			await confirmImport(orderIds, principalIdentity(principal), corrections);
 			return { confirmed: orderIds };
+		}
+	}),
+	defineTool({
+		name: 'add_order_note',
+		description:
+			"Adds a free-text note to an order — e.g. why a job ran late — so it shows up on the order's page and " +
+			'in Reports without anyone needing to open the web form. Appends a dated, attributed line rather than ' +
+			"overwriting; nothing infers this automatically. Example question: 'note that 100127 ran late because " +
+			"the vendor shipped blanks late' → { hoopsOrderId: '100127', note: 'Vendor shipped blanks late.' }. " +
+			'Returns { orderId, notes }.',
+		inputSchema: {
+			hoopsOrderId: z.string().min(1),
+			note: z.string().min(1)
+		},
+		requiredScope: 'IMPORT_WRITE',
+		readOnly: false,
+		handler: async ({ hoopsOrderId, note }, principal) => {
+			const updated = await addOrderNote(hoopsOrderId, note, principalIdentity(principal));
+			return { orderId: updated.id, notes: updated.notes };
 		}
 	}),
 	defineTool({

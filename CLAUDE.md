@@ -17,18 +17,30 @@ read it before touching any order/schedule/line-item logic.
 
 **Build status:** schema (`prisma/schema.prisma`), the engine (`src/lib/server/engine/`),
 the Hoops import persistence layer (`src/lib/server/hoops/`), the schedule persistence
-layer (`src/lib/server/schedule/`), and all six domain MCP tools
-(`src/lib/server/mcp/tools.ts`) are built and merged. **Still a shell, not end-to-end
-schedulable:** `estimate_hours` has real numbers for none of the six stations — every
-station still throws `MissingFormulaError` (see the engine section and Known open items)
-— so `propose_schedule`/`simulate_change` will flag every real job at_risk until the
-client's actual Consolidated IT rate tables land. No file parser exists for the Hoops
-export itself (format still undocumented); `import_hoops_export` takes already-structured
-data, not a raw file. Also record here the decisions Play 13 asks for: the
-MCP_SERVER_TOKEN choice, which scopes replace DATA_READ / REPORTS_READ and the default
-grant (three domain scopes — `SCHEDULE_READ`, `IMPORT_WRITE`, `SCHEDULE_WRITE` — were added
-alongside the originals for the six domain tools, not yet a full replacement/default-grant
-decision), and who owns deployment, data and UI.
+layer (`src/lib/server/schedule/`), all six domain MCP tools (`src/lib/server/mcp/tools.ts`),
+and a first UI pass — Orders (`src/routes/orders/`, plus `/orders/archive`), an extended
+Schedule/Production board (`src/routes/schedule/`), and a minimal Reports page
+(`src/routes/reports/`) — are built and merged. Real Hoops PDF extraction now exists
+(`src/lib/server/hoops/extractOrderFromPdf.ts`, via the Claude Messages API — needs
+`ANTHROPIC_API_KEY`) rather than a deterministic parser. **Still not end-to-end
+schedulable:** `estimate_hours` now has real numbers for every station
+(`screen_print_auto`, `embroidery`, and all five finishing steps — matte, relabel,
+fold_bag, hang_tag, wovens, added 2026-09-23); only DTF/DTG still throw
+`MissingFormulaError` (see the engine section and Known open items). Even with real
+formulas, `propose_schedule` still needs `Station`/`CapacityCalendar` rows
+that barely exist in the real database — nothing in the app can create a *real* one
+today. `fetchCapacity()` now fills that gap with a stand-in default (7.5h/day per known
+station, matching the drafts workspace's own display fallback — see
+`$lib/schedule/defaultCapacity.ts`, 2026-09-22) so a job with a real estimate but no real
+capacity data no longer automatically comes back at_risk; a real `CapacityCalendar` row
+still always overrides the default the moment one exists. A job still comes back
+at_risk for a real reason (no formula / this job is missing a required field / its due
+date already fell before the draft's window even starts) instead of one blanket cause.
+Also record here the decisions Play 13
+asks for: the MCP_SERVER_TOKEN choice, which scopes replace DATA_READ / REPORTS_READ and
+the default grant (four domain scopes now — `SCHEDULE_READ`, `IMPORT_WRITE`,
+`SCHEDULE_WRITE`, `ORDERS_READ` — added alongside the originals, not yet a full
+replacement/default-grant decision), and who owns deployment, data and UI.
 
 ## Human Activation Gate Policy
 
@@ -209,13 +221,21 @@ One row per order.
 | `hoops_order_id` | back-reference to Hoops |
 | `customer_name` | |
 | `external_ship_date` | promised to the customer |
-| `internal_due_date` | what production actually works toward |
-| `status` | `needs_review`, `confirmed`, `scheduled`, `in_production`, `complete` |
+| `internal_due_date` | what production actually works toward — always computed as `external_ship_date` − 14 days, never an independent input (see Known open items) |
+| `status` | `needs_review`, `confirmed`, `scheduled`, `in_production`, `complete`, `cancelled` |
 | `imported_by` | who brought it in (usually "claude") |
 | `created_at` | |
 
 `orders.status` only flips to `complete` automatically, via `check_completion()` — see
 Engine section. Never set it to `complete` directly from application code.
+
+`cancelled` is Orders' "delete" (`cancelOrder.ts`, 2026-09-21) — deliberately
+non-destructive: it only changes `status`, never removes the order or its line items,
+schedule assignments or actuals. Blocked once an order is already `complete` (nothing
+left to cancel) or already `cancelled`. A cancelled order drops out of the active
+`/orders` list and `fetchBacklog()` (which only ever selects `confirmed` orders) with no
+extra code, and shows up in `/orders/archive` alongside `complete` orders — that route
+is a filtered view over both terminal statuses now, not a second archiving mechanism.
 
 #### `line_items`
 One row per **design/print job or finishing step** on an order.
@@ -231,11 +251,13 @@ One row per **design/print job or finishing step** on an order.
 | `finishing_step` | matte / relabel / fold & bag / hang tag — **finishing rows only**, blank on decoration rows |
 | `depends_on` | **finishing rows only.** Either another `line_items.id` (this finish waits on one specific job — e.g. matte waits on the print it's finishing) or the literal string `"all_siblings"` (this finish waits on every other line item under the same order — this is how fold & bag / final packaging works: it can't start until every decoration *and* every other finish on that order is done) |
 | `status` | `needs_review`, `blocked`, `in_production`, `complete`. Finishing rows are created with `status: blocked` and only become schedulable once `check_completion()` unlocks them. |
-| `weight_class` | thin, poly, or bulky |
+| `weight_class` | thin, poly, or bulky — meaningful for **flat** garments; null/ignored when `garment_style` is `cap` |
+| `garment_style` | `flat` or `cap` — **decoration rows only**, meaningful today for embroidery's formula (flat and cap use genuinely different rate tables, not a weight-class variant — see estimate_hours below) |
+| `cap_construction` | `structured` or `unstructured` — **only meaningful when `garment_style` is `cap`**, null otherwise |
 | `apparel_color` | text — the garment color (e.g. "Grey") |
-| `ink_color_count` | int — number of colors in the decoration itself. This is the "X" variable in the spreadsheet formulas, used for both screen-print ink setup and embroidery thread-change time. Do not confuse with `apparel_color` — they used to be conflated into one ambiguous `colors` field; they are not the same thing. |
+| `ink_color_count` | int — number of colors in the decoration itself. Used for screen-print ink setup and embroidery thread-change time — but is the "X" variable in screen print's formula and the **"Y" variable in embroidery's** (the letter mapping isn't consistent across stations — see estimate_hours below). Do not confuse with `apparel_color` — they used to be conflated into one ambiguous `colors` field; they are not the same thing. |
 | `screens` | how many screens (screen print only) |
-| `stitch_count` | embroidery only |
+| `stitch_count` | embroidery only — the "X" variable in embroidery's formula (not `ink_color_count`) |
 | `quantity` | total units |
 | `size_breakdown` | units per size |
 | `estimated_hours` | jsonb — how long it should take, per station |
@@ -312,17 +334,99 @@ way.)
 #### `estimate_hours(item)`
 Works out how long one job takes. Each station's formula is a direct port of one table from
 the client's own "Consolidated IT" spreadsheet tab — unit-tested against the spreadsheet's
-own numbers, not re-derived. Variables throughout: `X` = ink/thread color count
-(`ink_color_count`), `Y` = screen count (screen print only), `Z` = quantity.
+own numbers, not re-derived. Variables are **not consistent across stations** — confirmed
+directly with the client per station, do not assume one station's letter mapping applies to
+another:
+- `screen_print_auto`: `X` = ink color count (`ink_color_count`), `Y` = screen count
+  (`screens`), `Z` = quantity.
+- `embroidery`: `X` = stitch count (`stitch_count`), `Y` = thread/ink color count
+  (`ink_color_count`), `Z` = quantity — the **opposite** pairing of X/Y from screen print.
 
 **`screen_print_auto`** — per print location. `screens < 5` and `screens > 4` are two
-*different* rate regimes, not one flat table:
+*different* rate regimes, not one flat table. Confirmed with the client (2026-09-18) and
+implemented in `estimateHours.ts`:
 
-<!-- INCOMPLETE — cut off mid-edit. Needs: the actual screen_print_auto rate table for
-both regimes (screens < 5 and screens > 4), then the same per the client's Consolidated
-IT sheet for embroidery, matte, relabel, fold_bag and hang_tag (see Known open items
-below for which of those don't have a portable formula at all yet). Until this is
-filled in, estimate_hours must keep throwing MissingFormulaError rather than guess. -->
+```
+initial_units = { thin: 100, poly: 80, bulky: 50 }        // does not vary by regime
+rate_per_hr (screens < 5)  = { thin: 360, poly: 288, bulky: 180 }
+rate_per_hr (screens > 4)  = { thin: 180, poly: 144, bulky: 90 }
+
+setup = screens*5 + ink_color_count*15 + 30 + 30           // minutes
+run   = max(0, quantity - initial_units[weight_class]) * (60 / rate_per_hr[weight_class])
+hours = (setup + run) / 60
+```
+
+**`embroidery`** — confirmed with the client (2026-09-21) and implemented in
+`estimateHours.ts`. Flat garments and headwear ("Cap") are genuinely different formulas,
+not a weight-class variant of one table — this is why `LineItem` gained `garmentStyle`
+(`flat`/`cap`) and `capConstruction` (`structured`/`unstructured`, cap-only) fields. Blank
+cells in the client's table were confirmed to mean "identical to the row above," not
+zero/N/A — several rows below intentionally share a constant for that reason:
+
+```
+thread_change = ink_color_count * 5                          // minutes, same for flat and cap
+
+// flat (by weight_class)
+setup_boxing_divisor = { thin: 240, poly: 180, bulky: 120 }
+hooping_factor        = { thin: 1.5, poly: 2,   bulky: 1.5 }
+load_unload_factor    = 2                                     // same across all three
+cleanup_factor         = { thin: 4,   poly: 6,   bulky: 4 }
+sew_rate_divisor       = 850                                   // same across all three
+
+// cap (by cap_construction)
+setup_boxing_divisor = 240                                     // same for both
+hooping_factor        = { structured: 1,   unstructured: 2.5 }
+load_unload_factor    = 1                                       // same for both
+cleanup_factor         = 1.5                                    // same for both
+sew_rate_divisor       = 650                                    // same for both, lower than flat's 850
+
+setup_boxing = quantity * (60 / setup_boxing_divisor)
+hooping      = (quantity/6) * hooping_factor
+load_unload  = (quantity/6) * load_unload_factor
+cleanup      = (quantity/6) * cleanup_factor
+sew_time     = (quantity/6) * (stitch_count / sew_rate_divisor)
+
+hours = (setup_boxing + thread_change + hooping + load_unload + cleanup + sew_time) / 60
+```
+
+**Not implemented: "Steaming (IF Dark/Pigment)".** The client's table has a real Steaming
+step for flat garments (`quantity * (60/360)` minutes, N/A for caps), conditional on the
+garment being dark or using pigment ink. Nothing in the schema signals that today —
+`apparel_color` is free text, not a light/dark flag — and inferring "dark" from a color
+string would be exactly the kind of guessed business logic CLAUDE.md says to ask about
+instead. Every embroidery estimate is therefore a slight underestimate for dark/pigment
+jobs until a real signal exists (a new boolean field, most likely). `estimateHours.ts`
+flags this in a doc comment; it is not silently wrong, just deliberately incomplete.
+
+**Finishing steps** — from the client's finishing flowcharts (provided 2026-09-23) and
+implemented in `estimateHours.ts`. Every one is a flat per-garment time,
+`hours = quantity * minutes_per_unit / 60`:
+
+```
+printed_relabel (RELABEL)   minutes/unit = 60 / { thin: 144, poly: 144, bulky: 72 }
+hang_tags (HANG_TAG)        minutes/unit = 60 / { thin: 300, poly: 300, bulky: 150 }
+fold_bag (FOLD_BAG)         minutes/unit = 60 / { ss_tee: 300, other: 100 }   // fold_bag_garment, NOT weight class
+matte_finish (MATTE), flat  minutes/unit = 70 / { thin: 200, poly: 200, bulky: 100 }   // numerator is 70, per the chart
+matte_finish, specialty     minutes/unit = 1                                   // same for every weight class
+wovens (WOVENS)             minutes/unit = 60 / 90                             // ASSUMED — see below
+```
+
+`matte_surface` (`flat`/`specialty`) and `fold_bag_garment` (`ss_tee`/`other`) are
+nullable `LineItem` fields for finishing rows only; a MATTE / FOLD_BAG row without its
+field set throws `MissingLineItemDataError`, never a guessed default. **Wovens is
+provisional:** the client's chart reads `QO * (60/90)` with no trailing `/ 60`, unlike
+every other chart, and the client calls it not fully thought out. The engine assumes the
+`/ 60` was left off (90 units/hour) — a decision made 2026-09-23 pending the client's
+final formula. Read literally it would be 40 minutes per garment.
+
+Still open, per Known open items below: `screen_print_auto`'s "Manual" variant (the
+client's own sheet marks it "never fully developed" — every cell blank, nothing to port),
+the Wovens formula (see above), and DTF/DTG (no station or formula defined at all). `estimate_hours` keeps throwing
+`MissingFormulaError` for all of those until each is resolved. Separately,
+`MissingLineItemDataError` (not a station-level gap) fires when a station's formula is
+real but one specific job is missing a required field — e.g. an embroidery line item with
+no `garmentStyle` set yet; a human resolves this by editing the line item, not by a
+schema/decision change.
 
 #### `check_completion(line_item_id)`
 Runs the moment the "Stop" button fires for the **last** station on a line item. This is
@@ -353,7 +457,12 @@ Builds a proposed schedule. Never writes to the live schedule — that only happ
 function propose_schedule(backlog, capacity):
   jobs = backlog.map(estimate_hours)     // backlog only ever contains
                                           // status: needs_review — blocked
-                                          // line items never reach here
+                                          // line items never reach here.
+                                          // fetchBacklog() also excludes any
+                                          // order whose due date has already
+                                          // passed (2026-09-22) — see Known
+                                          // open items; those never reach here
+                                          // either, not even as a fallback.
   jobs.sort_by(due_date)                 // due date is the hard floor
 
   for job in jobs:
@@ -386,6 +495,7 @@ Dependency ordering is now handled entirely by `line_items.depends_on` + `check_
 | `propose_schedule(date_range)` | builds a suggested schedule, does not save it |
 | `commit_schedule(assignment_ids[], approved_by)` | makes a proposed schedule official, writes to `schedule_assignments` + `audit_log` |
 | `simulate_change(change)` | checks "what if" (a rush order, a moved job) without actually changing anything |
+| `add_order_note(hoops_order_id, note)` | *(added 2026-09-18, not in the original design)* appends a dated, attributed note to an order — the way a note given in conversation reaches `Order.notes` (and from there the order's page and Reports) without the web form |
 
 Each of these is a real MCP tool registered the same way as any other tool in
 `src/lib/server/mcp/tools.ts`, gated by `guardedToolResult` and the scope system described
@@ -418,24 +528,264 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   from the client before `depends_on` unlocking is treated as "immediately schedulable."
 - **PDF/export import accuracy** has not been validated against a real Hoops export sample
   — only against the client's spreadsheet formulas.
-- **`LineItem` is missing the categorical fields the Fold & Bag and Matte formulas
-  actually need.** The current schema only has `weightClass` (Thin/Poly/Bulky). Per the
-  client's "Consolidated IT" sheet: Fold & Bag is keyed on "SS Tee" vs "Other," not weight
-  class at all; Matte is keyed on weight class *and* a second dimension, "Surface = Flat"
-  vs "Surface = Specialty," which uses a different formula entirely. Neither category
-  exists in the schema yet. Must be added — as a new nullable field or two, decoration
-  rows leave it null — before the engine PR ports `estimate_hours` for those two stations,
-  or those two formulas will be unimplementable as specified.
-- **Relabel has no formula in the source spreadsheet at all.** Unlike the embroidery
-  poly/bulky gaps (missing constants in an otherwise-real table), the Relabel tab was never
-  built out — there is no table to port. `estimate_hours` must keep throwing
-  `MissingFormulaError` for this station. This is a direct question for Jeff, not something
-  to fill in from a similar-looking station.
+- **Finishing formulas — resolved (2026-09-23), except Wovens.** The client supplied
+  flowcharts for Printed Re-Label, Fold & Bag, Hang Tags, Matte (flat and specialty
+  surface) and Wovens; all are now implemented (see estimate_hours above), and
+  `LineItem.matteSurface` / `LineItem.foldBagGarment` were added for the two that aren't
+  keyed on weight class. Still open: the Wovens formula itself (assumed 90 units/hour —
+  confirm with the client), and `extractOrderFromPdf.ts` only fills `matteSurface` /
+  `foldBagGarment` when the export states them clearly, so most imported MATTE and
+  FOLD_BAG rows will need them set by hand on the order page.
 - **DTF and DTG are dropdown values with no backing station or formula.** They appear as
   valid `decoration_type` choices on the order form, but nothing in the spreadsheet defines a
   station or production-time formula for either. Needs a scope decision from Jeff: are these
   actually offered today, and if so, what are their formulas? Do not map them onto an
   existing station as a stand-in.
+- **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
+  the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
+  covers the whole flow, not just Start/Stop: a date window (default 28 days from
+  today — an arbitrary "3-4 weeks" pick, not a spec), grouped by date, showing
+  proposed/approved/in-progress assignments with Propose, Approve (`commit_schedule`),
+  Edit/Remove (proposed only — reassigning station/date, or deleting the draft so its
+  line item returns to the backlog), and Start/Stop → `started_at`/`completed_at` →
+  `check_completion`. Received a visual/UX pass (2026-09-21): a stat-tile summary
+  (jobs placed / jobs at risk) instead of a plain sentence, at-risk jobs grouped into
+  three collapsible cards by *why* they're blocked (no formula / missing job data / no
+  capacity — the same three-way split `explainAtRisk.ts`'s `AtRiskCategory` already
+  made, now with an icon+color per category instead of one undifferentiated list), and
+  a standing banner when zero `Station`/`CapacityCalendar` rows exist at all (rather
+  than only surfacing that after a Propose click). Still not decided, not invented: the
+  route path (`/schedule` is a placeholder, rename freely), the actual layout/grouping
+  (per-station queue? per-day? per-order? this is still a day-grouped flat list, just a
+  better-looking one), the 28-day default window, and whether/when `LineItem.status`
+  should move to `in_production` (Start currently leaves it untouched — same category
+  of gap as "when does `Order.status` become `scheduled`," left alone rather than
+  guessed). Do not treat this route's current shape as a real spec — it's scaffolding
+  pending a real answer on all four points above, just no longer an unstyled one.
+- **Drafts: manual and automatic creation, both gated on CONFIRMED orders
+  (2026-09-22).** `/schedule/new` (manual — pick a name/window/strategy, then place line
+  items yourself in `/schedule/drafts/[id]`'s drag-and-drop workspace) and a new "Create
+  automatic schedule" button on `/schedule` (`proposeIntoNewDraft.ts`) are both real now.
+  The automatic path runs the exact same deterministic `propose_schedule` engine the
+  `propose_schedule` MCP tool already calls (`fetchBacklog` + `fetchCapacity` +
+  `proposeSchedule`, unchanged) — no LLM decides placements, per this file's
+  non-negotiable "Claude never computes a schedule" rule — and lands its output in a
+  brand-new `ScheduleDraft` (`scheduleDraftId` set on every row), a 4-week window
+  starting today. The MCP tool's own direct path (`proposeAndPersistSchedule.ts`) is
+  unchanged and still writes un-drafted `PROPOSED` rows with no `scheduleDraftId` — the
+  two coexist by design, not a duplication to clean up. Fixed a real gap while wiring
+  this in: the manual draft workspace's candidate-order list used to be every order not
+  `COMPLETE` (including `NEEDS_REVIEW`, which hasn't passed the import-confirmation
+  gate) — now `CONFIRMED` only. Deliberately NOT the full `fetchBacklog()` gate set
+  (blanks received, customer approval, artwork approval) for the *manual* path — a human
+  planning ahead can still place a confirmed order before every pre-production gate is
+  finalized; only the automatic engine path enforces every gate. Four follow-up fixes
+  (2026-09-22): (1) the CONFIRMED-only rule is now enforced server-side in
+  `placeAssignment` itself, not just by what the candidate sidebar shows — the sidebar
+  filter never stopped a direct POST from attaching a NEEDS_REVIEW order's line item.
+  (2) The automatic engine's placements now get a real `startMinuteOfDay`, not just a
+  date/station/sequenceOrder — `$lib/schedule/shift.ts` (the 8:00–16:30 shift + break
+  model, shared with `drafts/[id]/+page.svelte`'s rendering so the two can never drift
+  apart) packs each station/day's jobs back-to-back in `sequenceOrder` via
+  `packSequentialStarts`, skipping breaks automatically. Before this, every
+  engine-placed job defaulted to the same 8:00 slot (`startMinuteOfDay ?? 8*60` in the
+  load function) and visually stacked on top of each other until a human dragged them
+  apart; a freshly-created automatic draft now already shows its jobs laid out on the
+  timeline in batch order, no manual dragging needed to make it look right. (3)
+  `fetchCapacity()` now assumes `DEFAULT_STATION_DAY_HOURS` (`$lib/schedule/
+  defaultCapacity.ts`) for any (station, day) with no real `CapacityCalendar` row —
+  before this fix, every automatic run came back "0 placed" with everything at risk,
+  since the deterministic engine saw zero capacity everywhere even though the drafts
+  workspace's own timeline was already *displaying* that same 7.5h/day default as a
+  cosmetic fallback. This is a real, visible business assumption (every known station
+  open every day, including weekends, until real numbers are entered), not an invented
+  fact — a real `CapacityCalendar` row always overrides it the moment one exists. (4)
+  An order whose due date already fell before the draft's window even starts (a real,
+  recurring case — "today" always moves forward) was briefly given a "place it anyway,
+  past due" fallback in `proposeSchedule.ts` — reverted the same day (2026-09-22) after
+  a direct decision: an overdue order is excluded from scheduling entirely instead,
+  not placed-with-a-flag. `fetchBacklog()` now requires `Order.internalDueDate >=
+  today` (a `startOfToday()` helper shared conceptually with the drafts route's own
+  candidate query, which applies the identical cutoff — see both files), so an overdue
+  order's line items never reach the deterministic engine at all. The manual drafts
+  workspace enforces the same cutoff twice: the candidate sidebar query excludes it
+  (so it isn't offered to drag), and `placeAssignment` independently rejects it
+  server-side too (verified directly: a raw POST for an overdue order's line item is
+  rejected with a clear message, not just kept out of the UI's drag source) — the same
+  defense-in-depth pattern already used for the CONFIRMED-only rule in fix (1) above.
+  `propose_schedule`'s engine itself is back to its original hard-floor-only logic (no
+  past-due fallback, no `pastDueDate` column — that migration was added and then
+  dropped in the same session, `add_past_due_date_flag` then
+  `remove_past_due_date_flag`). Getting an overdue order schedulable again means
+  correcting its due date first (the order edit page), not scheduling around it.
+  One more real fix from the same round of testing: the draft workspace's default
+  station tab used to be whichever known station sorted first alphabetically
+  ("Embroidery") — since `fetchCapacity()` now upserts all six known stations so the
+  automatic engine has somewhere to place jobs (see above), that tab is very often
+  empty and irrelevant to the order actually being scheduled, which made a
+  successful automatic run look like it had placed nothing. The default now prefers
+  whichever station the earliest assignment actually landed on, falling back to the
+  first known station name only when the draft has no placements at all. A second,
+  related confusion from the same testing round: the candidate sidebar listed every
+  line item on an order unconditionally, with nothing distinguishing "already placed
+  on the timeline" from "still needs placing" — a correct automatic run looked
+  incomplete because the sidebar never reflected what had actually happened. Line
+  items with a placement anywhere in the draft (`placedLineItemIds`, derived live from
+  the same `placements` state the timeline itself renders from) now show a green
+  "Placed" chip, are dimmed, and are no longer draggable (dragging one again would
+  have created a second, duplicate assignment for the same job rather than moving the
+  existing one — there was no protection against that before this fix either). A third
+  bug surfaced by the same "why aren't these placed" question: the sidebar's per-line-item
+  hours and "why can't this be placed" tooltip read `LineItem.estimatedHours` — the
+  dormant column `estimateForDisplay.ts`'s own doc comment already says is never written
+  to (see the entry below) — so they always silently evaluated to nothing; the order
+  total always showed "0m" and no reason was ever surfaced for an unplaced item,
+  regardless of what was actually wrong. `drafts/[id]/+page.server.ts`'s `load()` now
+  computes `estimate: estimateForDisplay(item)` per line item (the exact same call the
+  Orders page already uses) instead of passing the dormant column through, and the three
+  client-side `estimate*()` helpers read `DisplayEstimate`'s real shape (`{ok:true,
+  hours,station}` / `{ok:false,category,reason}`) instead of the old ad-hoc one that
+  never matched anything real. Verified live: an order's total went from a permanent
+  "0m" to a real "3.5h," and a relabel line item's tooltip now shows the actual
+  `MissingFormulaError` reason instead of nothing.
+- **Draft board layout: every station visible per day, no tabs (2026-09-23).**
+  The board used to have a single station-tab strip at the top, and a day only
+  ever showed placements for whichever station was selected — an order that
+  touched two stations required a tab switch to see both halves. Now each day
+  card renders one row per station (fixed-width label column + bar), so the
+  whole (day × station) matrix is visible at once. Drop targets are per-row —
+  `handleTrackDrop` takes `stationName` explicitly instead of reading a
+  page-level `activeStation`, and the drop-highlight state is a
+  `date::station` key. Empty rows still render (dimmed) so a drop target is
+  always in the same place regardless of what's already placed. The time axis
+  (8a / 9a / … / 4:30p) is a single shared strip at the bottom of each day
+  card, aligned with the bar column, rather than repeated under every station
+  row. Do not reintroduce the tabs — the whole point was to stop the
+  "everything looks empty" surprise on a station tab that just wasn't the one
+  this order used.
+- **Draft board auto-shifts neighbors on any edit (2026-09-23).** The old drop
+  behavior was push-right (`findNonOverlappingStart`): a new/moved item snapped
+  forward past whatever it would overlap, and a removed item left a gap in the
+  bar. Now every place/move/remove triggers a repack of the affected (draft,
+  station, date), so items sit back-to-back from shift open in their current
+  relative order — dropping between two peers pushes the later ones back to make
+  room, removing or dragging away closes the gap. `$lib/schedule/repackDay.ts`
+  is the ONE source of truth for this layout math (`computeInsertRank`,
+  `insertAndRepack`, `repackOrdered`); both the client (`drafts/[id]/+page.svelte`)
+  and the server actions (`drafts/[id]/+page.server.ts`'s `placeAssignment` /
+  `moveAssignment` / `removeAssignment`) call it, and both delegate through to
+  the same `packSequentialStarts` helper the automatic engine
+  (`proposeIntoNewDraft.ts`) already uses — so a manual edit lands at the exact
+  wall-clock positions a fresh engine run would produce for the same queue.
+  Insertion rank is midpoint-based: dropping in the LEFT half of a peer's span
+  slots BEFORE that peer, dropping in the RIGHT half slots AFTER — the client
+  computes it, the server accepts an `insertRank` field on placeAssignment and
+  moveAssignment (replacing the old `startMinuteOfDay`, which no longer comes
+  from the client), makes room by bumping peers at rank >= insertRank in a
+  transaction, then normalizes sequenceOrder = 0..N-1 + rewrites
+  startMinuteOfDay via `packSequentialStarts`. Server actions return the peers'
+  new positions so the client can reconcile any drift after the optimistic
+  local repack. Deliberately NOT preserved: user-created gaps at the start of a
+  day (e.g. dragging the first job to 10:30 to hold the morning empty) — every
+  day always packs from 8:00 now. If that turns out to be a real workflow need,
+  the fix is a per-day "start offset" the packer honors, not a return to the
+  old push-right model — do not reintroduce `findNonOverlappingStart`.
+- **Per-line-item and per-order hour estimates, shown before scheduling
+  (2026-09-21).** `estimateForDisplay.ts` wraps the same `estimateHours()` the engine
+  uses and turns its result (or `MissingFormulaError`/`MissingLineItemDataError`) into
+  a display-ready shape. Shown on the Orders list (a live per-order total + a "N
+  pending" count) and on an order's detail page (a per-line-item badge, plus an
+  order-level stat row). Deliberately **not persisted** to `LineItem.estimatedHours`
+  (that column stays dormant/unused, as it already was) — computed fresh on every page
+  load instead, so it can never go stale relative to a line item a human just edited.
+  Claude is not involved in computing any of these numbers or in building
+  `propose_schedule`'s output — both stay 100% deterministic engine code, per this
+  file's non-negotiable design principles; "Claude helps" here means explaining
+  already-computed results in conversation, not an LLM call added to either page.
+- **"Needs attention" is now answerable in one note, not just field-by-field
+  (2026-09-22).** `orderGaps.ts` (`computeOrderGaps`) splits an order's outstanding gaps
+  into `questions` (order approval gates, artwork approval, and per-line-item missing
+  estimate data — each tagged with the exact field it maps to; `MissingLineItemDataError`
+  now carries a `field` for this) and `infoNotes` (import-time flags, and estimate gaps
+  with no backing field at all — a station with no formula yet — which no note can
+  resolve). The order page phrases `questions` as questions and offers a notes textarea
+  (`fillNeedsAttentionFromNotes.ts`) where a reviewer answers some or all of them in plain
+  language; Claude reads the note against the exact outstanding question list (recomputed
+  fresh from the database at submit time, not from anything the browser sends) and returns
+  only the fields the note actually answers — never guessing an unaddressed one — applied
+  through the same `updateOrderFields`/`updateLineItemFields` the per-field "Save" forms
+  already use. This is a faster way to fill in those forms, not a second write path or a
+  bypass of either human approval gate: every field stays directly editable by hand
+  afterward, and "Confirm import" is still a separate, explicit click.
+- **Real Hoops export samples now exist** (4 PDFs, provided 2026-09-18: Jobs 100127,
+  100128, 100113, 100110) — the format is no longer undocumented in the sense of "we've
+  never seen one," but extraction still has no deterministic parser and isn't validated at
+  scale; treat these as one reference set, not a guarantee every future export looks the
+  same. They confirmed the "Job <number>" line is the order identifier (`hoopsOrderId`) and
+  the decoration+finishing line-item grouping — but also surfaced five concrete gaps the
+  schema doesn't cover yet, each needing a real answer, not a guess:
+  - **"Patch Install" (Job 100113) matches no `decoration_type` or `finishing_step` value.**
+    Not screen print/embroidery/DTF/DTG, not matte/relabel/fold&bag/hang tag. No station,
+    no formula. Needs a decision from Jeff on what it is and where it runs.
+  - **No `weight_class` signal for headwear** (Job 100128's caps) — **partially
+    resolved (2026-09-21)**: `LineItem.garmentStyle` (`flat`/`cap`) and
+    `capConstruction` (`structured`/`unstructured`, cap-only) now exist and embroidery's
+    formula uses them instead of `weight_class` when `garment_style` is `cap` (see
+    estimate_hours above). What's still open: `extractOrderFromPdf.ts` does not populate
+    these new fields yet — every sample's weight-class hint ("Thin - Trail Network",
+    "Fleece/Bulky") still reads as textile-specific, and caps still default `weightClass`
+    to `THIN` with a flagged low-confidence guess, same interim behavior as before. Real
+    caps therefore still hit `MissingLineItemDataError` (garment_style not set) until
+    either extraction is taught to recognize headwear, or a person sets `garmentStyle`
+    manually via the order's line-item edit form (now exposed there).
+  - **Only one date ("Deadline") appears per job, not two — resolved (2026-09-22).**
+    Confirmed with the client: `internal_due_date` is never an independent value: the shop
+    wants to be ready for an order two weeks before it's actually due, so
+    `internal_due_date` = `external_ship_date` − 14 days, always. Implemented as a pure,
+    deterministic computation (`computeInternalDueDate` in
+    `src/lib/server/hoops/internalDueDate.ts`), never left to the extraction model and
+    never a directly-editable field — Claude's extraction tool no longer asks for or emits
+    `internalDueDate` at all (`extractOrderFromPdf.ts` computes it from the extracted
+    `externalShipDate` after the model call returns); the order edit page shows it as a
+    disabled/read-only field; `updateOrderFields.ts` and `confirmImport.ts` recompute it
+    whenever `externalShipDate` changes and `orderCorrectionSchema` no longer accepts
+    `internalDueDate` as a correction at all. The cure/dry-buffer open item below is a
+    separate, still-unresolved question (a gap between a print and a downstream finishing
+    step) — do not conflate the two.
+  - **Administrative fee rows** ("One-Time Digitizing Fee," "Ink Color Change") appear in
+    the job details table but aren't production work — they must not become `LineItem`
+    rows. Extraction must exclude them (and flag that they were excluded), not force them
+    into a decoration/finishing shape.
+  - **`print_location` (front/back/left/right) doesn't cover every real position** — "Right
+    of Back Seam," "Sleeve/Collar" appear in samples and fit none of the four values.
+    Extraction should leave `printLocation` null and flag the raw text rather than guess
+    the closest enum value.
+- **PDF extraction cost/model choice not confirmed with the client.**
+  `extractOrderFromPdf.ts` calls the Claude Messages API (`claude-sonnet-5`) per uploaded
+  PDF — real per-import cost, no caching, no cheaper-model fallback considered. Needs
+  `ANTHROPIC_API_KEY` in `.env.example`/`web_secret_keys` (added) but not yet in any real
+  deployed secret. Revisit the model choice once real import volume/cost is known.
+- **Reports (minimal) gaps.** `/reports` only shows what the schema already supports
+  (estimate-vs-actual variance by station and by line item, on-time completion,
+  currently-blocked count, a recent-changes feed off `audit_log`). One thing it still
+  can't show without new work: a historical at-risk trend — `propose_schedule`'s
+  `flag_at_risk` results are never persisted (see the engine section), so only a live
+  snapshot is possible, not a trend over time. Not added silently; needs a decision on
+  whether it's worth new persistence.
+- **`Order.notes` is free-text, human-entered only** — e.g. why a job ran late. Nothing
+  writes it automatically. Two paths reach it, both landing in the same field (no
+  separate write path): the order's page (`updateOrderFields`), or telling Claude in
+  conversation (the `add_order_note` MCP tool, matched by `hoops_order_id` since that's
+  what a person actually says) — the latter appends a dated, attributed line rather than
+  overwriting, since conversational notes are observations stacking up, not a field
+  someone's deliberately rewriting. `/reports` surfaces it next to late orders. Two
+  things this still doesn't do, both explicitly deferred rather than built: (1) any actual
+  pattern-mining across accumulated notes ("Claude can learn off of that") — today a human
+  or a future Claude session just reads the raw text; nothing summarizes trends across
+  orders; (2) a recurring daily/weekly digest — no delivery mechanism (email/Slack/
+  in-app), no scheduler, and no cadence decided (the request itself said "maybe daily
+  maybe weekly"). Needs an actual decision on cadence + delivery before building, not a
+  guess.
 
 ### Domain naming conventions to keep consistent
 
