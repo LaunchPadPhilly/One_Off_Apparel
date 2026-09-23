@@ -44,7 +44,9 @@
 		inkColorCount: 'What is the ink/thread color count',
 		stitchCount: 'What is the stitch count',
 		garmentStyle: 'Is it a flat garment or a cap',
-		capConstruction: 'Is it a structured or unstructured cap'
+		capConstruction: 'Is it a structured or unstructured cap',
+		matteSurface: 'Is the matte finish on a flat or specialty surface',
+		foldBagGarment: 'Is the garment being folded & bagged a short-sleeve tee'
 	};
 
 	const answerableQuestions = $derived.by(() => {
@@ -342,6 +344,8 @@
 					{#if item.screens}· {item.screens} screen{item.screens === 1 ? '' : 's'}{/if}
 					{#if item.stitchCount}· {item.stitchCount} stitches{/if}
 					{#if item.garmentStyle}· {item.garmentStyle}{#if item.capConstruction} ({item.capConstruction}){/if}{/if}
+					{#if item.matteSurface}· {item.matteSurface === 'FLAT' ? 'flat' : 'specialty'} surface{/if}
+					{#if item.foldBagGarment}· {item.foldBagGarment === 'SS_TEE' ? 'SS tee' : 'other garment'}{/if}
 				</p>
 				{#if data.canEdit}
 					<!--
@@ -401,6 +405,40 @@
 									<option value="APPROVED" selected={item.artworkApprovalStatus === 'APPROVED'}>Approved</option>
 								</select>
 							</label>
+						{/if}
+						<!-- NEW (2026-09-23): the finishing-only fields the Matte and Fold & Bag
+						     formulas need. Same blank "—" = "don't change" convention. Weight
+						     class is editable here too because Relabel, Hang Tags and Matte
+						     (flat) are keyed on it. -->
+						{#if item.itemType === 'FINISHING'}
+							<label>
+								Weight class
+								<select name="weightClass">
+									<option value="THIN" selected={item.weightClass === 'THIN'}>Thin</option>
+									<option value="POLY" selected={item.weightClass === 'POLY'}>Poly</option>
+									<option value="BULKY" selected={item.weightClass === 'BULKY'}>Bulky</option>
+								</select>
+							</label>
+							{#if item.finishingStep === 'MATTE'}
+								<label>
+									Matte surface
+									<select name="matteSurface">
+										<option value="" selected={!item.matteSurface}>—</option>
+										<option value="FLAT" selected={item.matteSurface === 'FLAT'}>Flat</option>
+										<option value="SPECIALTY" selected={item.matteSurface === 'SPECIALTY'}>Specialty</option>
+									</select>
+								</label>
+							{/if}
+							{#if item.finishingStep === 'FOLD_BAG'}
+								<label>
+									Garment
+									<select name="foldBagGarment">
+										<option value="" selected={!item.foldBagGarment}>—</option>
+										<option value="SS_TEE" selected={item.foldBagGarment === 'SS_TEE'}>SS tee</option>
+										<option value="OTHER" selected={item.foldBagGarment === 'OTHER'}>Other</option>
+									</select>
+								</label>
+							{/if}
 						{/if}
 						<button class="button button--secondary" use:pressable type="submit">Save</button>
 					</form>

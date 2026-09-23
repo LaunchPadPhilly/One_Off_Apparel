@@ -66,7 +66,17 @@ const extractionTool: Anthropic.Tool = {
 							description: 'Only if the export\'s position clearly maps to one of these four. "Right of Back Seam", "Sleeve/Collar" etc. do not — use null and note the raw position text in confidenceFlags instead of guessing.'
 						},
 						decorationType: { type: ['string', 'null'], enum: ['SCREEN_PRINT', 'EMBROIDERY', 'DTF', 'DTG', null], description: 'DECORATION rows only, else null.' },
-						finishingStep: { type: ['string', 'null'], enum: ['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG', null], description: 'FINISHING rows only, else null.' },
+						finishingStep: { type: ['string', 'null'], enum: ['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG', 'WOVENS', null], description: 'FINISHING rows only, else null. WOVENS = sewing in woven labels.' },
+						matteSurface: {
+							type: ['string', 'null'],
+							enum: ['FLAT', 'SPECIALTY', null],
+							description: 'MATTE rows only, and only if the export clearly says whether the matte goes on a flat or specialty surface. Otherwise null and note it in confidenceFlags — never guess.'
+						},
+						foldBagGarment: {
+							type: ['string', 'null'],
+							enum: ['SS_TEE', 'OTHER', null],
+							description: 'FOLD_BAG rows only. SS_TEE if the garment being bagged is clearly a short-sleeve tee, OTHER if it is clearly something else (hoodie, long sleeve, hat...). Null if unclear.'
+						},
 						dependsOn: {
 							type: ['string', 'null'],
 							description:
@@ -103,7 +113,7 @@ const SYSTEM_PROMPT = `You extract structured order data from a "Job" PDF export
 - The job details table is organized into repeating groups: one blank/garment block (Code, Name/Description, Vendor, Color, Size, Quantity rows — one row per size) followed by one or more decoration/finishing rows (Name/Description, Vendor, Position, Color(s), Size, Quantity). Each decoration or finishing row is its own line item, sharing the same order — NOT one line item per garment/size row.
 - A finishing row (relabel, matte, etc.) depends on the decoration it finishes within the same garment group — wire dependsOn to that decoration's localId.
 - Never invent a value you cannot support from the text. When something doesn't fit the schema (an unmapped treatment type, a missing signal, an ambiguous position), say so in confidenceFlags rather than guessing silently. This system's whole design assumes a human reviews everything you extract before it becomes real — your job is to make what you're unsure about visible, not to be right about everything.
-- If a treatment has no matching decorationType or finishingStep at all (e.g. "Patch Install" — it's neither screen print/embroidery/DTF/DTG nor matte/relabel/fold&bag/hang tag), DO NOT put it in lineItems, not even with a null/guessed type. Leave it out of the array entirely and describe it in confidenceFlags instead — an item with no schema mapping is not a line item with missing fields, it's an excluded item.
+- If a treatment has no matching decorationType or finishingStep at all (e.g. "Patch Install" — it's neither screen print/embroidery/DTF/DTG nor matte/relabel/fold&bag/hang tag/wovens), DO NOT put it in lineItems, not even with a null/guessed type. Leave it out of the array entirely and describe it in confidenceFlags instead — an item with no schema mapping is not a line item with missing fields, it's an excluded item.
 
 Call emit_extracted_order exactly once with everything you found.`;
 

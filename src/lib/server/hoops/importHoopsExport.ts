@@ -52,6 +52,10 @@ async function createLineItemsForOrder(
 				inkColorCount: itemCandidate.inkColorCount ?? null,
 				screens: itemCandidate.screens ?? null,
 				stitchCount: itemCandidate.stitchCount ?? null,
+				garmentStyle: itemCandidate.garmentStyle ?? null,
+				capConstruction: itemCandidate.capConstruction ?? null,
+				matteSurface: itemCandidate.matteSurface ?? null,
+				foldBagGarment: itemCandidate.foldBagGarment ?? null,
 				quantity: itemCandidate.quantity,
 				sizeBreakdown: itemCandidate.sizeBreakdown,
 				reviewConfidence: itemCandidate.reviewConfidence ?? null

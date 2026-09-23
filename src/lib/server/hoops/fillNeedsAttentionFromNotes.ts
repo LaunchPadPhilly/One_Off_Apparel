@@ -41,6 +41,8 @@ const ALLOWED_VALUES: Record<string, FieldKind> = {
 	artworkApprovalStatus: ['NOT_SUBMITTED', 'PENDING_APPROVAL', 'REVISION_REQUESTED', 'APPROVED'],
 	garmentStyle: ['FLAT', 'CAP'],
 	capConstruction: ['STRUCTURED', 'UNSTRUCTURED'],
+	matteSurface: ['FLAT', 'SPECIALTY'],
+	foldBagGarment: ['SS_TEE', 'OTHER'],
 	inkColorCount: 'integer',
 	stitchCount: 'integer'
 };

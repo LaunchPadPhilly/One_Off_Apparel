@@ -38,6 +38,8 @@ One row per decoration or finishing line on the form. Type-specific fields are n
 | `weight_class` | enum | | `thin`, `poly`, or `bulky`. Parse from garment info where possible (standard tees = `thin`, polyester/performance = `poly`, hoodies/fleece = `bulky`). See *Weight class inference*. |
 | `stitch_count` | integer | | **Embroidery only.** Parse from name — "5,000 Stitches" → `5000`. |
 | `thread_count` | integer | | **Embroidery only.** Distinct thread colors used. Default `1` if only one color listed. |
+| `matte_surface` | enum | | **Matte finish only.** `flat` or `specialty` — selects the matte formula. Leave blank if the form doesn't say. |
+| `fold_bag_garment` | enum | | **Fold & bag only.** `ss_tee` for short-sleeve tees, `other` for anything else. Leave blank if unclear. |
 
 ## Item type classification
 

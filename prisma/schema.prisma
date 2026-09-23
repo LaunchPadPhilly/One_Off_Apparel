@@ -315,6 +315,14 @@ model LineItem {
   // Caps use a different embroidery formula depending on this. Stays null for
   // every non-cap row.
   capConstruction       CapConstruction?
+  // NEW (2026-09-23): FINISHING rows with finishingStep MATTE only — is the matte
+  // finish going on a FLAT surface or a SPECIALTY one? The client's Matte tab uses a
+  // different formula for each (see estimateHours.ts). Null on every other row.
+  matteSurface          MatteSurface?
+  // NEW (2026-09-23): FINISHING rows with finishingStep FOLD_BAG only — is the
+  // garment being folded a short-sleeve tee (SS_TEE) or anything else (OTHER)? The
+  // client's Fold & Bag tab is keyed on this, not on weight class. Null elsewhere.
+  foldBagGarment        FoldBagGarment?
   // Either another LineItem's id, or the literal string "all_siblings"
   // (waits on every other line item under the same order). This is
   // deliberately a plain string, not a Prisma relation: a real FK
@@ -491,6 +499,8 @@ enum FinishingStep {
   RELABEL
   FOLD_BAG
   HANG_TAG
+  // NEW (2026-09-23): sewing in woven labels.
+  WOVENS
 }
 
 enum LineItemStatus {
@@ -521,6 +531,18 @@ enum GarmentStyle {
 enum CapConstruction {
   STRUCTURED
   UNSTRUCTURED
+}
+
+// NEW (2026-09-23): which of the client's two Matte Finish formulas applies.
+enum MatteSurface {
+  FLAT
+  SPECIALTY
+}
+
+// NEW (2026-09-23): which of the client's two Fold & Bag rates applies.
+enum FoldBagGarment {
+  SS_TEE
+  OTHER
 }
 
 enum ScheduleAssignmentStatus {

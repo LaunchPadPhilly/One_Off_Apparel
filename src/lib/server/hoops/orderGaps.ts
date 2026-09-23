@@ -131,5 +131,9 @@ function fieldQuestion(field: MissingLineItemField, design: string): string {
 			return `Is "${design}" a flat garment or a cap?`;
 		case 'capConstruction':
 			return `Is "${design}" a structured or unstructured cap?`;
+		case 'matteSurface':
+			return `Is the matte finish on "${design}" a flat or specialty surface?`;
+		case 'foldBagGarment':
+			return `Is "${design}" being folded & bagged a short-sleeve tee or another garment?`;
 	}
 }

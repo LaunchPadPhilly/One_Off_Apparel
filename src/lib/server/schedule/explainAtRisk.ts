@@ -37,9 +37,10 @@ const STATION_EXPLANATIONS: Record<string, string> = {
 	DTF: 'DTF has no station or timing set up yet.',
 	DTG: 'DTG has no station or timing set up yet.',
 	MATTE: 'Matte finishing timing isn’t set up for this job yet.',
-	RELABEL: 'Relabel has no timing formula in the system yet — this needs an answer from Jeff.',
+	RELABEL: 'Relabel timing isn’t set up for this job yet.',
 	FOLD_BAG: 'Fold & bag timing isn’t set up for this job yet.',
-	HANG_TAG: 'Hang tag timing isn’t set up for this job yet.'
+	HANG_TAG: 'Hang tag timing isn’t set up for this job yet.',
+	WOVENS: 'Wovens timing isn’t set up for this job yet.'
 };
 
 // These two prefixes are how this file tells apart WHY a job couldn't be scheduled,

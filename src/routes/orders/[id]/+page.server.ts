@@ -102,6 +102,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			// change them. They'll be null for line items nobody has set them on yet.
 			garmentStyle: item.garmentStyle,
 			capConstruction: item.capConstruction,
+			// NEW (2026-09-23): finishing-only formula inputs (matte / fold & bag).
+			matteSurface: item.matteSurface,
+			foldBagGarment: item.foldBagGarment,
 			// NEW: the artwork-approval gate — decoration rows only, null on finishing
 			// rows. Same fetchBacklog() reasoning as Order.blankOrderingStatus above.
 			artworkApprovalStatus: item.artworkApprovalStatus,
@@ -172,7 +175,7 @@ export const actions: Actions = {
 		// up a field if the form actually sent a non-empty value for it, so leaving a
 		// dropdown on its blank "—" option just means "don't change this field," not
 		// "set it to empty."
-		for (const key of ['design', 'apparelColor', 'weightClass', 'garmentStyle', 'capConstruction', 'artworkApprovalStatus']) {
+		for (const key of ['design', 'apparelColor', 'weightClass', 'garmentStyle', 'capConstruction', 'matteSurface', 'foldBagGarment', 'artworkApprovalStatus']) {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = value.trim();
 		}

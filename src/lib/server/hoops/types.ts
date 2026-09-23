@@ -20,7 +20,7 @@ export const lineItemCandidateBaseSchema = z.object({
 	design: z.string().min(1),
 	printLocation: z.enum(['FRONT', 'BACK', 'LEFT', 'RIGHT']).nullish(),
 	decorationType: z.enum(['SCREEN_PRINT', 'EMBROIDERY', 'DTF', 'DTG']).nullish(),
-	finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG']).nullish(),
+	finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG', 'WOVENS']).nullish(),
 	// NEW (2026-09-21): flat garment vs headwear — decoration-only, meaningful today for
 	// embroidery's estimate_hours formula. See prisma/schema.prisma's
 	// LineItem.garmentStyle comment. `.nullish()` means this field is optional and can
@@ -28,6 +28,10 @@ export const lineItemCandidateBaseSchema = z.object({
 	garmentStyle: z.enum(['FLAT', 'CAP']).nullish(),
 	// NEW (2026-09-21): only meaningful when garmentStyle above is 'CAP'.
 	capConstruction: z.enum(['STRUCTURED', 'UNSTRUCTURED']).nullish(),
+	// NEW (2026-09-23): finishing-only — MATTE rows use matteSurface, FOLD_BAG rows use
+	// foldBagGarment to pick their formula. See prisma/schema.prisma.
+	matteSurface: z.enum(['FLAT', 'SPECIALTY']).nullish(),
+	foldBagGarment: z.enum(['SS_TEE', 'OTHER']).nullish(),
 	// Another line item's `localId` in this same order candidate, or the literal
 	// "all_siblings" sentinel — never a real LineItem.id (none exist yet at import time).
 	dependsOn: z.string().nullish(),

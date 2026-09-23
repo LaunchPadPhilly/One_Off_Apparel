@@ -41,7 +41,9 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 					quantity: true,
 					weightClass: true,
 					garmentStyle: true,
-					capConstruction: true
+					capConstruction: true,
+					matteSurface: true,
+					foldBagGarment: true
 				}
 			}
 		},

@@ -1,4 +1,4 @@
-import { DecorationType, FinishingStep, GarmentStyle, LineItemType, type CapConstruction, type WeightClass } from '../../../../prisma/generated/prisma/enums';
+import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface, type CapConstruction, type FoldBagGarment, type WeightClass } from '../../../../prisma/generated/prisma/enums';
 import type { EstimateHoursInput, EstimateHoursResult } from './types';
 
 /**
@@ -14,12 +14,10 @@ export abstract class EstimationError extends Error {}
  * Thrown instead of returning a guessed number, for a station with no real formula at
  * all yet. CLAUDE.md is explicit that every station formula here is a direct port of
  * one "Consolidated IT" spreadsheet tab, unit-tested against that spreadsheet's own
- * numbers — not re-derived. screen_print_auto (2026-09-19) and embroidery
- * (2026-09-21) are now fully wired — see estimate_hours in CLAUDE.md. Per CLAUDE.md's
- * Known open items: Relabel and DTF/DTG have no formula (or station) in the source
- * spreadsheet at all — those are not "not yet ported," they need a decision from the
- * client, not an implementation. Matte and Fold & Bag are blocked on new schema fields
- * that don't exist yet, not on a missing formula.
+ * numbers — not re-derived. screen_print_auto (2026-09-19), embroidery (2026-09-21)
+ * and every finishing step (2026-09-23) are now fully wired — see estimate_hours in
+ * CLAUDE.md. What still throws this: DTF/DTG, which have no station or formula in the
+ * source spreadsheet at all and need a decision from the client.
  */
 export class MissingFormulaError extends EstimationError {
 	constructor(what: string) {
@@ -31,7 +29,7 @@ export class MissingFormulaError extends EstimationError {
 /** The exact LineItem field a MissingLineItemDataError is missing — lets a caller (the
  *  order page's "needs attention" gaps, the notes-based fill-in) target the real field
  *  precisely instead of parsing it back out of the human-readable message. */
-export type MissingLineItemField = 'inkColorCount' | 'stitchCount' | 'garmentStyle' | 'capConstruction';
+export type MissingLineItemField = 'inkColorCount' | 'stitchCount' | 'garmentStyle' | 'capConstruction' | 'matteSurface' | 'foldBagGarment';
 
 /**
  * Thrown when a station's formula is real, but *this specific job* is missing a field
@@ -95,11 +93,17 @@ const SCREEN_PRINT_RATE_PER_HOUR: Partial<Record<ScreenPrintRegime, Partial<Reco
 function estimateScreenPrintAutoHours(item: EstimateHoursInput): EstimateHoursResult {
 	// `?? 0` means "if this value is missing (null/undefined), just treat it as 0" —
 	// a safe fallback so the math below doesn't crash on incomplete data.
+	// CAUTION: unlike embroidery below (which throws MissingLineItemDataError for a
+	// missing field), a screen-print job with no screens/ink count set still gets a
+	// number here — just a too-low one (setup shrinks to the fixed 60 minutes). It
+	// won't show as "pending" on the Orders page. Open question whether this should
+	// throw MissingLineItemDataError instead, like embroidery does.
 	const screens = item.screens ?? 0;
 	const inkColorCount = item.inkColorCount ?? 0;
 
 	// Setup time in minutes: 5 minutes per screen used, plus 15 minutes per ink color,
-	// plus two fixed 30-minute chunks (one for general setup, one for machine config).
+	// plus two fixed 30-minute chunks. (The spreadsheet lists them as two separate
+	// +30 terms; what each one represents hasn't been confirmed with the client.)
 	const setupMinutes = screens * 5 + inkColorCount * 15 + 30 + 30;
 
 	// Look up how many garments are included "for free" before run time starts
@@ -232,6 +236,68 @@ function estimateEmbroideryHours(item: EstimateHoursInput): EstimateHoursResult 
 	return { station: 'embroidery', hours: totalMinutes / 60 };
 }
 
+// ─── Finishing steps (client's finishing flowcharts, 2026-09-23) ─────────────────────
+// Every finishing formula has the same shape: each garment takes a fixed number of
+// minutes, so hours = quantity * minutesPerUnit / 60. The client writes most of them as
+// "QO * (60 / unitsPerHour) / 60" — i.e. a units-per-hour rate. The tables below keep
+// the client's own numbers (the rate, or the minutes numerator) rather than
+// pre-dividing them, so each one can be checked against the flowchart at a glance.
+
+/** hours for `quantity` units at a flat `minutesPerUnit`. */
+function perUnitHours(quantity: number, minutesPerUnit: number): number {
+	return (quantity * minutesPerUnit) / 60;
+}
+
+// Printed Re-Label: QO * (60 / rate) / 60, rate keyed by weight class.
+const RELABEL_UNITS_PER_HOUR: Record<WeightClass, number> = { THIN: 144, POLY: 144, BULKY: 72 };
+
+// Hang Tags: QO * (60 / rate) / 60, rate keyed by weight class.
+const HANG_TAG_UNITS_PER_HOUR: Record<WeightClass, number> = { THIN: 300, POLY: 300, BULKY: 150 };
+
+// Fold & Bag: QO * (60 / rate) / 60, keyed on short-sleeve tee vs anything else — NOT
+// weight class (see LineItem.foldBagGarment).
+const FOLD_BAG_UNITS_PER_HOUR: Record<FoldBagGarment, number> = { SS_TEE: 300, OTHER: 100 };
+
+// Matte Finish, Flat Surface: QO * (70 / rate) / 60 — note the numerator is 70, not 60
+// like the other flowcharts (that's how the client's chart reads).
+const MATTE_FLAT_MINUTES_NUMERATOR = 70;
+const MATTE_FLAT_RATE: Record<WeightClass, number> = { THIN: 200, POLY: 200, BULKY: 100 };
+
+// Matte Finish, Specialty Surface: QO * 1 / 60 — one minute per garment, the same for
+// every weight class.
+const MATTE_SPECIALTY_MINUTES_PER_UNIT = 1;
+
+// Wovens: the client's chart reads "QO * (60/90)" with no trailing "/ 60", unlike every
+// other finishing chart, and the client describes it as not fully thought out yet.
+// ASSUMPTION (confirmed with Yara 2026-09-23, not yet with the client): the "/ 60" was
+// just left off, so this is 90 units/hour like the other charts' pattern. Read
+// literally it would be 40 minutes per garment (~67h for 100 units). Revisit once the
+// client finalizes the Wovens formula.
+const WOVENS_UNITS_PER_HOUR = 90;
+
+function estimateFinishingHours(item: EstimateHoursInput): EstimateHoursResult {
+	const quantity = item.quantity;
+	switch (item.finishingStep) {
+		case FinishingStep.RELABEL:
+			return { station: 'printed_relabel', hours: perUnitHours(quantity, 60 / RELABEL_UNITS_PER_HOUR[item.weightClass]) };
+		case FinishingStep.HANG_TAG:
+			return { station: 'hang_tags', hours: perUnitHours(quantity, 60 / HANG_TAG_UNITS_PER_HOUR[item.weightClass]) };
+		case FinishingStep.FOLD_BAG:
+			if (!item.foldBagGarment) throw new MissingLineItemDataError('fold_bag_garment (SS tee vs other)', 'foldBagGarment');
+			return { station: 'fold_bag', hours: perUnitHours(quantity, 60 / FOLD_BAG_UNITS_PER_HOUR[item.foldBagGarment]) };
+		case FinishingStep.MATTE:
+			if (!item.matteSurface) throw new MissingLineItemDataError('matte_surface (flat vs specialty)', 'matteSurface');
+			if (item.matteSurface === MatteSurface.SPECIALTY) {
+				return { station: 'matte_finish', hours: perUnitHours(quantity, MATTE_SPECIALTY_MINUTES_PER_UNIT) };
+			}
+			return { station: 'matte_finish', hours: perUnitHours(quantity, MATTE_FLAT_MINUTES_NUMERATOR / MATTE_FLAT_RATE[item.weightClass]) };
+		case FinishingStep.WOVENS:
+			return { station: 'wovens', hours: perUnitHours(quantity, 60 / WOVENS_UNITS_PER_HOUR) };
+		default:
+			throw new MissingFormulaError(`a finishing line item with finishingStep "${item.finishingStep}"`);
+	}
+}
+
 /**
  * Works out how long one job takes, station by station. All math lives here —
  * Claude never computes hours or a schedule itself (see CLAUDE.md's non-negotiable
@@ -261,16 +327,5 @@ export function estimateHours(item: EstimateHoursInput): EstimateHoursResult {
 		}
 	}
 
-	switch (item.finishingStep) {
-		case FinishingStep.MATTE:
-			throw new MissingFormulaError('the matte finishing formula — CLAUDE.md flags this as blocked on a new schema field (Surface: Flat vs Specialty) that does not exist yet, not just an unported formula');
-		case FinishingStep.RELABEL:
-			throw new MissingFormulaError('the relabel finishing formula — CLAUDE.md flags this as having no formula in the source spreadsheet at all, a direct question for the client rather than something to port');
-		case FinishingStep.FOLD_BAG:
-			throw new MissingFormulaError('the fold & bag finishing formula — CLAUDE.md flags this as blocked on a new schema field ("SS Tee" vs "Other") that does not exist yet, not just an unported formula');
-		case FinishingStep.HANG_TAG:
-			throw new MissingFormulaError('the hang tag finishing station formula');
-		default:
-			throw new MissingFormulaError(`a finishing line item with finishingStep "${item.finishingStep}"`);
-	}
+	return estimateFinishingHours(item);
 }

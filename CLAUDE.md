@@ -23,10 +23,11 @@ Schedule/Production board (`src/routes/schedule/`), and a minimal Reports page
 (`src/routes/reports/`) — are built and merged. Real Hoops PDF extraction now exists
 (`src/lib/server/hoops/extractOrderFromPdf.ts`, via the Claude Messages API — needs
 `ANTHROPIC_API_KEY`) rather than a deterministic parser. **Still not end-to-end
-schedulable:** `estimate_hours` has real numbers for two of the six stations
-(`screen_print_auto`, `embroidery`) — the other four (matte, relabel, fold_bag, hang_tag)
-still throw `MissingFormulaError` (see the engine section and Known open items). Even for
-the two real formulas, `propose_schedule` still needs `Station`/`CapacityCalendar` rows
+schedulable:** `estimate_hours` now has real numbers for every station
+(`screen_print_auto`, `embroidery`, and all five finishing steps — matte, relabel,
+fold_bag, hang_tag, wovens, added 2026-09-23); only DTF/DTG still throw
+`MissingFormulaError` (see the engine section and Known open items). Even with real
+formulas, `propose_schedule` still needs `Station`/`CapacityCalendar` rows
 that barely exist in the real database — nothing in the app can create a *real* one
 today. `fetchCapacity()` now fills that gap with a stand-in default (7.5h/day per known
 station, matching the drafts workspace's own display fallback — see
@@ -397,11 +398,30 @@ instead. Every embroidery estimate is therefore a slight underestimate for dark/
 jobs until a real signal exists (a new boolean field, most likely). `estimateHours.ts`
 flags this in a doc comment; it is not silently wrong, just deliberately incomplete.
 
+**Finishing steps** — from the client's finishing flowcharts (provided 2026-09-23) and
+implemented in `estimateHours.ts`. Every one is a flat per-garment time,
+`hours = quantity * minutes_per_unit / 60`:
+
+```
+printed_relabel (RELABEL)   minutes/unit = 60 / { thin: 144, poly: 144, bulky: 72 }
+hang_tags (HANG_TAG)        minutes/unit = 60 / { thin: 300, poly: 300, bulky: 150 }
+fold_bag (FOLD_BAG)         minutes/unit = 60 / { ss_tee: 300, other: 100 }   // fold_bag_garment, NOT weight class
+matte_finish (MATTE), flat  minutes/unit = 70 / { thin: 200, poly: 200, bulky: 100 }   // numerator is 70, per the chart
+matte_finish, specialty     minutes/unit = 1                                   // same for every weight class
+wovens (WOVENS)             minutes/unit = 60 / 90                             // ASSUMED — see below
+```
+
+`matte_surface` (`flat`/`specialty`) and `fold_bag_garment` (`ss_tee`/`other`) are
+nullable `LineItem` fields for finishing rows only; a MATTE / FOLD_BAG row without its
+field set throws `MissingLineItemDataError`, never a guessed default. **Wovens is
+provisional:** the client's chart reads `QO * (60/90)` with no trailing `/ 60`, unlike
+every other chart, and the client calls it not fully thought out. The engine assumes the
+`/ 60` was left off (90 units/hour) — a decision made 2026-09-23 pending the client's
+final formula. Read literally it would be 40 minutes per garment.
+
 Still open, per Known open items below: `screen_print_auto`'s "Manual" variant (the
 client's own sheet marks it "never fully developed" — every cell blank, nothing to port),
-matte and fold_bag (blocked on new schema fields, not just an unported formula), relabel
-(no formula exists in the source spreadsheet at all — a question for the client, not a
-port), and DTF/DTG (no station or formula defined at all). `estimate_hours` keeps throwing
+the Wovens formula (see above), and DTF/DTG (no station or formula defined at all). `estimate_hours` keeps throwing
 `MissingFormulaError` for all of those until each is resolved. Separately,
 `MissingLineItemDataError` (not a station-level gap) fires when a station's formula is
 real but one specific job is missing a required field — e.g. an embroidery line item with
@@ -508,19 +528,14 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   from the client before `depends_on` unlocking is treated as "immediately schedulable."
 - **PDF/export import accuracy** has not been validated against a real Hoops export sample
   — only against the client's spreadsheet formulas.
-- **`LineItem` is missing the categorical fields the Fold & Bag and Matte formulas
-  actually need.** The current schema only has `weightClass` (Thin/Poly/Bulky). Per the
-  client's "Consolidated IT" sheet: Fold & Bag is keyed on "SS Tee" vs "Other," not weight
-  class at all; Matte is keyed on weight class *and* a second dimension, "Surface = Flat"
-  vs "Surface = Specialty," which uses a different formula entirely. Neither category
-  exists in the schema yet. Must be added — as a new nullable field or two, decoration
-  rows leave it null — before the engine PR ports `estimate_hours` for those two stations,
-  or those two formulas will be unimplementable as specified.
-- **Relabel has no formula in the source spreadsheet at all.** Unlike the embroidery
-  poly/bulky gaps (missing constants in an otherwise-real table), the Relabel tab was never
-  built out — there is no table to port. `estimate_hours` must keep throwing
-  `MissingFormulaError` for this station. This is a direct question for Jeff, not something
-  to fill in from a similar-looking station.
+- **Finishing formulas — resolved (2026-09-23), except Wovens.** The client supplied
+  flowcharts for Printed Re-Label, Fold & Bag, Hang Tags, Matte (flat and specialty
+  surface) and Wovens; all are now implemented (see estimate_hours above), and
+  `LineItem.matteSurface` / `LineItem.foldBagGarment` were added for the two that aren't
+  keyed on weight class. Still open: the Wovens formula itself (assumed 90 units/hour —
+  confirm with the client), and `extractOrderFromPdf.ts` only fills `matteSurface` /
+  `foldBagGarment` when the export states them clearly, so most imported MATTE and
+  FOLD_BAG rows will need them set by hand on the order page.
 - **DTF and DTG are dropdown values with no backing station or formula.** They appear as
   valid `decoration_type` choices on the order form, but nothing in the spreadsheet defines a
   station or production-time formula for either. Needs a scope decision from Jeff: are these

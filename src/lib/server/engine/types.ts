@@ -2,7 +2,9 @@ import type {
 	CapConstruction,
 	DecorationType,
 	FinishingStep,
+	FoldBagGarment,
 	GarmentStyle,
+	MatteSurface,
 	LineItemType,
 	WeightClass
 } from '../../../../prisma/generated/prisma/enums';
@@ -33,6 +35,10 @@ export interface EstimateHoursInput {
 	// how they're stored in the database (a line item might not have these set yet).
 	garmentStyle?: GarmentStyle | null;
 	capConstruction?: CapConstruction | null;
+	// NEW (2026-09-23): finishing-only — MATTE rows need matteSurface, FOLD_BAG rows
+	// need foldBagGarment. See prisma/schema.prisma's LineItem comments.
+	matteSurface?: MatteSurface | null;
+	foldBagGarment?: FoldBagGarment | null;
 }
 
 export interface EstimateHoursResult {

@@ -65,6 +65,8 @@ export async function fetchBacklog(): Promise<BacklogItem[]> {
 		weightClass: item.weightClass,
 		garmentStyle: item.garmentStyle,
 		capConstruction: item.capConstruction,
+		matteSurface: item.matteSurface,
+		foldBagGarment: item.foldBagGarment,
 		dueDate: item.order.internalDueDate
 	}));
 }
@@ -85,7 +87,7 @@ function* enumerateDays(range: DateRange): Generator<string> {
 /**
  * Every station's open capacity within a date range. A real CapacityCalendar row
  * always wins; anywhere one doesn't exist yet, this fills the gap with
- * DEFAULT_STATION_DAY_HOURS for each of the six known stations (see
+ * DEFAULT_STATION_DAY_HOURS for each known station (see
  * defaultCapacity.ts's doc comment for exactly why and what business assumption that
  * represents) — otherwise the deterministic engine would see literally zero capacity
  * anywhere and flag every job at risk, even though the drafts workspace's own timeline
