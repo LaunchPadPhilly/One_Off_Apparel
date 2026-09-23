@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { fly, fade } from 'svelte/transition';
 	import { screenEnter, screenExit } from '$lib/motion';
-	import { appConfig, storageKeyPrefix } from '$lib/appConfig';
+	import { appConfig } from '$lib/appConfig';
 	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments } from '$lib/schedule/shift';
 	import type { PageProps } from './$types';
 
@@ -46,58 +46,6 @@
 	function isWeekend(iso: string): boolean {
 		const day = new Date(`${iso}T00:00:00Z`).getUTCDay();
 		return day === 0 || day === 6;
-	}
-
-	// ─── Days view: full scroll vs one week at a time ──────────────────────────
-	// `data.capacity` always covers draft.weeks * 7 days starting at the draft's
-	// start date, so chunking it into groups of 7 lines up exactly with calendar
-	// weeks — no partial-week edge case to handle.
-	type DaysViewMode = 'scroll' | 'week';
-	const DAYS_VIEW_MODE_KEY = `${storageKeyPrefix}scheduleDaysViewMode`;
-
-	function loadDaysViewMode(): DaysViewMode {
-		if (typeof window === 'undefined') return 'scroll';
-		try {
-			const saved = localStorage.getItem(DAYS_VIEW_MODE_KEY);
-			if (saved === 'scroll' || saved === 'week') return saved;
-		} catch {
-			// localStorage unavailable — just default to scroll.
-		}
-		return 'scroll';
-	}
-
-	let daysViewMode = $state<DaysViewMode>(loadDaysViewMode());
-	let weekIndex = $state(0);
-
-	function setDaysViewMode(mode: DaysViewMode) {
-		daysViewMode = mode;
-		weekIndex = 0;
-		if (typeof window === 'undefined') return;
-		try {
-			localStorage.setItem(DAYS_VIEW_MODE_KEY, mode);
-		} catch {
-			// localStorage unavailable — the choice just won't persist across reloads.
-		}
-	}
-
-	let totalWeeks = $derived(Math.max(1, Math.ceil(data.capacity.length / 7)));
-	let visibleDays = $derived(
-		daysViewMode === 'week' ? data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7) : data.capacity
-	);
-	let weekRangeLabel = $derived.by(() => {
-		const weekDays = data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7);
-		if (weekDays.length === 0) return '';
-		const first = formatDayLabel(weekDays[0].date);
-		const last = formatDayLabel(weekDays[weekDays.length - 1].date);
-		return `${first.date} – ${last.date}`;
-	});
-
-	function goPrevWeek() {
-		weekIndex = Math.max(0, weekIndex - 1);
-	}
-
-	function goNextWeek() {
-		weekIndex = Math.min(totalWeeks - 1, weekIndex + 1);
 	}
 
 	// Reads the shape estimateForDisplay.ts's DisplayEstimate actually returns
@@ -729,55 +677,8 @@
 				{/each}
 			</div>
 
-			<div class="days-toolbar">
-				<div class="segmented" role="tablist" aria-label="Days view">
-					<button
-						type="button"
-						class="segmented__option"
-						class:segmented__option--active={daysViewMode === 'scroll'}
-						role="tab"
-						aria-selected={daysViewMode === 'scroll'}
-						onclick={() => setDaysViewMode('scroll')}
-					>
-						Scroll
-					</button>
-					<button
-						type="button"
-						class="segmented__option"
-						class:segmented__option--active={daysViewMode === 'week'}
-						role="tab"
-						aria-selected={daysViewMode === 'week'}
-						onclick={() => setDaysViewMode('week')}
-					>
-						Week
-					</button>
-				</div>
-
-				{#if daysViewMode === 'week'}
-					<div class="week-nav">
-						<button
-							type="button"
-							class="week-nav__arrow"
-							aria-label="Previous week"
-							disabled={weekIndex === 0}
-							onclick={goPrevWeek}
-						>‹</button>
-						<span class="week-nav__label">
-							{weekRangeLabel} · Week {weekIndex + 1} of {totalWeeks}
-						</span>
-						<button
-							type="button"
-							class="week-nav__arrow"
-							aria-label="Next week"
-							disabled={weekIndex >= totalWeeks - 1}
-							onclick={goNextWeek}
-						>›</button>
-					</div>
-				{/if}
-			</div>
-
 			<div class="days">
-				{#each visibleDays as day (day.date)}
+				{#each data.capacity as day (day.date)}
 					{@const label = formatDayLabel(day.date)}
 					{@const dayPlacements = placementsForDay(day.date)}
 					<article class="day" class:day--weekend={isWeekend(day.date)}>
@@ -1282,85 +1183,6 @@
 		background: var(--surface);
 		color: var(--warm-700);
 		box-shadow: var(--shadow-1);
-	}
-
-	.days-toolbar {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		flex-wrap: wrap;
-	}
-
-	.segmented {
-		display: inline-flex;
-		gap: 0.2rem;
-		padding: 0.2rem;
-		background: var(--warm-100);
-		border-radius: var(--radius-md);
-	}
-
-	.segmented__option {
-		border: none;
-		background: transparent;
-		padding: 0.3rem 0.7rem;
-		border-radius: var(--radius-sm);
-		font-size: var(--fs-sm);
-		font-weight: 550;
-		color: var(--ink-700);
-		cursor: pointer;
-		transition: background-color var(--motion-fast) var(--ease-standard),
-			color var(--motion-fast) var(--ease-standard);
-	}
-
-	.segmented__option:hover {
-		color: var(--ink-900);
-	}
-
-	.segmented__option--active {
-		background: var(--surface);
-		color: var(--warm-700);
-		box-shadow: var(--shadow-1);
-	}
-
-	.week-nav {
-		display: flex;
-		align-items: center;
-		gap: 0.6rem;
-	}
-
-	.week-nav__label {
-		font-size: var(--fs-sm);
-		color: var(--ink-700);
-		font-variant-numeric: tabular-nums;
-		white-space: nowrap;
-	}
-
-	.week-nav__arrow {
-		border: 1px solid var(--border);
-		background: var(--surface);
-		color: var(--ink-700);
-		width: 1.9rem;
-		height: 1.9rem;
-		border-radius: var(--radius-sm);
-		font-size: 1rem;
-		line-height: 1;
-		cursor: pointer;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		transition: border-color var(--motion-fast) var(--ease-standard),
-			color var(--motion-fast) var(--ease-standard);
-	}
-
-	.week-nav__arrow:hover:not(:disabled) {
-		border-color: var(--warm-300);
-		color: var(--warm-700);
-	}
-
-	.week-nav__arrow:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
 	}
 
 	.days {
