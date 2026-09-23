@@ -407,12 +407,14 @@ model Actual {
   @@index([stationId])
 }
 
-// A named plan for what should run during a date range. This is the multi-draft
-// parent that "propose_schedule" will eventually output into — a real entity so
-// a shop can hold several candidate schedules side-by-side, pick one, and commit
-// it. ScheduleAssignment rows do not FK to this yet; that link lands with the
-// "propose into a specific draft" feature. Today the draft only carries its own
-// configuration (name, window, strategy).
+// A named plan for what should run during a date range — the multi-draft parent a
+// shop uses to hold several candidate schedules side-by-side, pick one, and commit
+// it. ScheduleAssignment.scheduleDraftId FKs here (2026-09-21) — manual placements
+// (the drafts/[id] drag-and-drop workspace) and the "Create automatic schedule"
+// button (proposeIntoNewDraft.ts, which runs the same propose_schedule engine the
+// propose_schedule MCP tool uses) both write into it. The MCP tool's own direct
+// path (proposeAndPersistSchedule.ts) still writes un-drafted PROPOSED rows, by
+// design — see its doc comment.
 model ScheduleDraft {
   id          String               @id @default(cuid())
   name        String

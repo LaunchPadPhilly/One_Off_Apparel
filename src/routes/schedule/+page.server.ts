@@ -1,9 +1,10 @@
-import { fail } from '@sveltejs/kit';
+import { fail, redirect } from '@sveltejs/kit';
 import { prisma } from '$lib/server/prisma';
 import { hasGrantedScope, requireScopePage } from '$lib/server/auth/guards';
 import { startAssignment } from '$lib/server/schedule/startAssignment';
 import { stopAssignment } from '$lib/server/schedule/stopAssignment';
 import { listDrafts } from '$lib/server/schedule/draft';
+import { proposeIntoNewDraft } from '$lib/server/schedule/proposeIntoNewDraft';
 import { ScheduleAssignmentStatus } from '../../../prisma/generated/prisma/enums';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -56,6 +57,25 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 };
 
 export const actions: Actions = {
+	// NEW: "Create automatic schedule" — a one-click alternative to the manual
+	// "Create schedule" flow (/schedule/new). Runs the existing deterministic
+	// propose_schedule engine (same one the propose_schedule MCP tool calls) against
+	// confirmed, approval-gated orders and lands the result in a brand-new draft, ready
+	// to review/edit in the usual drafts workspace. See proposeIntoNewDraft.ts.
+	createAutomatic: async ({ locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		let result;
+		try {
+			result = await proposeIntoNewDraft(user.email);
+		} catch (error) {
+			return fail(500, { message: (error as Error).message });
+		}
+		// placed/atRisk are one-time redirect feedback, not persisted anywhere — CLAUDE.md
+		// flags propose_schedule's at-risk results as never being durably stored (only a
+		// live snapshot is possible today); this just tells the draft page what to show
+		// immediately after creation, not a new persistence mechanism for that gap.
+		throw redirect(303, `/schedule/drafts/${result.draftId}?placed=${result.placedCount}&atRisk=${result.atRiskCount}`);
+	},
 	start: async ({ request, locals, url }) => {
 		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
 		const data = await request.formData();

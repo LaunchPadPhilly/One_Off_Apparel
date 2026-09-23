@@ -27,10 +27,15 @@ schedulable:** `estimate_hours` has real numbers for two of the six stations
 (`screen_print_auto`, `embroidery`) — the other four (matte, relabel, fold_bag, hang_tag)
 still throw `MissingFormulaError` (see the engine section and Known open items). Even for
 the two real formulas, `propose_schedule` still needs `Station`/`CapacityCalendar` rows
-that don't exist anywhere in the real database yet — no station or its daily capacity has
-ever been entered, and nothing in the app can create one today — so every real job still
-comes back at_risk, just with an honest reason (no formula / no capacity / this job is
-missing a required field) instead of one blanket cause. Also record here the decisions Play 13
+that barely exist in the real database — nothing in the app can create a *real* one
+today. `fetchCapacity()` now fills that gap with a stand-in default (7.5h/day per known
+station, matching the drafts workspace's own display fallback — see
+`$lib/schedule/defaultCapacity.ts`, 2026-09-22) so a job with a real estimate but no real
+capacity data no longer automatically comes back at_risk; a real `CapacityCalendar` row
+still always overrides the default the moment one exists. A job still comes back
+at_risk for a real reason (no formula / this job is missing a required field / its due
+date already fell before the draft's window even starts) instead of one blanket cause.
+Also record here the decisions Play 13
 asks for: the MCP_SERVER_TOKEN choice, which scopes replace DATA_READ / REPORTS_READ and
 the default grant (four domain scopes now — `SCHEDULE_READ`, `IMPORT_WRITE`,
 `SCHEDULE_WRITE`, `ORDERS_READ` — added alongside the originals, not yet a full
@@ -432,7 +437,12 @@ Builds a proposed schedule. Never writes to the live schedule — that only happ
 function propose_schedule(backlog, capacity):
   jobs = backlog.map(estimate_hours)     // backlog only ever contains
                                           // status: needs_review — blocked
-                                          // line items never reach here
+                                          // line items never reach here.
+                                          // fetchBacklog() also excludes any
+                                          // order whose due date has already
+                                          // passed (2026-09-22) — see Known
+                                          // open items; those never reach here
+                                          // either, not even as a fallback.
   jobs.sort_by(due_date)                 // due date is the hard floor
 
   for job in jobs:
@@ -537,6 +547,92 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   of gap as "when does `Order.status` become `scheduled`," left alone rather than
   guessed). Do not treat this route's current shape as a real spec — it's scaffolding
   pending a real answer on all four points above, just no longer an unstyled one.
+- **Drafts: manual and automatic creation, both gated on CONFIRMED orders
+  (2026-09-22).** `/schedule/new` (manual — pick a name/window/strategy, then place line
+  items yourself in `/schedule/drafts/[id]`'s drag-and-drop workspace) and a new "Create
+  automatic schedule" button on `/schedule` (`proposeIntoNewDraft.ts`) are both real now.
+  The automatic path runs the exact same deterministic `propose_schedule` engine the
+  `propose_schedule` MCP tool already calls (`fetchBacklog` + `fetchCapacity` +
+  `proposeSchedule`, unchanged) — no LLM decides placements, per this file's
+  non-negotiable "Claude never computes a schedule" rule — and lands its output in a
+  brand-new `ScheduleDraft` (`scheduleDraftId` set on every row), a 4-week window
+  starting today. The MCP tool's own direct path (`proposeAndPersistSchedule.ts`) is
+  unchanged and still writes un-drafted `PROPOSED` rows with no `scheduleDraftId` — the
+  two coexist by design, not a duplication to clean up. Fixed a real gap while wiring
+  this in: the manual draft workspace's candidate-order list used to be every order not
+  `COMPLETE` (including `NEEDS_REVIEW`, which hasn't passed the import-confirmation
+  gate) — now `CONFIRMED` only. Deliberately NOT the full `fetchBacklog()` gate set
+  (blanks received, customer approval, artwork approval) for the *manual* path — a human
+  planning ahead can still place a confirmed order before every pre-production gate is
+  finalized; only the automatic engine path enforces every gate. Four follow-up fixes
+  (2026-09-22): (1) the CONFIRMED-only rule is now enforced server-side in
+  `placeAssignment` itself, not just by what the candidate sidebar shows — the sidebar
+  filter never stopped a direct POST from attaching a NEEDS_REVIEW order's line item.
+  (2) The automatic engine's placements now get a real `startMinuteOfDay`, not just a
+  date/station/sequenceOrder — `$lib/schedule/shift.ts` (the 8:00–16:30 shift + break
+  model, shared with `drafts/[id]/+page.svelte`'s rendering so the two can never drift
+  apart) packs each station/day's jobs back-to-back in `sequenceOrder` via
+  `packSequentialStarts`, skipping breaks automatically. Before this, every
+  engine-placed job defaulted to the same 8:00 slot (`startMinuteOfDay ?? 8*60` in the
+  load function) and visually stacked on top of each other until a human dragged them
+  apart; a freshly-created automatic draft now already shows its jobs laid out on the
+  timeline in batch order, no manual dragging needed to make it look right. (3)
+  `fetchCapacity()` now assumes `DEFAULT_STATION_DAY_HOURS` (`$lib/schedule/
+  defaultCapacity.ts`) for any (station, day) with no real `CapacityCalendar` row —
+  before this fix, every automatic run came back "0 placed" with everything at risk,
+  since the deterministic engine saw zero capacity everywhere even though the drafts
+  workspace's own timeline was already *displaying* that same 7.5h/day default as a
+  cosmetic fallback. This is a real, visible business assumption (every known station
+  open every day, including weekends, until real numbers are entered), not an invented
+  fact — a real `CapacityCalendar` row always overrides it the moment one exists. (4)
+  An order whose due date already fell before the draft's window even starts (a real,
+  recurring case — "today" always moves forward) was briefly given a "place it anyway,
+  past due" fallback in `proposeSchedule.ts` — reverted the same day (2026-09-22) after
+  a direct decision: an overdue order is excluded from scheduling entirely instead,
+  not placed-with-a-flag. `fetchBacklog()` now requires `Order.internalDueDate >=
+  today` (a `startOfToday()` helper shared conceptually with the drafts route's own
+  candidate query, which applies the identical cutoff — see both files), so an overdue
+  order's line items never reach the deterministic engine at all. The manual drafts
+  workspace enforces the same cutoff twice: the candidate sidebar query excludes it
+  (so it isn't offered to drag), and `placeAssignment` independently rejects it
+  server-side too (verified directly: a raw POST for an overdue order's line item is
+  rejected with a clear message, not just kept out of the UI's drag source) — the same
+  defense-in-depth pattern already used for the CONFIRMED-only rule in fix (1) above.
+  `propose_schedule`'s engine itself is back to its original hard-floor-only logic (no
+  past-due fallback, no `pastDueDate` column — that migration was added and then
+  dropped in the same session, `add_past_due_date_flag` then
+  `remove_past_due_date_flag`). Getting an overdue order schedulable again means
+  correcting its due date first (the order edit page), not scheduling around it.
+  One more real fix from the same round of testing: the draft workspace's default
+  station tab used to be whichever known station sorted first alphabetically
+  ("Embroidery") — since `fetchCapacity()` now upserts all six known stations so the
+  automatic engine has somewhere to place jobs (see above), that tab is very often
+  empty and irrelevant to the order actually being scheduled, which made a
+  successful automatic run look like it had placed nothing. The default now prefers
+  whichever station the earliest assignment actually landed on, falling back to the
+  first known station name only when the draft has no placements at all. A second,
+  related confusion from the same testing round: the candidate sidebar listed every
+  line item on an order unconditionally, with nothing distinguishing "already placed
+  on the timeline" from "still needs placing" — a correct automatic run looked
+  incomplete because the sidebar never reflected what had actually happened. Line
+  items with a placement anywhere in the draft (`placedLineItemIds`, derived live from
+  the same `placements` state the timeline itself renders from) now show a green
+  "Placed" chip, are dimmed, and are no longer draggable (dragging one again would
+  have created a second, duplicate assignment for the same job rather than moving the
+  existing one — there was no protection against that before this fix either). A third
+  bug surfaced by the same "why aren't these placed" question: the sidebar's per-line-item
+  hours and "why can't this be placed" tooltip read `LineItem.estimatedHours` — the
+  dormant column `estimateForDisplay.ts`'s own doc comment already says is never written
+  to (see the entry below) — so they always silently evaluated to nothing; the order
+  total always showed "0m" and no reason was ever surfaced for an unplaced item,
+  regardless of what was actually wrong. `drafts/[id]/+page.server.ts`'s `load()` now
+  computes `estimate: estimateForDisplay(item)` per line item (the exact same call the
+  Orders page already uses) instead of passing the dormant column through, and the three
+  client-side `estimate*()` helpers read `DisplayEstimate`'s real shape (`{ok:true,
+  hours,station}` / `{ok:false,category,reason}`) instead of the old ad-hoc one that
+  never matched anything real. Verified live: an order's total went from a permanent
+  "0m" to a real "3.5h," and a relabel line item's tooltip now shows the actual
+  `MissingFormulaError` reason instead of nothing.
 - **Per-line-item and per-order hour estimates, shown before scheduling
   (2026-09-21).** `estimateForDisplay.ts` wraps the same `estimateHours()` the engine
   uses and turns its result (or `MissingFormulaError`/`MissingLineItemDataError`) into

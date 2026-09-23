@@ -26,6 +26,11 @@ function slotKey(stationId: string, date: Date): string {
  * run back-to-back on one station's day (the published ATCS — Apparent Tardiness
  * Cost with Setups — heuristic that sequence_order exists for).
  *
+ * An order whose due date has already passed never reaches this function at all —
+ * fetchBacklog() excludes it entirely (2026-09-22 decision), so there is no "place it
+ * anyway, past due" fallback here to worry about. A job that genuinely can't get an
+ * on-time slot within the given capacity is flagged at risk, full stop.
+ *
  * This is a simplified ATCS: it does not implement the heuristic's due-date/setup
  * lookahead weighting (those need tuning parameters this repo has no source for),
  * only its core idea of preferring a batch-mate's slot. Revisit once there's real

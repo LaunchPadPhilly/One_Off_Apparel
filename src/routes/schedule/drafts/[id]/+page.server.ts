@@ -2,24 +2,13 @@ import { error, fail } from '@sveltejs/kit';
 import { requireScopePage } from '$lib/server/auth/guards';
 import { getDraft } from '$lib/server/schedule/draft';
 import { prisma } from '$lib/server/prisma';
+import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
+import { KNOWN_STATIONS, DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import {
 	OrderStatus,
 	ScheduleAssignmentStatus
 } from '../../../../../prisma/generated/prisma/enums';
 import type { Actions, PageServerLoad } from './$types';
-
-// Working time in the shop's standard shift: 8:00–4:30 (8.5h) minus one
-// 30-minute lunch and two 15-minute breaks. Kept in sync with the SHIFT
-// constants on the client bar renderer.
-const DEFAULT_STATION_DAY_HOURS = 7.5;
-const KNOWN_STATIONS = [
-	'screen_print_auto',
-	'embroidery',
-	'matte_finish',
-	'fold_bag',
-	'hang_tags',
-	'printed_relabel'
-] as const;
 
 function iso(d: Date): string {
 	return d.toISOString().slice(0, 10);
@@ -29,6 +18,15 @@ function addDays(iso: string, days: number): Date {
 	const d = new Date(`${iso}T00:00:00Z`);
 	d.setUTCDate(d.getUTCDate() + days);
 	return d;
+}
+
+// Mirrors buildBacklogAndCapacity.ts's own startOfToday() — an order whose due date
+// has already passed is excluded from this candidate list the same way it's excluded
+// from the automatic engine's backlog (2026-09-22 decision): not offered manually
+// either, not just left unplaced.
+function startOfToday(): Date {
+	const now = new Date();
+	return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
 async function ensureStation(name: string) {
@@ -77,9 +75,27 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	const endDate = addDays(startIso, draft.weeks * 7 - 1);
 	const endIso = iso(endDate);
 
+	// One-time feedback from "Create automatic schedule" (see proposeIntoNewDraft.ts /
+	// the ?placed=&atRisk= redirect on /schedule) — not stored anywhere, just read off
+	// the URL for this one page view so a brand-new, possibly-empty-looking draft
+	// explains itself instead of silently showing nothing.
+	const autoProposeFeedback = url.searchParams.has('placed')
+		? { placed: Number(url.searchParams.get('placed')), atRisk: Number(url.searchParams.get('atRisk')) }
+		: null;
+
 	const [orders, stations, capacityRows, assignments] = await Promise.all([
+		// CONFIRMED only — a NEEDS_REVIEW order hasn't passed CLAUDE.md's first human
+		// approval gate (import confirmation) yet, so it has no business being placeable
+		// here even manually. This intentionally does NOT also require the stricter
+		// fetchBacklog() gates (blanks received, customer approval, artwork approval) —
+		// those are enforced for the *automatic* engine path (proposeIntoNewDraft.ts);
+		// a human manually planning ahead can still place a confirmed order before every
+		// pre-production gate is finalized. ALSO excludes an order whose due date has
+		// already passed (2026-09-22 decision) — it shouldn't even be offered as a
+		// candidate here, not just left unplaced by the automatic engine; see
+		// placeAssignment below for the matching server-side write-path check.
 		prisma.order.findMany({
-			where: { status: { not: OrderStatus.COMPLETE } },
+			where: { status: OrderStatus.CONFIRMED, internalDueDate: { gte: startOfToday() } },
 			include: { lineItems: { orderBy: { id: 'asc' } } },
 			orderBy: [{ internalDueDate: 'asc' }, { createdAt: 'desc' }]
 		}),
@@ -126,6 +142,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	}));
 
 	return {
+		autoProposeFeedback,
 		draft: {
 			id: draft.id,
 			name: draft.name,
@@ -158,7 +175,12 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				inkColorCount: item.inkColorCount,
 				quantity: item.quantity,
 				status: item.status,
-				estimatedHours: item.estimatedHours
+				// The live estimate (same estimateForDisplay() the Orders page already uses),
+				// not the dormant LineItem.estimatedHours column this used to read — that
+				// column is never written to (see CLAUDE.md), so hours and "why can't this be
+				// placed" never actually showed here before this fix; they just silently
+				// always came back null.
+				estimate: estimateForDisplay(item)
 			}))
 		})),
 		assignments: assignments.map((a) => ({
@@ -214,6 +236,20 @@ export const actions: Actions = {
 			return fail(400, { message: 'startMinuteOfDay out of range' });
 		if (hours === null || hours <= 0 || hours > 24)
 			return fail(400, { message: 'hours out of range' });
+
+		// Server-side enforcement of the same CONFIRMED-only + not-yet-overdue rules the
+		// candidate sidebar already filters by (see load() above) — that filter only
+		// controls what's shown, not what this endpoint accepts, so a NEEDS_REVIEW
+		// order's line item, or one whose due date has already passed, must be rejected
+		// here too, not just kept out of the UI's drag source.
+		const lineItem = await prisma.lineItem.findUnique({ where: { id: lineItemId }, select: { order: { select: { status: true, internalDueDate: true } } } });
+		if (!lineItem) return fail(404, { message: 'Line item not found' });
+		if (lineItem.order.status !== OrderStatus.CONFIRMED) {
+			return fail(400, { message: `This line item's order is ${lineItem.order.status}, not CONFIRMED — it can't be placed yet.` });
+		}
+		if (lineItem.order.internalDueDate.getTime() < startOfToday().getTime()) {
+			return fail(400, { message: "This order's due date has already passed — it can't be scheduled until the due date is corrected." });
+		}
 
 		const station = await ensureStation(stationName);
 		const sequenceOrder = await nextSequenceOrder(station.id, date);

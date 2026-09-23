@@ -2,16 +2,25 @@
 	import { fly, fade } from 'svelte/transition';
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig } from '$lib/appConfig';
+	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments } from '$lib/schedule/shift';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
 
 	let search = $state('');
-	// activeStation reads `data.stationNames[0]` inside a getter so it re-evaluates
-	// if the loaded stations change (e.g. after a server-only nav); a plain
+	// activeStation reads from `data` inside a getter so it re-evaluates if the loaded
+	// stations/assignments change (e.g. after a server-only nav); a plain
 	// $state(data...) initializer would freeze on the first render's value.
+	//
+	// Defaults to whichever station actually HAS a placement (the earliest one, per
+	// the server's date/time-ordered assignments query), not just the alphabetically
+	// first station name — six known stations always exist now (fetchCapacity.ts
+	// upserts all of them so the automatic engine has somewhere to place jobs), and
+	// most orders only ever use one or two of them. Landing on an empty, irrelevant
+	// tab (e.g. "Embroidery" for a screen-print-only order) after an automatic
+	// schedule run made it look like nothing had been placed at all.
 	let activeStationOverride = $state<string | null>(null);
-	let activeStation = $derived(activeStationOverride ?? data.stationNames[0] ?? 'screen_print_auto');
+	let activeStation = $derived(activeStationOverride ?? data.assignments[0]?.stationName ?? data.stationNames[0] ?? 'screen_print_auto');
 	function selectStation(name: string) {
 		activeStationOverride = name;
 	}
@@ -39,26 +48,31 @@
 		return day === 0 || day === 6;
 	}
 
+	// Reads the shape estimateForDisplay.ts's DisplayEstimate actually returns
+	// ({ ok: true, hours, station } | { ok: false, category, reason }) — not typed
+	// against it directly (that's a $lib/server module; the client only knows its
+	// runtime shape), same permissive-`unknown` pattern as before this was wired to a
+	// live estimate. This used to read LineItem.estimatedHours, a column that's never
+	// actually written to (see CLAUDE.md) — so these always silently returned null;
+	// every line item in this sidebar now carries a real, live `estimate` instead.
 	function estimateHours(est: unknown): number | null {
 		if (!est || typeof est !== 'object') return null;
 		const obj = est as Record<string, unknown>;
-		if ('hours' in obj && typeof obj.hours === 'number') return obj.hours;
+		if (obj.ok === true && typeof obj.hours === 'number') return obj.hours;
 		return null;
 	}
 
 	function estimateStation(est: unknown): string | null {
 		if (!est || typeof est !== 'object') return null;
 		const obj = est as Record<string, unknown>;
-		if ('station' in obj && typeof obj.station === 'string') return obj.station;
+		if (obj.ok === true && typeof obj.station === 'string') return obj.station;
 		return null;
 	}
 
 	function estimateError(est: unknown): string | null {
 		if (!est || typeof est !== 'object') return null;
 		const obj = est as Record<string, unknown>;
-		if ('error' in obj && typeof obj.error === 'string') {
-			return String(obj.error).split(':')[0];
-		}
+		if (obj.ok === false && typeof obj.reason === 'string') return obj.reason;
 		return null;
 	}
 
@@ -87,21 +101,12 @@
 	);
 
 	function orderTotalHours(order: (typeof data.orders)[number]): number {
-		return order.lineItems.reduce((sum, item) => sum + (estimateHours(item.estimatedHours) ?? 0), 0);
+		return order.lineItems.reduce((sum, item) => sum + (estimateHours(item.estimate) ?? 0), 0);
 	}
 
-	// The floor plan's daily shift: 8:00 → 16:30, with three unavailable segments.
-	// Working time = shift length − break minutes = 510 − 60 = 450 min = 7h30m.
-	const SHIFT_START_MIN = 8 * 60; // 08:00
-	const SHIFT_END_MIN = 16 * 60 + 30; // 16:30
-	const SHIFT_LENGTH_MIN = SHIFT_END_MIN - SHIFT_START_MIN;
-	const BREAKS = [
-		{ startMin: 10 * 60, durationMin: 15, label: 'Break' },
-		{ startMin: 12 * 60 + 30, durationMin: 30, label: 'Lunch' },
-		{ startMin: 15 * 60, durationMin: 15, label: 'Break' }
-	];
-	const WORKING_MIN = SHIFT_LENGTH_MIN - BREAKS.reduce((sum, b) => sum + b.durationMin, 0);
-	const WORKING_HOURS = WORKING_MIN / 60;
+	// The floor plan's daily shift model (8:00 → 16:30, three unavailable segments) now
+	// lives in $lib/schedule/shift.ts — shared with proposeIntoNewDraft.ts so the
+	// automatic engine's wall-clock packing and this page's rendering never drift apart.
 
 	// One hour marker per hour boundary that falls inside the shift.
 	const HOUR_TICKS = (() => {
@@ -250,65 +255,18 @@
 		}))
 	);
 
+	// Which line items already have a placement somewhere in this draft — the sidebar
+	// showed every line item unconditionally, with nothing distinguishing "already on
+	// the timeline" from "not placed yet," which made a real, correct automatic
+	// placement look like it hadn't done anything. Derived from `placements` itself
+	// (not the server's initial `data.assignments`), so it updates live as blocks are
+	// added/removed/dragged, not just on page load.
+	let placedLineItemIds = $derived(new Set(placements.map((p) => p.lineItemId)));
+
 	function placementsForDay(date: string): Placement[] {
 		return placements
 			.filter((p) => p.date === date && p.stationName === activeStation)
 			.sort((a, b) => a.startMin - b.startMin);
-	}
-
-	// Wall-clock end of a working span that begins at startMin: walks forward,
-	// jumping across each break it crosses without consuming working budget.
-	function wallClockEnd(startMin: number, workingMin: number): number {
-		let cursor = startMin;
-		let remaining = workingMin;
-		while (remaining > 0 && cursor < SHIFT_END_MIN) {
-			// Inside a break? Jump to its end.
-			const inBrk = BREAKS.find(
-				(b) => cursor >= b.startMin && cursor < b.startMin + b.durationMin
-			);
-			if (inBrk) {
-				cursor = inBrk.startMin + inBrk.durationMin;
-				continue;
-			}
-			const nextBrk = BREAKS.find((b) => b.startMin > cursor);
-			const segmentEnd = nextBrk ? nextBrk.startMin : SHIFT_END_MIN;
-			const available = segmentEnd - cursor;
-			if (remaining <= available) {
-				cursor += remaining;
-				remaining = 0;
-			} else {
-				cursor = segmentEnd;
-				remaining -= available;
-			}
-		}
-		return cursor;
-	}
-
-	// Split a working span into one visible segment per contiguous working slice.
-	function computeSegments(
-		startMin: number,
-		workingMin: number
-	): Array<{ start: number; end: number }> {
-		const segments: Array<{ start: number; end: number }> = [];
-		let cursor = startMin;
-		let remaining = workingMin;
-		while (remaining > 0 && cursor < SHIFT_END_MIN) {
-			const inBrk = BREAKS.find(
-				(b) => cursor >= b.startMin && cursor < b.startMin + b.durationMin
-			);
-			if (inBrk) {
-				cursor = inBrk.startMin + inBrk.durationMin;
-				continue;
-			}
-			const nextBrk = BREAKS.find((b) => b.startMin > cursor);
-			const segmentEnd = nextBrk ? nextBrk.startMin : SHIFT_END_MIN;
-			const available = segmentEnd - cursor;
-			const use = Math.min(remaining, available);
-			if (use > 0) segments.push({ start: cursor, end: cursor + use });
-			remaining -= use;
-			cursor += use;
-		}
-		return segments;
 	}
 
 	// Push-right: snap `desired` forward past any placements it would overlap on
@@ -562,6 +520,22 @@
 		<span class="badge">{data.draft.status}</span>
 	</div>
 
+	<!-- One-time feedback right after "Create automatic schedule" — see
+	     proposeIntoNewDraft.ts / the ?placed=&atRisk= redirect. Not persisted; only
+	     shown for this one page view so a possibly-empty-looking new draft explains
+	     itself instead of looking broken. -->
+	{#if data.autoProposeFeedback}
+		<p class="auto-propose-feedback" class:auto-propose-feedback--warn={data.autoProposeFeedback.atRisk > 0}>
+			{#if data.autoProposeFeedback.placed > 0}
+				Placed {data.autoProposeFeedback.placed} job{data.autoProposeFeedback.placed === 1 ? '' : 's'} automatically.
+			{/if}
+			{#if data.autoProposeFeedback.atRisk > 0}
+				{data.autoProposeFeedback.atRisk} job{data.autoProposeFeedback.atRisk === 1 ? '' : 's'} couldn't be placed
+				(no station/capacity data yet, or a due date that can't be met) — place {data.autoProposeFeedback.atRisk === 1 ? 'it' : 'them'} manually below.
+			{/if}
+		</p>
+	{/if}
+
 	<div class="workspace">
 		<!-- Left: orders side tray -->
 		<aside class="tray card" aria-label="Orders backlog">
@@ -642,18 +616,23 @@
 							</header>
 							<ul class="line-items">
 								{#each order.lineItems as item (item.id)}
-									{@const hours = estimateHours(item.estimatedHours)}
-									{@const err = estimateError(item.estimatedHours)}
-									{@const stationName = estimateStation(item.estimatedHours)}
+									{@const hours = estimateHours(item.estimate)}
+									{@const err = estimateError(item.estimate)}
+									{@const stationName = estimateStation(item.estimate)}
+									{@const placed = placedLineItemIds.has(item.id)}
 									<li
 										class="line-item"
 										class:line-item--error={err}
-										draggable="true"
-										ondragstart={(event) => handleDragStart(event, item.id, order.id, hours)}
+										class:line-item--placed={placed}
+										draggable={!placed}
+										ondragstart={placed ? undefined : (event) => handleDragStart(event, item.id, order.id, hours)}
+										title={placed ? 'Already on the timeline — remove it there first to move it.' : undefined}
 									>
 										<div class="line-item__row">
 											<span class="line-item__design">{item.design || '(no design)'}</span>
-											{#if hours != null}
+											{#if placed}
+												<span class="chip chip--placed">Placed</span>
+											{:else if hours != null}
 												<span class="line-item__hours">{formatHours(hours)}</span>
 											{:else if err}
 												<span class="line-item__hours line-item__hours--muted" title={err}>—</span>
@@ -824,6 +803,19 @@
 
 	.header-row h1 {
 		margin: 0.1rem 0 0.15rem;
+	}
+
+	.auto-propose-feedback {
+		margin: 0 0 var(--space-4);
+		padding: 0.65rem 0.85rem;
+		font-size: var(--fs-sm);
+		border: 1px solid var(--border);
+		background: var(--warm-100);
+		border-radius: var(--radius-sm);
+	}
+
+	.auto-propose-feedback--warn {
+		border-color: var(--warm-300);
 	}
 
 	.meta {
@@ -1078,6 +1070,15 @@
 		background: var(--danger-bg);
 	}
 
+	.line-item--placed {
+		opacity: 0.55;
+		cursor: default;
+	}
+
+	.line-item--placed:hover {
+		border-color: var(--border);
+	}
+
 	.line-item__row {
 		display: flex;
 		justify-content: space-between;
@@ -1132,6 +1133,13 @@
 		background: var(--warm-500);
 		color: white;
 		border-color: var(--warm-500);
+	}
+
+	.chip--placed {
+		background: var(--success-bg, #2f5c3f);
+		color: white;
+		border-color: transparent;
+		font-weight: 600;
 	}
 
 	/* --- Main timeline --- */

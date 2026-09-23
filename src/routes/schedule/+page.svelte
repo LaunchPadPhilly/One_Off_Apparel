@@ -20,7 +20,16 @@
 			<h1>Schedule</h1>
 		</div>
 		{#if data.canCreate}
-			<a class="button" use:pressable href="/schedule/new">Create schedule</a>
+			<div class="header-actions">
+				<a class="button button--secondary" use:pressable href="/schedule/new">Create schedule</a>
+				<!-- NEW: runs the deterministic propose_schedule engine against confirmed,
+				     approval-gated orders and drops the result into a brand-new draft — see
+				     proposeIntoNewDraft.ts. No live LLM call decides placements, per
+				     CLAUDE.md's non-negotiable "Claude never computes a schedule" rule. -->
+				<form method="POST" action="?/createAutomatic" use:enhance>
+					<button class="button" use:pressable type="submit">Create automatic schedule</button>
+				</form>
+			</div>
 		{/if}
 	</div>
 	<p class="muted">
@@ -141,6 +150,12 @@
 		justify-content: space-between;
 		gap: 1rem;
 		margin-bottom: 0.25rem;
+	}
+
+	.header-actions {
+		display: flex;
+		gap: 0.5rem;
+		flex-wrap: wrap;
 	}
 
 	.draft-list {
