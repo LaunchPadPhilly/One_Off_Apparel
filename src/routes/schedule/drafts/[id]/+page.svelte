@@ -2,7 +2,8 @@
 	import { fly, fade } from 'svelte/transition';
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig, storageKeyPrefix } from '$lib/appConfig';
-	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments } from '$lib/schedule/shift';
+	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments, findNonOverlappingStart } from '$lib/schedule/shift';
+	import { deserialize } from '$app/forms';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -237,6 +238,29 @@
 	}
 
 	let ordersById = $derived(new Map(data.orders.map((o) => [o.id, o] as const)));
+	// Line item lookup for timeline blocks: every block for one order shares the order's
+	// color, so the block itself names its garment color and a finisher's tooltip says
+	// which print it waits on — otherwise a relabel running beside a *different* print
+	// on the same order looks like it overlaps its own.
+	let lineItemById = $derived(new Map(data.orders.flatMap((order) => order.lineItems.map((item) => [item.id, item] as const))));
+
+	function stepName(item: { itemType: string; decorationType: string | null; finishingStep: string | null }): string {
+		return stationLabel((item.itemType === 'FINISHING' ? item.finishingStep : item.decorationType) ?? item.itemType);
+	}
+
+	function waitsOnText(lineItemId: string): string {
+		const item = lineItemById.get(lineItemId);
+		if (!item || item.itemType !== 'FINISHING' || !item.dependsOn) return '';
+		if (item.dependsOn === 'all_siblings') return ' · Waits on every other job on this order';
+		const dep = lineItemById.get(item.dependsOn);
+		if (!dep) return '';
+		const depPlacement = placements.find((p) => p.lineItemId === dep.id);
+		const done = depPlacement
+			? `, done ${formatDayLabel(depPlacement.date).weekday} ${formatClock(wallClockEnd(depPlacement.startMin, depPlacement.durationMin))}`
+			: ' (not placed yet)';
+		return ` · Waits on the ${dep.apparelColor} ${stepName(dep).toLowerCase()}${done}`;
+	}
+
 	function findOrder(orderId: string) {
 		return ordersById.get(orderId);
 	}
@@ -321,36 +345,8 @@
 			.sort((a, b) => a.startMin - b.startMin);
 	}
 
-	// Push-right: snap `desired` forward past any placements it would overlap on
-	// this (date, station). Also skips forward out of a break if the desired
-	// start lands inside one. Bounded loop so a pathological input can't hang.
-	function findNonOverlappingStart(
-		desired: number,
-		workingMin: number,
-		others: Placement[]
-	): number {
-		const extents = others
-			.map((p) => ({ start: p.startMin, end: wallClockEnd(p.startMin, p.durationMin) }))
-			.sort((a, b) => a.start - b.start);
-
-		let candidate = desired;
-		for (let i = 0; i < 40; i++) {
-			// If we're sitting inside a break, jump past it.
-			const inBrk = BREAKS.find(
-				(b) => candidate >= b.startMin && candidate < b.startMin + b.durationMin
-			);
-			if (inBrk) {
-				candidate = inBrk.startMin + inBrk.durationMin;
-				continue;
-			}
-			const end = wallClockEnd(candidate, workingMin);
-			const conflict = extents.find((o) => candidate < o.end && end > o.start);
-			if (!conflict) return candidate;
-			// Snap to just after the conflicting block, rounded up to the next 15m.
-			candidate = Math.ceil(conflict.end / 15) * 15;
-		}
-		return candidate;
-	}
+	// Push-right overlap avoidance lives in $lib/schedule/shift.ts (findNonOverlappingStart)
+	// so the server's finisher push uses the exact same rule.
 
 	function snapTo15(dropMin: number, durationMin: number): number {
 		const rawStart = dropMin - durationMin / 2;
@@ -405,16 +401,45 @@
 
 	// Server persistence helpers. Every mutation applies optimistically to the
 	// $state array first (so drag feedback is instant), then POSTs to the form
-	// action. On failure we roll back and log. Errors surface in the console
-	// for now; a toast pass comes with the wider save-error UX.
-	async function postAction(action: string, body: FormData): Promise<boolean> {
+	// action. On failure we roll back; a server-side refusal (e.g. a finisher dragged
+	// before its print ends) shows its message in `boardNotice`.
+	type Pushed = { id: string; date: string; startMinuteOfDay: number };
+	type ActionOutcome = { ok: boolean; id?: string; pushed: Pushed[]; message?: string };
+
+	let boardNotice = $state<{ text: string; tone: 'info' | 'warn' } | null>(null);
+
+	async function postAction(action: string, body: FormData): Promise<ActionOutcome> {
 		try {
-			const res = await fetch(`?/${action}`, { method: 'POST', body });
-			return res.ok;
+			const res = await fetch(`?/${action}`, { method: 'POST', body, headers: { 'x-sveltekit-action': 'true' } });
+			const result = deserialize(await res.text());
+			if (result.type === 'success') {
+				const data = (result.data ?? {}) as { id?: string; pushed?: Pushed[] };
+				return { ok: true, id: data.id, pushed: data.pushed ?? [] };
+			}
+			const message = result.type === 'failure' ? (result.data as { message?: string } | undefined)?.message : undefined;
+			return { ok: false, pushed: [], message };
 		} catch (e) {
 			console.error(`${action} failed`, e);
-			return false;
+			return { ok: false, pushed: [] };
 		}
+	}
+
+	// Finishers the server moved later to stay after their print (draftDependencies.ts).
+	function applyPushed(pushed: Pushed[]) {
+		if (pushed.length === 0) return;
+		const byId = new Map(pushed.map((p) => [p.id, p]));
+		placements = placements.map((p) => {
+			const moved = byId.get(p.id);
+			return moved ? { ...p, date: moved.date, startMin: moved.startMinuteOfDay } : p;
+		});
+		boardNotice = {
+			text: `Moved ${pushed.length} finishing step${pushed.length === 1 ? '' : 's'} later so ${pushed.length === 1 ? 'it stays' : 'they stay'} after ${pushed.length === 1 ? 'its' : 'their'} print.`,
+			tone: 'info'
+		};
+	}
+
+	function showRefusal(outcome: ActionOutcome) {
+		if (outcome.message) boardNotice = { text: outcome.message, tone: 'warn' };
 	}
 
 	async function handleTrackDrop(event: DragEvent, date: string) {
@@ -455,10 +480,13 @@
 			body.set('stationName', activeStation);
 			body.set('date', date);
 			body.set('startMinuteOfDay', String(startMin));
-			const ok = await postAction('moveAssignment', body);
-			if (!ok) {
+			const outcome = await postAction('moveAssignment', body);
+			if (!outcome.ok) {
 				// Roll back to the last known good state.
 				placements = placements.map((p) => (p.id === existing.id ? before : p));
+				showRefusal(outcome);
+			} else {
+				applyPushed(outcome.pushed);
 			}
 			return;
 		}
@@ -498,33 +526,15 @@
 		body.set('date', date);
 		body.set('startMinuteOfDay', String(startMin));
 		body.set('hours', String(durationMin / 60));
-		try {
-			const res = await fetch('?/placeAssignment', { method: 'POST', body });
-			if (!res.ok) throw new Error(`placeAssignment failed: ${res.status}`);
-			// SvelteKit form-action fetches return an ActionResult-wrapped JSON.
-			const wire = (await res.json()) as {
-				type: string;
-				data?: string;
-			};
-			const parsed = wire.data ? (JSON.parse(wire.data) as unknown[]) : [];
-			// ActionResult data is a positional array — { success, id } becomes
-			// [success, id] with the actual values at odd indices in the flat
-			// serialization. Walk it defensively.
-			let assignedId: string | null = null;
-			for (const value of parsed) {
-				if (typeof value === 'string' && value.length > 8 && value !== 'success') {
-					assignedId = value;
-					break;
-				}
-			}
-			if (assignedId) {
-				placements = placements.map((p) => (p.id === tempId ? { ...p, id: assignedId! } : p));
-			}
-		} catch (e) {
-			console.error('placeAssignment failed', e);
+		const outcome = await postAction('placeAssignment', body);
+		if (!outcome.ok || !outcome.id) {
 			// Roll back.
 			placements = placements.filter((p) => p.id !== tempId);
+			showRefusal(outcome);
+			return;
 		}
+		placements = placements.map((p) => (p.id === tempId ? { ...p, id: outcome.id! } : p));
+		applyPushed(outcome.pushed);
 	}
 
 	async function removePlacement(id: string) {
@@ -533,8 +543,8 @@
 		if (id.startsWith('tmp:')) return; // never persisted
 		const body = new FormData();
 		body.set('id', id);
-		const ok = await postAction('removeAssignment', body);
-		if (!ok) placements = before;
+		const outcome = await postAction('removeAssignment', body);
+		if (!outcome.ok) placements = before;
 	}
 
 	function formatMinutes(minutes: number): string {
@@ -585,6 +595,13 @@
 				{data.autoProposeFeedback.atRisk} job{data.autoProposeFeedback.atRisk === 1 ? '' : 's'} couldn't be placed
 				(no station/capacity data yet, or a due date that can't be met) — place {data.autoProposeFeedback.atRisk === 1 ? 'it' : 'them'} manually below.
 			{/if}
+		</p>
+	{/if}
+
+	{#if boardNotice}
+		<p class="auto-propose-feedback" class:auto-propose-feedback--warn={boardNotice.tone === 'warn'} role="status">
+			{boardNotice.text}
+			<button type="button" class="board-notice__dismiss" onclick={() => (boardNotice = null)} aria-label="Dismiss">×</button>
 		</p>
 	{/if}
 
@@ -813,6 +830,8 @@
 									{@const parent = findOrder(placement.orderId)}
 									{@const bg = orderColor(placement.orderId)}
 									{@const title = parent ? orderTitle(parent) : 'Order'}
+									{@const lineItem = lineItemById.get(placement.lineItemId)}
+									{@const blockLabel = lineItem ? lineItem.apparelColor : title}
 									{@const segments = computeSegments(placement.startMin, placement.durationMin)}
 									{@const wallEnd = wallClockEnd(placement.startMin, placement.durationMin)}
 									{#each segments as seg, i (seg.start)}
@@ -828,10 +847,10 @@
 											draggable="true"
 											ondragstart={(event) => handlePlacementDragStart(event, placement.id)}
 											style="left: {pctFromShiftStart(seg.start)}%; width: {pctWidth(seg.end - seg.start)}%; --block-color: {bg};"
-											title="{title} · {formatClock(placement.startMin)} → {formatClock(wallEnd)} ({formatMinutes(placement.durationMin)} of work{segments.length > 1 ? `, split across ${segments.length} slices` : ''})"
+											title="{title}{lineItem ? ` — ${stepName(lineItem)} (${lineItem.apparelColor})` : ''} · {formatClock(placement.startMin)} → {formatClock(wallEnd)} ({formatMinutes(placement.durationMin)} of work{segments.length > 1 ? `, split across ${segments.length} slices` : ''}){waitsOnText(placement.lineItemId)}"
 										>
 											{#if isFirst}
-												<span class="placement__label">{title}</span>
+												<span class="placement__label">{blockLabel}</span>
 												<span class="placement__time">{formatMinutes(placement.durationMin)}</span>
 												<button
 													type="button"
@@ -902,6 +921,16 @@
 
 	.header-row h1 {
 		margin: 0.1rem 0 0.15rem;
+	}
+
+	.board-notice__dismiss {
+		margin-left: 0.5rem;
+		background: none;
+		border: none;
+		color: inherit;
+		cursor: pointer;
+		font-size: 1rem;
+		line-height: 1;
 	}
 
 	.auto-propose-feedback {

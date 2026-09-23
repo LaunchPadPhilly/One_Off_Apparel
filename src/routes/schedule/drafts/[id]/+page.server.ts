@@ -1,6 +1,7 @@
 import { error, fail } from '@sveltejs/kit';
 import { requireScopePage } from '$lib/server/auth/guards';
 import { getDraft } from '$lib/server/schedule/draft';
+import { checkFinisherPlacement, pushDependentsAfter } from '$lib/server/schedule/draftDependencies';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { KNOWN_STATIONS, DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
@@ -175,6 +176,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				inkColorCount: item.inkColorCount,
 				quantity: item.quantity,
 				status: item.status,
+				// For the timeline's "waits on …" tooltip on finisher blocks.
+				dependsOn: item.dependsOn,
 				// The live estimate (same estimateForDisplay() the Orders page already uses),
 				// not the dormant LineItem.estimatedHours column this used to read — that
 				// column is never written to (see CLAUDE.md), so hours and "why can't this be
@@ -251,6 +254,11 @@ export const actions: Actions = {
 			return fail(400, { message: "This order's due date has already passed — it can't be scheduled until the due date is corrected." });
 		}
 
+		// A finisher has to start after the job(s) it waits on end — refused, not snapped
+		// (2026-09-23 decision). See draftDependencies.ts.
+		const dependencyProblem = await checkFinisherPlacement(params.id, lineItemId, date, startMinuteOfDay);
+		if (dependencyProblem) return fail(400, { message: dependencyProblem });
+
 		const station = await ensureStation(stationName);
 		const sequenceOrder = await nextSequenceOrder(station.id, date);
 
@@ -267,7 +275,9 @@ export const actions: Actions = {
 				scheduleDraftId: params.id
 			}
 		});
-		return { success: true as const, id: created.id };
+		// Placing a print later than a finisher that's already on the board pushes it.
+		const pushed = await pushDependentsAfter(params.id, created.id);
+		return { success: true as const, id: created.id, pushed };
 	},
 
 	moveAssignment: async ({ request, params, locals, url }) => {
@@ -289,10 +299,13 @@ export const actions: Actions = {
 		// separation, but this covers the current UI.
 		const existing = await prisma.scheduleAssignment.findUnique({
 			where: { id },
-			select: { scheduleDraftId: true, stationId: true, date: true }
+			select: { scheduleDraftId: true, stationId: true, date: true, lineItemId: true }
 		});
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
+
+		const dependencyProblem = await checkFinisherPlacement(params.id, existing.lineItemId, date, startMinuteOfDay);
+		if (dependencyProblem) return fail(400, { message: dependencyProblem });
 
 		const station = await ensureStation(stationName);
 		const movingToNewSlot =
@@ -312,7 +325,10 @@ export const actions: Actions = {
 				proposedBy: user.email
 			}
 		});
-		return { success: true as const };
+		// Moving a print later pushes its finishers only as far as needed; moving it
+		// earlier leaves them where they are (2026-09-23 decision).
+		const pushed = await pushDependentsAfter(params.id, id);
+		return { success: true as const, pushed };
 	},
 
 	removeAssignment: async ({ request, params, locals, url }) => {

@@ -250,7 +250,7 @@ One row per **design/print job or finishing step** on an order.
 | `decoration_type` | screen print / embroidery / DTF / DTG — **decoration rows only**, blank on finishing rows. Determines the primary `station_id` via lookup. |
 | `finishing_step` | matte / relabel / fold & bag / hang tag — **finishing rows only**, blank on decoration rows |
 | `depends_on` | **finishing rows only.** Either another `line_items.id` (this finish waits on one specific job — e.g. matte waits on the print it's finishing) or the literal string `"all_siblings"` (this finish waits on every other line item under the same order — this is how fold & bag / final packaging works: it can't start until every decoration *and* every other finish on that order is done) |
-| `status` | `needs_review`, `blocked`, `in_production`, `complete`. Finishing rows are created with `status: blocked` and only become schedulable once `check_completion()` unlocks them. |
+| `status` | `needs_review`, `blocked`, `in_production`, `complete`. Finishing rows are created with `status: blocked`. Since 2026-09-23 a blocked finisher *is* schedulable (placed after the job it depends on — see propose_schedule), but it can't be **Started** on the floor until `check_completion()` unlocks it. |
 | `weight_class` | thin, poly, or bulky — meaningful for **flat** garments; null/ignored when `garment_style` is `cap` |
 | `garment_style` | `flat` or `cap` — **decoration rows only**, meaningful today for embroidery's formula (flat and cap use genuinely different rate tables, not a weight-class variant — see estimate_hours below) |
 | `cap_construction` | `structured` or `unstructured` — **only meaningful when `garment_style` is `cap`**, null otherwise |
@@ -455,23 +455,26 @@ Builds a proposed schedule. Never writes to the live schedule — that only happ
 
 ```
 function propose_schedule(backlog, capacity):
-  jobs = backlog.map(estimate_hours)     // backlog only ever contains
-                                          // status: needs_review — blocked
-                                          // line items never reach here.
+  jobs = backlog.map(estimate_hours)     // backlog = needs_review rows, plus
+                                          // BLOCKED finishing rows (2026-09-23)
+                                          // with their depends_on resolved.
                                           // fetchBacklog() also excludes any
                                           // order whose due date has already
                                           // passed (2026-09-22) — see Known
                                           // open items; those never reach here
                                           // either, not even as a fallback.
   jobs.sort_by(due_date)                 // due date is the hard floor
+                                          // a job is only taken once every job
+                                          // it depends on has been placed/flagged
 
   for job in jobs:
-    best_slot = find_slot(job, capacity, prefer: batch_with(job, jobs))
+    earliest = max(end time of each job it depends on)   // right after, no buffer
+    best_slot = find_slot(job, capacity, not_before: earliest, prefer: batch_with(job, jobs))
     // batch_with groups jobs by shared setup — same ink color / screen
     // count / decoration type — this is the ATCS heuristic, published,
     // not invented here. This is what sequence_order is for.
 
-    if best_slot is None:
+    if a dependency couldn't be placed or best_slot is None:
       flag_at_risk(job)                  // due date can't be met — surfaced
     else:
       assign(job, best_slot)
@@ -479,11 +482,27 @@ function propose_schedule(backlog, capacity):
   return { assignments, reasoning: explain(assignments) }
 ```
 
-**Do not reintroduce dependency-checking inside `propose_schedule`.** An earlier draft of
-this engine tried to enforce step order here (checking a prior assignment's date before
-placing a job), which caused `sequence_order` to mean two conflicting things at once.
-Dependency ordering is now handled entirely by `line_items.depends_on` + `check_completion`
-— a blocked line item is simply never in the backlog. Keep it that way.
+**Finishers are scheduled after their prints (decision 2026-09-23, replacing the old "do
+not reintroduce dependency-checking" rule).** The shop wants the relabel/matte/fold & bag
+for an order planned up front, not only after the print is marked done. So:
+
+- `fetchBacklog()` includes BLOCKED finishing rows and resolves each one's `depends_on`
+  into `dependsOnIds` ("all_siblings" = every other line item on the order).
+  `propose_schedule` places a job only after everything it depends on, starting no
+  earlier than their **wall-clock end** — same day is fine, no cure/dry buffer. If a
+  dependency can't be placed, the dependent is flagged at risk ("waits on…"), never
+  placed early. The engine now returns `startMinuteOfDay` itself because of this
+  (`proposeIntoNewDraft.ts` used to pack start times afterward).
+- In a draft (`draftDependencies.ts`): dragging/placing a finisher before its print ends
+  is **refused** with a message. Moving a print later **pushes** its finishers only as far
+  as needed (same day if it fits, else the next day), cascading to anything waiting on
+  them; moving a print earlier leaves them alone.
+- On the floor nothing changed: `startAssignment` refuses to Start a BLOCKED line item,
+  so a scheduled finisher stays locked until its print is Stopped and `check_completion`
+  unlocks it. The Production Board shows "Waiting on print" instead of Start.
+- `sequence_order` still means **only** batch order within one station's day. Cross-job
+  ordering comes from `dependsOnIds` + real start/end times, never from `sequence_order` —
+  the conflation the earlier removed design fell into must not come back.
 
 ### Domain MCP tools (exposed through this repo's MCP server, distinct from dev-tooling agents/skills above)
 
@@ -523,9 +542,10 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   confirmation checkbox at import time, or (b) a real inventory table synced from wherever
   blanks are tracked. Do not silently add a full inventory system without that conversation
   happening first.
-- **Cure/dry buffer between a print and a downstream finish** (e.g. how long before a fresh
-  print can be matte-finished or bagged) is not yet captured anywhere. Needs a real number
-  from the client before `depends_on` unlocking is treated as "immediately schedulable."
+- **Cure/dry buffer between a print and a downstream finish — decided as zero
+  (2026-09-23).** A finisher may start right after its print ends (see
+  propose_schedule). If the client later gives a real cure/dry time, it's one constant
+  to add in `proposeSchedule.ts` and `draftDependencies.ts`' earliest-start computation.
 - **PDF/export import accuracy** has not been validated against a real Hoops export sample
   — only against the client's spreadsheet formulas.
 - **Finishing formulas — resolved (2026-09-23), except Wovens.** The client supplied
@@ -707,9 +727,9 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     `externalShipDate` after the model call returns); the order edit page shows it as a
     disabled/read-only field; `updateOrderFields.ts` and `confirmImport.ts` recompute it
     whenever `externalShipDate` changes and `orderCorrectionSchema` no longer accepts
-    `internalDueDate` as a correction at all. The cure/dry-buffer open item below is a
-    separate, still-unresolved question (a gap between a print and a downstream finishing
-    step) — do not conflate the two.
+    `internalDueDate` as a correction at all. The cure/dry buffer (a gap between a print
+    and a downstream finishing step, decided as zero on 2026-09-23) is a separate
+    question — do not conflate the two.
   - **Administrative fee rows** ("One-Time Digitizing Fee," "Ink Color Change") appear in
     the job details table but aren't production work — they must not become `LineItem`
     rows. Extraction must exclude them (and flag that they were excluded), not force them

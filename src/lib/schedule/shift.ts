@@ -94,3 +94,50 @@ export function packSequentialStarts(workingMinutesInOrder: readonly number[]): 
 	}
 	return starts;
 }
+
+/** Working (non-break) minutes left in the shift from `startMin` to SHIFT_END_MIN. */
+export function workingMinutesUntilShiftEnd(startMin: number): number {
+	let total = 0;
+	let cursor = Math.max(startMin, SHIFT_START_MIN);
+	while (cursor < SHIFT_END_MIN) {
+		const inBreak = BREAKS.find((b) => cursor >= b.startMin && cursor < b.startMin + b.durationMin);
+		if (inBreak) {
+			cursor = inBreak.startMin + inBreak.durationMin;
+			continue;
+		}
+		const nextBreak = BREAKS.find((b) => b.startMin > cursor);
+		const segmentEnd = nextBreak ? nextBreak.startMin : SHIFT_END_MIN;
+		total += segmentEnd - cursor;
+		cursor = segmentEnd;
+	}
+	return total;
+}
+
+/** Push-right: the first start at or after `desired` whose working span doesn't
+ *  overlap any of `others` on the same (date, station). Skips forward out of a break
+ *  if it lands inside one, and snaps past a conflicting block to the next 15 minutes.
+ *  Bounded loop so a pathological input can't hang. Shared by the drafts workspace's
+ *  drag-and-drop and the server's finisher push (draftDependencies.ts). */
+export function findNonOverlappingStart(
+	desired: number,
+	workingMin: number,
+	others: ReadonlyArray<{ startMin: number; durationMin: number }>
+): number {
+	const extents = others
+		.map((p) => ({ start: p.startMin, end: wallClockEnd(p.startMin, p.durationMin) }))
+		.sort((a, b) => a.start - b.start);
+
+	let candidate = desired;
+	for (let i = 0; i < 40; i++) {
+		const inBrk = BREAKS.find((b) => candidate >= b.startMin && candidate < b.startMin + b.durationMin);
+		if (inBrk) {
+			candidate = inBrk.startMin + inBrk.durationMin;
+			continue;
+		}
+		const end = wallClockEnd(candidate, workingMin);
+		const conflict = extents.find((o) => candidate < o.end && end > o.start);
+		if (!conflict) return candidate;
+		candidate = Math.ceil(conflict.end / 15) * 15;
+	}
+	return candidate;
+}

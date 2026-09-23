@@ -7,7 +7,7 @@ import {
 	LineItemType,
 	OrderStatus
 } from '../../../../prisma/generated/prisma/enums';
-import type { BacklogItem, CapacitySlot } from '$lib/server/engine/types';
+import { ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
 import { KNOWN_STATIONS, DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import type { DateRange } from './types';
 
@@ -16,10 +16,19 @@ function startOfToday(): Date {
 	return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
+export interface SchedulingBacklog {
+	backlog: BacklogItem[];
+	/** Dependencies of backlog items that aren't themselves in the backlog. */
+	externalDependencies: Map<string, ExternalDependencyState>;
+}
+
 /**
  * The real backlog: line items ready to place. A line item enters the backlog only when
  * ALL of the following are true:
- *   1. LineItem.status is NEEDS_REVIEW (not BLOCKED, not already in production/complete)
+ *   1. LineItem.status is NEEDS_REVIEW — or, for FINISHING rows only, BLOCKED
+ *      (2026-09-23 decision: finishers are scheduled ahead of time, after the job they
+ *      wait on — see proposeSchedule.ts. Being on the schedule doesn't unlock them on
+ *      the floor; startAssignment.ts still refuses to Start a BLOCKED line item.)
  *   2. Order.status is CONFIRMED (import confirmation gate passed)
  *   3. Order.blankOrderingStatus is RECEIVED (garments are in hand)
  *   4. Order.customerApprovalStatus is APPROVED (customer signed off)
@@ -33,42 +42,78 @@ function startOfToday(): Date {
  *
  * These gates limit scheduling, not estimates — estimateHours is a pure function that
  * runs independently of approval status (e.g. at import review time).
+ *
+ * Alongside the backlog itself, returns what propose_schedule needs to order finishers
+ * after their prints: each item's `dependsOnIds` resolved from LineItem.dependsOn ("all_siblings"
+ * expands to every other line item on the order), and the state of any dependency
+ * that isn't itself in the backlog (already COMPLETE = no constraint; anything else =
+ * not schedulable, so its dependents get flagged at risk rather than placed early).
  */
-export async function fetchBacklog(): Promise<BacklogItem[]> {
+export async function fetchBacklog(): Promise<SchedulingBacklog> {
 	const lineItems = await prisma.lineItem.findMany({
 		where: {
-			status: LineItemStatus.NEEDS_REVIEW,
+			OR: [
+				{ itemType: LineItemType.DECORATION, status: LineItemStatus.NEEDS_REVIEW, artworkApprovalStatus: ArtworkApprovalStatus.APPROVED },
+				{ itemType: LineItemType.FINISHING, status: { in: [LineItemStatus.NEEDS_REVIEW, LineItemStatus.BLOCKED] } }
+			],
 			order: {
 				status: OrderStatus.CONFIRMED,
 				blankOrderingStatus: BlankOrderingStatus.RECEIVED,
 				customerApprovalStatus: CustomerApprovalStatus.APPROVED,
 				internalDueDate: { gte: startOfToday() }
-			},
-			OR: [
-				{ itemType: LineItemType.FINISHING },
-				{ artworkApprovalStatus: ArtworkApprovalStatus.APPROVED }
-			]
+			}
 		},
 		include: { order: { select: { internalDueDate: true } } },
 		distinct: ['id']
 	});
 
-	return lineItems.map((item) => ({
-		id: item.id,
-		itemType: item.itemType,
-		decorationType: item.decorationType,
-		finishingStep: item.finishingStep,
-		inkColorCount: item.inkColorCount,
-		screens: item.screens,
-		stitchCount: item.stitchCount,
-		quantity: item.quantity,
-		weightClass: item.weightClass,
-		garmentStyle: item.garmentStyle,
-		capConstruction: item.capConstruction,
-		matteSurface: item.matteSurface,
-		foldBagGarment: item.foldBagGarment,
-		dueDate: item.order.internalDueDate
-	}));
+	// Every line item on the orders involved, for resolving "all_siblings" and for the
+	// state of dependencies that didn't make it into the backlog.
+	const orderIds = [...new Set(lineItems.map((item) => item.orderId))];
+	const siblings = await prisma.lineItem.findMany({
+		where: { orderId: { in: orderIds } },
+		select: { id: true, orderId: true, status: true }
+	});
+	const siblingIdsByOrder = new Map<string, string[]>();
+	for (const sibling of siblings) {
+		const ids = siblingIdsByOrder.get(sibling.orderId) ?? [];
+		ids.push(sibling.id);
+		siblingIdsByOrder.set(sibling.orderId, ids);
+	}
+	const statusById = new Map(siblings.map((sibling) => [sibling.id, sibling.status]));
+
+	const inBacklog = new Set(lineItems.map((item) => item.id));
+	const externalDependencies = new Map<string, ExternalDependencyState>();
+
+	const backlog = lineItems.map((item) => {
+		let dependsOnIds: string[] = [];
+		if (item.itemType === LineItemType.FINISHING && item.dependsOn) {
+			dependsOnIds = item.dependsOn === ALL_SIBLINGS_DEPENDENCY ? (siblingIdsByOrder.get(item.orderId) ?? []).filter((id) => id !== item.id) : [item.dependsOn];
+		}
+		for (const id of dependsOnIds) {
+			if (!inBacklog.has(id)) externalDependencies.set(id, statusById.get(id) === LineItemStatus.COMPLETE ? 'complete' : 'not_schedulable');
+		}
+		const backlogItem: BacklogItem = {
+			id: item.id,
+			itemType: item.itemType,
+			decorationType: item.decorationType,
+			finishingStep: item.finishingStep,
+			inkColorCount: item.inkColorCount,
+			screens: item.screens,
+			stitchCount: item.stitchCount,
+			quantity: item.quantity,
+			weightClass: item.weightClass,
+			garmentStyle: item.garmentStyle,
+			capConstruction: item.capConstruction,
+			matteSurface: item.matteSurface,
+			foldBagGarment: item.foldBagGarment,
+			dueDate: item.order.internalDueDate,
+			dependsOnIds
+		};
+		return backlogItem;
+	});
+
+	return { backlog, externalDependencies };
 }
 
 function iso(date: Date): string {

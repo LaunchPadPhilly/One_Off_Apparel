@@ -1,4 +1,5 @@
 import { prisma } from '$lib/server/prisma';
+import { DEPENDENCY_REASON_PREFIX } from '$lib/server/engine/proposeSchedule';
 import type { AtRiskFlag } from '$lib/server/engine/types';
 
 /**
@@ -51,8 +52,10 @@ const STATION_EXPLANATIONS: Record<string, string> = {
 // "no open slot" message, for the "we know the timing but have no capacity" case).
 const NO_FORMULA_PREFIX = 'estimate_hours: ';
 const MISSING_DATA_PREFIX = 'missing_data: ';
+// proposeSchedule.ts's own prefix for "this finisher waits on a job that couldn't be placed."
+const DEPENDENCY_PREFIX = DEPENDENCY_REASON_PREFIX;
 
-export type AtRiskCategory = 'formula' | 'missing_data' | 'capacity';
+export type AtRiskCategory = 'formula' | 'missing_data' | 'dependency' | 'capacity';
 
 export interface AtRiskGroup {
 	category: AtRiskCategory;
@@ -108,6 +111,12 @@ export async function groupAtRiskForDisplay(atRisk: readonly AtRiskFlag[]): Prom
 			// prefix and use its message as-is instead of writing a new one here.
 			category = 'missing_data';
 			reason = flag.reason.slice(MISSING_DATA_PREFIX.length);
+		} else if (flag.reason.startsWith(DEPENDENCY_PREFIX)) {
+			// A finisher whose print (or other prerequisite) couldn't be placed — it can't
+			// go on the schedule before that job, so fixing the prerequisite fixes this.
+			category = 'dependency';
+			const detail = flag.reason.slice(DEPENDENCY_PREFIX.length);
+			reason = detail.charAt(0).toUpperCase() + detail.slice(1);
 		} else {
 			// Situation 3: neither prefix matched, so this must be proposeSchedule.ts's
 			// "no open slot" message — the formula and job data are both fine, there's

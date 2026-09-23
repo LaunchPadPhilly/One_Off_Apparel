@@ -96,7 +96,11 @@
 							<td><span class="badge">{assignment.status}</span></td>
 							{#if data.canAct}
 								<td>
-									{#if assignment.status === 'APPROVED'}
+									{#if assignment.status === 'APPROVED' && assignment.lineItem.status === 'BLOCKED'}
+										<!-- Scheduled ahead of time, but locked on the floor until the job it
+										     waits on is Stopped (startAssignment.ts enforces this server-side). -->
+										<span class="badge" title="Stop the job this waits on first — then this unlocks.">Waiting on print</span>
+									{:else if assignment.status === 'APPROVED'}
 										<form method="POST" action="?/start" use:enhance>
 											<input type="hidden" name="assignmentId" value={assignment.id} />
 											<button class="button" use:pressable type="submit">Start</button>

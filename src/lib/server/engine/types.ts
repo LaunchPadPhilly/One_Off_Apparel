@@ -54,7 +54,17 @@ export interface BacklogItem extends EstimateHoursInput {
 	// The order's internal_due_date — the hard floor propose_schedule sorts and
 	// places against. Never external_ship_date; see CLAUDE.md's orders table note.
 	dueDate: Date;
+	// NEW (2026-09-23): the line item ids this job must be scheduled AFTER — already
+	// resolved from LineItem.dependsOn (a specific id, or every sibling for
+	// "all_siblings"). Empty/absent for decoration rows. See proposeSchedule.ts.
+	dependsOnIds?: string[];
 }
+
+/** NEW (2026-09-23): what's known about a dependency that ISN'T in this backlog run —
+ *  either it's already done (no constraint), or it can't be scheduled yet (so its
+ *  dependents can't be either). A dependency id that's in neither the backlog nor this
+ *  map is treated as not schedulable. */
+export type ExternalDependencyState = 'complete' | 'not_schedulable';
 
 /** One day's open capacity at one station, as propose_schedule needs it. */
 export interface CapacitySlot {
@@ -70,6 +80,11 @@ export interface ProposedAssignment {
 	stationName: string;
 	date: Date;
 	sequenceOrder: number;
+	// NEW (2026-09-23): wall-clock start (minutes from midnight) on the shift model in
+	// $lib/schedule/shift.ts. The engine now owns this (it used to be packed afterward
+	// in proposeIntoNewDraft.ts) because a finisher's start has to come after its
+	// print's wall-clock end, not just on the same-or-later day.
+	startMinuteOfDay: number;
 	estimatedHours: number;
 }
 

@@ -1,6 +1,5 @@
 import { prisma } from '$lib/server/prisma';
 import { proposeSchedule } from '$lib/server/engine/proposeSchedule';
-import { packSequentialStarts } from '$lib/schedule/shift';
 import { ScheduleAssignmentStatus, ScheduleStrategy } from '../../../../prisma/generated/prisma/enums';
 import { fetchBacklog, fetchCapacity } from './buildBacklogAndCapacity';
 import { createDraft } from './draft';
@@ -60,30 +59,13 @@ export async function proposeIntoNewDraft(actor: string): Promise<ProposeIntoNew
 		actor
 	);
 
-	const [backlog, capacity] = await Promise.all([fetchBacklog(), fetchCapacity(range)]);
-	const result = proposeSchedule(backlog, capacity);
+	const [{ backlog, externalDependencies }, capacity] = await Promise.all([fetchBacklog(), fetchCapacity(range)]);
+	const result = proposeSchedule(backlog, capacity, externalDependencies);
 
-	// The engine only decides WHICH (station, date, sequenceOrder) each job gets —
-	// never a wall-clock time. Packing sequenceOrder into actual start minutes (skipping
-	// breaks, back-to-back within the shift) is pure layout math over already-decided
-	// placements, not new scheduling logic, so it happens here rather than in
-	// proposeSchedule.ts. This is what makes the draft appear on the timeline already
-	// laid out in batch order — matching what a human would do by hand — instead of
-	// every job silently defaulting to the same 8:00 start and stacking on top of each
-	// other until someone drags each one apart.
-	const startMinuteByLineItemId = new Map<string, number>();
-	const byStationDay = new Map<string, typeof result.assignments>();
-	for (const assignment of result.assignments) {
-		const key = `${assignment.stationId}__${iso(assignment.date)}`;
-		const group = byStationDay.get(key) ?? [];
-		group.push(assignment);
-		byStationDay.set(key, group);
-	}
-	for (const group of byStationDay.values()) {
-		group.sort((a, b) => a.sequenceOrder - b.sequenceOrder);
-		const starts = packSequentialStarts(group.map((a) => a.estimatedHours * 60));
-		group.forEach((a, i) => startMinuteByLineItemId.set(a.lineItemId, starts[i]));
-	}
+	// Each placement's wall-clock start comes straight from the engine now (2026-09-23):
+	// it packs every station's day back-to-back in batch order, skipping breaks — same
+	// layout this file used to compute afterward — but it also has to hold a finisher
+	// until its print's end time, which only the engine knows while it's placing jobs.
 
 	await prisma.$transaction(async (tx) => {
 		for (const assignment of result.assignments) {
@@ -93,7 +75,7 @@ export async function proposeIntoNewDraft(actor: string): Promise<ProposeIntoNew
 					stationId: assignment.stationId,
 					date: assignment.date,
 					sequenceOrder: assignment.sequenceOrder,
-					startMinuteOfDay: startMinuteByLineItemId.get(assignment.lineItemId),
+					startMinuteOfDay: assignment.startMinuteOfDay,
 					estimatedHours: assignment.estimatedHours,
 					status: ScheduleAssignmentStatus.PROPOSED,
 					proposedBy: actor,
