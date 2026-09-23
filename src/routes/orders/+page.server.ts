@@ -2,6 +2,7 @@ import { fail } from '@sveltejs/kit';
 import { prisma } from '$lib/server/prisma';
 import { hasGrantedScope, requireScopePage } from '$lib/server/auth/guards';
 import { summarizeOrderEstimate } from '$lib/server/engine/estimateForDisplay';
+import { fetchOrderGaps } from '$lib/server/hoops/orderReadiness';
 import { extractOrderFromPdf, PdfExtractionError } from '$lib/server/hoops/extractOrderFromPdf';
 import { cancelOrder, CancelOrderError } from '$lib/server/hoops/cancelOrder';
 import { importHoopsExport } from '$lib/server/hoops/importHoopsExport';
@@ -49,6 +50,9 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		},
 		orderBy: { internalDueDate: 'asc' }
 	});
+	// NEW (2026-09-23): open-item count per order (orderGaps.ts) — drives the "N open"
+	// badge on orders still in review and the "Needs re-review" flag on confirmed ones.
+	const gapsByOrder = await fetchOrderGaps(orders.map((order) => order.id));
 
 	return {
 		canImport: hasGrantedScope(locals.user, 'IMPORT_WRITE'),
@@ -62,7 +66,8 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			internalDueDate: order.internalDueDate.toISOString().slice(0, 10),
 			status: order.status,
 			lineItemCount: order.lineItems.length,
-			estimate: summarizeOrderEstimate(order.lineItems)
+			estimate: summarizeOrderEstimate(order.lineItems),
+			blockingCount: gapsByOrder.get(order.id)?.blockingCount ?? 0
 		}))
 	};
 };

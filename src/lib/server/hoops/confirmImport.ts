@@ -1,6 +1,7 @@
 import { prisma } from '$lib/server/prisma';
 import { OrderStatus } from '../../../../prisma/generated/prisma/enums';
 import { computeInternalDueDate } from '$lib/internalDueDate';
+import { fetchOrderGaps } from './orderReadiness';
 import { lineItemCorrectionSchema, orderCorrectionSchema, type ImportCorrections } from './types';
 
 /**
@@ -69,6 +70,21 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 							: {})
 				}
 			});
+		}
+
+		// NEW (2026-09-23): an order is only confirmable once it's fully valid — every
+		// line item estimable, blanks received, customer approved, all artwork approved
+		// (orderGaps.ts' blockingCount). Checked here, after corrections are applied and
+		// inside the same transaction, so neither the order page nor the confirm_import
+		// MCP tool can confirm around it.
+		const gapsByOrder = await fetchOrderGaps(orderIds, tx);
+		const notReady = orders.filter((order) => (gapsByOrder.get(order.id)?.blockingCount ?? 0) > 0);
+		if (notReady.length > 0) {
+			throw new Error(
+				`confirm_import: can't confirm yet — ${notReady
+					.map((order) => `${order.hoopsOrderId} has ${gapsByOrder.get(order.id)!.blockingCount} open item(s) (see Needs attention on its order page)`)
+					.join('; ')}.`
+			);
 		}
 
 		await tx.order.updateMany({ where: { id: { in: [...orderIds] } }, data: { status: OrderStatus.CONFIRMED } });

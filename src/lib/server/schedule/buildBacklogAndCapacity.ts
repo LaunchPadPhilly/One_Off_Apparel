@@ -107,6 +107,7 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			capConstruction: item.capConstruction,
 			matteSurface: item.matteSurface,
 			foldBagGarment: item.foldBagGarment,
+			manualEstimatedHours: item.manualEstimatedHours,
 			dueDate: item.order.internalDueDate,
 			dependsOnIds
 		};

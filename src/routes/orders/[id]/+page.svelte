@@ -46,8 +46,11 @@
 		garmentStyle: 'Is it a flat garment or a cap',
 		capConstruction: 'Is it a structured or unstructured cap',
 		matteSurface: 'Is the matte finish on a flat or specialty surface',
-		foldBagGarment: 'Is the garment being folded & bagged a short-sleeve tee'
+		foldBagGarment: 'Is the garment being folded & bagged a short-sleeve tee',
+		manualEstimatedHours: 'How many hours does it need (DTF/DTG has no formula)'
 	};
+
+	const needsReReview = $derived(data.order.status === 'CONFIRMED' && data.gaps.blockingCount > 0);
 
 	const answerableQuestions = $derived.by(() => {
 		const items: { key: string; text: string }[] = [];
@@ -91,11 +94,23 @@
 
 <div class="page" in:fly={screenEnter} out:fade={screenExit}>
 	<a class="muted" href="/orders">&larr; Orders</a>
-	<span class="eyebrow">{data.order.status === 'NEEDS_REVIEW' ? 'Review before confirming' : 'Order'}</span>
+	<span class="eyebrow">{data.order.status === 'NEEDS_REVIEW' ? 'Review before confirming' : needsReReview ? 'Needs re-review' : 'Order'}</span>
 	<h1>{data.order.hoopsOrderId} — {data.order.customerName}</h1>
 
 	{#if form?.message}
 		<p class="error">{form.message}</p>
+	{/if}
+
+	<!-- NEW (2026-09-23): a confirmed order that's no longer valid (something changed, or
+	     it was confirmed before the confirm gate existed). Not moved back to review —
+	     it stays confirmed, flagged like an order hold, and clears on its own once the
+	     items under Needs attention are resolved. The scheduler can't place what's
+	     missing in the meantime. -->
+	{#if needsReReview}
+		<p class="error re-review" role="status">
+			<strong>Needs re-review:</strong> this order is confirmed but has {data.gaps.blockingCount} open
+			item{data.gaps.blockingCount === 1 ? '' : 's'} (below) — it can't be fully scheduled until they're resolved.
+		</p>
 	{/if}
 
 	<!-- NEW (2026-09-21): the order-level estimate at a glance — same live-computed
@@ -247,8 +262,16 @@
 		{/if}
 
 		{#if data.canEdit && data.order.status === 'NEEDS_REVIEW'}
-			<form method="POST" action="?/confirm" use:enhance>
-				<button class="button" use:pressable type="submit">Confirm import</button>
+			<!-- Only confirmable once fully valid (confirmImport.ts enforces the same
+			     rule server-side): every line item estimable, blanks received, customer
+			     approved, all artwork approved. -->
+			<form method="POST" action="?/confirm" use:enhance class="confirm-row">
+				<button class="button" use:pressable type="submit" disabled={data.gaps.blockingCount > 0}>Confirm import</button>
+				{#if data.gaps.blockingCount > 0}
+					<span class="muted">
+						Can't confirm yet — {data.gaps.blockingCount} open item{data.gaps.blockingCount === 1 ? '' : 's'} under Needs attention.
+					</span>
+				{/if}
 			</form>
 		{/if}
 
@@ -360,7 +383,7 @@
 						these exact DOM nodes whenever the item's own data changes, so there's
 						nothing stale left for the browser to "restore" into.
 					-->
-					{#key `${item.id}:${item.design}:${item.apparelColor}:${item.quantity}`}
+					{#key `${item.id}:${item.design}:${item.apparelColor}:${item.quantity}:${item.manualEstimatedHours}`}
 						<form method="POST" action="?/updateLineItem" use:enhance class="fields">
 							<input type="hidden" name="lineItemId" value={item.id} />
 							<label>Design <input name="design" value={item.design} autocomplete="off" /></label>
@@ -375,6 +398,14 @@
 							existing value — the server only updates a field if you
 							pick something other than blank (see +page.server.ts).
 						-->
+						{#if item.decorationType === 'DTF' || item.decorationType === 'DTG'}
+							<!-- NEW (2026-09-23): DTF/DTG have no formula (time depends on the
+							     artwork), so the reviewer enters the hours; that's the estimate. -->
+							<label>
+								Hours needed
+								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
+							</label>
+						{/if}
 						{#if item.itemType === 'DECORATION'}
 							<label>
 								Garment style
@@ -504,6 +535,13 @@
 
 	.error {
 		color: var(--danger-fg);
+	}
+
+	.confirm-row {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		flex-wrap: wrap;
 	}
 
 	.needs-attention {

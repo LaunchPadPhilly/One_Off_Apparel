@@ -32,6 +32,8 @@ export const lineItemCandidateBaseSchema = z.object({
 	// foldBagGarment to pick their formula. See prisma/schema.prisma.
 	matteSurface: z.enum(['FLAT', 'SPECIALTY']).nullish(),
 	foldBagGarment: z.enum(['SS_TEE', 'OTHER']).nullish(),
+	// NEW (2026-09-23): reviewer-entered hours for DTF/DTG, which have no formula.
+	manualEstimatedHours: z.number().positive().max(200).nullish(),
 	// Another line item's `localId` in this same order candidate, or the literal
 	// "all_siblings" sentinel — never a real LineItem.id (none exist yet at import time).
 	dependsOn: z.string().nullish(),

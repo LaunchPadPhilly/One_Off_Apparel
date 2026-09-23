@@ -24,6 +24,7 @@ export const simulateChangeSchema = z.discriminatedUnion('type', [
 			capConstruction: z.enum(['STRUCTURED', 'UNSTRUCTURED']).nullish(),
 			matteSurface: z.enum(['FLAT', 'SPECIALTY']).nullish(),
 			foldBagGarment: z.enum(['SS_TEE', 'OTHER']).nullish(),
+			manualEstimatedHours: z.number().positive().nullish(),
 			quantity: z.number().int().positive(),
 			weightClass: z.enum(['THIN', 'POLY', 'BULKY']),
 			dueDate: z.iso.date()

@@ -668,6 +668,13 @@
 								<div class="order__title">
 									<span class="order__customer">{orderTitle(order)}</span>
 									<span class="muted order__job">#{order.hoopsOrderId}</span>
+									{#if order.blockingCount > 0}
+										<a
+											class="order__re-review"
+											href="/orders/{order.id}"
+											title="{order.blockingCount} open item{order.blockingCount === 1 ? '' : 's'} on this order — open it to resolve."
+										>Needs re-review</a>
+									{/if}
 								</div>
 								<div class="order__meta">
 									<button
@@ -921,6 +928,17 @@
 
 	.header-row h1 {
 		margin: 0.1rem 0 0.15rem;
+	}
+
+	.order__re-review {
+		align-self: flex-start;
+		margin-top: 0.25rem;
+		padding: 0.1rem 0.5rem;
+		border-radius: 999px;
+		font-size: 0.75rem;
+		background: var(--danger-bg);
+		color: var(--danger-fg);
+		text-decoration: none;
 	}
 
 	.board-notice__dismiss {

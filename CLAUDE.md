@@ -25,8 +25,8 @@ Schedule/Production board (`src/routes/schedule/`), and a minimal Reports page
 `ANTHROPIC_API_KEY`) rather than a deterministic parser. **Still not end-to-end
 schedulable:** `estimate_hours` now has real numbers for every station
 (`screen_print_auto`, `embroidery`, and all five finishing steps — matte, relabel,
-fold_bag, hang_tag, wovens, added 2026-09-23); only DTF/DTG still throw
-`MissingFormulaError` (see the engine section and Known open items). Even with real
+fold_bag, hang_tag, wovens, added 2026-09-23). DTF/DTG have no formula — a reviewer
+enters the hours per job (`LineItem.manualEstimatedHours`, 2026-09-23). Even with real
 formulas, `propose_schedule` still needs `Station`/`CapacityCalendar` rows
 that barely exist in the real database — nothing in the app can create a *real* one
 today. `fetchCapacity()` now fills that gap with a stand-in default (7.5h/day per known
@@ -229,6 +229,18 @@ One row per order.
 `orders.status` only flips to `complete` automatically, via `check_completion()` — see
 Engine section. Never set it to `complete` directly from application code.
 
+**Confirming requires a fully valid order (2026-09-23).** `confirmImport.ts` refuses to
+confirm while `computeOrderGaps(...).blockingCount > 0` (`orderGaps.ts`) — every line
+item estimable (no missing formula input, DTF/DTG hours entered), blanks `RECEIVED`,
+customer `APPROVED`, and every decoration's artwork `APPROVED`. Enforced server-side
+inside the confirm transaction, so the order page's (disabled) button and the
+`confirm_import` MCP tool are gated identically. A **confirmed** order that stops being
+valid (or was confirmed before this gate) is not moved back to `needs_review`: it's
+shown as **"Needs re-review"** — on the Orders list, its order page and its schedule
+board card — like an order hold. The flag is computed live, not stored, so it clears
+the moment the open items are resolved. `fetchOrderGaps()` (`orderReadiness.ts`) is the
+batch version the list and the gate share.
+
 `cancelled` is Orders' "delete" (`cancelOrder.ts`, 2026-09-21) — deliberately
 non-destructive: it only changes `status`, never removes the order or its line items,
 schedule assignments or actuals. Blocked once an order is already `complete` (nothing
@@ -421,8 +433,13 @@ final formula. Read literally it would be 40 minutes per garment.
 
 Still open, per Known open items below: `screen_print_auto`'s "Manual" variant (the
 client's own sheet marks it "never fully developed" — every cell blank, nothing to port),
-the Wovens formula (see above), and DTF/DTG (no station or formula defined at all). `estimate_hours` keeps throwing
-`MissingFormulaError` for all of those until each is resolved. Separately,
+and the Wovens formula (see above). **DTF/DTG** have no formula by design — the client
+says their time depends on the artwork (2026-09-23) — so each DTF/DTG line item takes
+reviewer-entered hours (`LineItem.manualEstimatedHours`, only ever used for those two
+types, never to override a real formula) and gets its own `dtf`/`dtg` station. Until
+the hours are set, the order page asks "How many hours does this job need?" (a
+`MissingLineItemDataError`, answerable by hand or via the notes box).
+`MissingFormulaError` is now only for an unknown decoration type / finishing step. Separately,
 `MissingLineItemDataError` (not a station-level gap) fires when a station's formula is
 real but one specific job is missing a required field — e.g. an embroidery line item with
 no `garmentStyle` set yet; a human resolves this by editing the line item, not by a
@@ -556,11 +573,11 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   confirm with the client), and `extractOrderFromPdf.ts` only fills `matteSurface` /
   `foldBagGarment` when the export states them clearly, so most imported MATTE and
   FOLD_BAG rows will need them set by hand on the order page.
-- **DTF and DTG are dropdown values with no backing station or formula.** They appear as
-  valid `decoration_type` choices on the order form, but nothing in the spreadsheet defines a
-  station or production-time formula for either. Needs a scope decision from Jeff: are these
-  actually offered today, and if so, what are their formulas? Do not map them onto an
-  existing station as a stand-in.
+- **DTF and DTG — resolved as manual hours (2026-09-23).** No formula exists because the
+  time depends on the artwork; the reviewer enters hours per job (see estimate_hours
+  above), and each has its own station (`dtf`, `dtg`) rather than borrowing another one.
+  If the client ever produces a real formula, it replaces `estimateManualHours` in
+  `estimateHours.ts`.
 - **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
   the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
   covers the whole flow, not just Start/Stop: a date window (default 28 days from

@@ -56,6 +56,7 @@ async function createLineItemsForOrder(
 				capConstruction: itemCandidate.capConstruction ?? null,
 				matteSurface: itemCandidate.matteSurface ?? null,
 				foldBagGarment: itemCandidate.foldBagGarment ?? null,
+				manualEstimatedHours: itemCandidate.manualEstimatedHours ?? null,
 				quantity: itemCandidate.quantity,
 				sizeBreakdown: itemCandidate.sizeBreakdown,
 				reviewConfidence: itemCandidate.reviewConfidence ?? null

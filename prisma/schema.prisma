@@ -323,6 +323,11 @@ model LineItem {
   // garment being folded a short-sleeve tee (SS_TEE) or anything else (OTHER)? The
   // client's Fold & Bag tab is keyed on this, not on weight class. Null elsewhere.
   foldBagGarment        FoldBagGarment?
+  // NEW (2026-09-23): hours a reviewer entered by hand for a job type that has no
+  // formula — DTF and DTG today, whose time varies by artwork so the client has no
+  // fixed table. estimateHours.ts uses it only for those types (never overrides a
+  // real formula); until it's set, the order page asks "how many hours?".
+  manualEstimatedHours  Float?
   // Either another LineItem's id, or the literal string "all_siblings"
   // (waits on every other line item under the same order). This is
   // deliberately a plain string, not a Prisma relation: a real FK

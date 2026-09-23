@@ -39,6 +39,8 @@ export interface EstimateHoursInput {
 	// need foldBagGarment. See prisma/schema.prisma's LineItem comments.
 	matteSurface?: MatteSurface | null;
 	foldBagGarment?: FoldBagGarment | null;
+	// NEW (2026-09-23): reviewer-entered hours for DTF/DTG (no formula exists).
+	manualEstimatedHours?: number | null;
 }
 
 export interface EstimateHoursResult {

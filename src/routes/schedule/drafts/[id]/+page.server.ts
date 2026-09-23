@@ -4,6 +4,7 @@ import { getDraft } from '$lib/server/schedule/draft';
 import { checkFinisherPlacement, pushDependentsAfter } from '$lib/server/schedule/draftDependencies';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
+import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { KNOWN_STATIONS, DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import {
 	OrderStatus,
@@ -165,6 +166,12 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			internalDueDate: iso(order.internalDueDate),
 			externalShipDate: iso(order.externalShipDate),
 			status: order.status,
+			// NEW (2026-09-23): open items (orderGaps.ts) — a confirmed order with any is
+			// flagged "Needs re-review" on its card, linking to the order page to fix it.
+			blockingCount: computeOrderGaps(
+				{ blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
+				order.lineItems
+			).blockingCount,
 			lineItems: order.lineItems.map((item) => ({
 				id: item.id,
 				design: item.design,

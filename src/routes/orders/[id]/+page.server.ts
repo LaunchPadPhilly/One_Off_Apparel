@@ -105,6 +105,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			// NEW (2026-09-23): finishing-only formula inputs (matte / fold & bag).
 			matteSurface: item.matteSurface,
 			foldBagGarment: item.foldBagGarment,
+			manualEstimatedHours: item.manualEstimatedHours,
 			// NEW: the artwork-approval gate — decoration rows only, null on finishing
 			// rows. Same fetchBacklog() reasoning as Order.blankOrderingStatus above.
 			artworkApprovalStatus: item.artworkApprovalStatus,
@@ -179,7 +180,7 @@ export const actions: Actions = {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = value.trim();
 		}
-		for (const key of ['quantity', 'inkColorCount', 'screens', 'stitchCount']) {
+		for (const key of ['quantity', 'inkColorCount', 'screens', 'stitchCount', 'manualEstimatedHours']) {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = Number(value);
 		}

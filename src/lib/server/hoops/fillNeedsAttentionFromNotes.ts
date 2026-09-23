@@ -33,7 +33,7 @@ export class FillFromNotesError extends Error {
 	}
 }
 
-type FieldKind = readonly string[] | 'integer';
+type FieldKind = readonly string[] | 'integer' | 'hours';
 
 const ALLOWED_VALUES: Record<string, FieldKind> = {
 	blankOrderingStatus: ['NOT_ORDERED', 'ORDERED', 'ISSUE', 'RECEIVED'],
@@ -44,11 +44,14 @@ const ALLOWED_VALUES: Record<string, FieldKind> = {
 	matteSurface: ['FLAT', 'SPECIALTY'],
 	foldBagGarment: ['SS_TEE', 'OTHER'],
 	inkColorCount: 'integer',
-	stitchCount: 'integer'
+	stitchCount: 'integer',
+	manualEstimatedHours: 'hours'
 };
 
 function describeAllowedValues(kind: FieldKind): string {
-	return kind === 'integer' ? 'a whole number' : kind.join(', ');
+	if (kind === 'integer') return 'a whole number';
+	if (kind === 'hours') return 'a number of hours greater than 0, decimals allowed (e.g. 1.5)';
+	return kind.join(', ');
 }
 
 const answersTool: Anthropic.Tool = {
@@ -146,11 +149,16 @@ export async function fillNeedsAttentionFromNotes(orderId: string, note: string,
 		if (!question) continue; // Claude named a key that wasn't in the list — ignore rather than guess what it meant.
 
 		const allowed = ALLOWED_VALUES[question.target.field];
-		const isValid = allowed === 'integer' ? Number.isInteger(Number(answer.value)) : allowed.includes(answer.value);
+		const isValid =
+			allowed === 'integer'
+				? Number.isInteger(Number(answer.value))
+				: allowed === 'hours'
+					? Number.isFinite(Number(answer.value)) && Number(answer.value) > 0
+					: allowed.includes(answer.value);
 		if (!isValid) continue; // Not one of the field's real values — drop it rather than write something invalid.
 
 		unansweredCount -= 1;
-		const value: string | number = allowed === 'integer' ? Number(answer.value) : answer.value;
+		const value: string | number = allowed === 'integer' || allowed === 'hours' ? Number(answer.value) : answer.value;
 
 		if (question.target.level === 'order') {
 			(orderPatch as Record<string, string | number>)[question.target.field] = value;

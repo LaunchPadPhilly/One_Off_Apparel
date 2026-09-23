@@ -16,8 +16,9 @@ export abstract class EstimationError extends Error {}
  * one "Consolidated IT" spreadsheet tab, unit-tested against that spreadsheet's own
  * numbers — not re-derived. screen_print_auto (2026-09-19), embroidery (2026-09-21)
  * and every finishing step (2026-09-23) are now fully wired — see estimate_hours in
- * CLAUDE.md. What still throws this: DTF/DTG, which have no station or formula in the
- * source spreadsheet at all and need a decision from the client.
+ * CLAUDE.md. DTF/DTG have no formula (time varies by artwork) and use reviewer-entered
+ * hours instead — see estimateManualHours. What still throws this: an unknown
+ * decoration type or finishing step.
  */
 export class MissingFormulaError extends EstimationError {
 	constructor(what: string) {
@@ -29,7 +30,7 @@ export class MissingFormulaError extends EstimationError {
 /** The exact LineItem field a MissingLineItemDataError is missing — lets a caller (the
  *  order page's "needs attention" gaps, the notes-based fill-in) target the real field
  *  precisely instead of parsing it back out of the human-readable message. */
-export type MissingLineItemField = 'inkColorCount' | 'stitchCount' | 'garmentStyle' | 'capConstruction' | 'matteSurface' | 'foldBagGarment';
+export type MissingLineItemField = 'inkColorCount' | 'stitchCount' | 'garmentStyle' | 'capConstruction' | 'matteSurface' | 'foldBagGarment' | 'manualEstimatedHours';
 
 /**
  * Thrown when a station's formula is real, but *this specific job* is missing a field
@@ -299,6 +300,21 @@ function estimateFinishingHours(item: EstimateHoursInput): EstimateHoursResult {
 }
 
 /**
+ * DTF (direct-to-film) and DTG (direct-to-garment) have no formula — the client says
+ * their time depends on the artwork (2026-09-23) — so a reviewer answers "how many
+ * hours does this job need?" and that number is the estimate. Missing → a
+ * MissingLineItemDataError, which the order page turns into that question (and which
+ * blocks confirming the import), never a guessed default.
+ */
+function estimateManualHours(item: EstimateHoursInput, station: string, label: string): EstimateHoursResult {
+	const hours = item.manualEstimatedHours;
+	if (hours == null || !(hours > 0)) {
+		throw new MissingLineItemDataError(`manual_estimated_hours (${label} has no formula — how many hours does this job need?)`, 'manualEstimatedHours');
+	}
+	return { station, hours };
+}
+
+/**
  * Works out how long one job takes, station by station. All math lives here —
  * Claude never computes hours or a schedule itself (see CLAUDE.md's non-negotiable
  * design principles). Pure and DB-free: callable with plain import-review data.
@@ -319,9 +335,9 @@ export function estimateHours(item: EstimateHoursInput): EstimateHoursResult {
 				// actually computes a real answer via estimateEmbroideryHours above.
 				return estimateEmbroideryHours(item);
 			case DecorationType.DTF:
-				throw new MissingFormulaError('a DTF station and formula — CLAUDE.md flags this as a dropdown value with no backing station at all, not just an unported formula');
+				return estimateManualHours(item, 'dtf', 'DTF');
 			case DecorationType.DTG:
-				throw new MissingFormulaError('a DTG station and formula — CLAUDE.md flags this as a dropdown value with no backing station at all, not just an unported formula');
+				return estimateManualHours(item, 'dtg', 'DTG');
 			default:
 				throw new MissingFormulaError(`a decoration line item with decorationType "${item.decorationType}"`);
 		}

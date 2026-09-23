@@ -76,6 +76,7 @@
 	// stat row at the top of the page. Derived from data already on the page — no
 	// extra server round-trip needed.
 	const needsReviewCount = $derived(data.orders.filter((order) => order.status === 'NEEDS_REVIEW').length);
+	const reReviewCount = $derived(data.orders.filter((order) => order.status === 'CONFIRMED' && order.blockingCount > 0).length);
 	const totalEstimatedHours = $derived(data.orders.reduce((sum, order) => sum + order.estimate.totalHours, 0));
 	const fullyEstimableCount = $derived(data.orders.filter((order) => order.estimate.unestimableCount === 0 && order.lineItemCount > 0).length);
 </script>
@@ -98,6 +99,9 @@
 		<div class="grid">
 			<StatCard value={data.orders.length} label="active orders" />
 			<StatCard value={needsReviewCount} label="waiting on review" tone={needsReviewCount > 0 ? 'warn' : 'default'} />
+			{#if reReviewCount > 0}
+				<StatCard value={reReviewCount} label="need re-review" tone="warn" />
+			{/if}
 			<StatCard value={totalEstimatedHours} format={(n) => `~${n.toFixed(1)}h`} label="estimated hours (known so far)" />
 			<StatCard value={fullyEstimableCount} label="orders fully estimated" />
 		</div>
@@ -261,7 +265,17 @@
 								<td class="job-cell">{order.hoopsOrderId}</td>
 								<td>{order.customerName}</td>
 								<td>{order.internalDueDate}</td>
-								<td><span class="badge" class:badge--warn={order.status === 'NEEDS_REVIEW'}>{order.status}</span></td>
+								<td>
+									{#if order.status === 'CONFIRMED' && order.blockingCount > 0}
+										<!-- Confirmed but no longer valid: flagged, not moved back to review. -->
+										<span class="badge badge--warn" title="{order.blockingCount} open item{order.blockingCount === 1 ? '' : 's'} — open the order to resolve.">Needs re-review</span>
+									{:else}
+										<span class="badge" class:badge--warn={order.status === 'NEEDS_REVIEW'}>{order.status}</span>
+										{#if order.status === 'NEEDS_REVIEW' && order.blockingCount > 0}
+											<span class="badge badge--off" title="Resolve these before it can be confirmed.">{order.blockingCount} open</span>
+										{/if}
+									{/if}
+								</td>
 								<td>{order.lineItemCount}</td>
 								<td>
 									{#if order.estimate.estimableCount > 0}

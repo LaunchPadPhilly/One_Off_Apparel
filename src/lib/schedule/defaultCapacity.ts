@@ -5,7 +5,7 @@ import { WORKING_HOURS } from './shift';
  * data exists (see CLAUDE.md's Known open items — "no station or its daily capacity
  * has ever been entered"). `KNOWN_STATIONS` mirrors the six stations CLAUDE.md's engine
  * section documents (screen print, embroidery, matte, fold & bag, hang tag, relabel,
- * wovens — wovens added 2026-09-23).
+ * wovens, dtf, dtg — added 2026-09-23).
  *
  * `DEFAULT_STATION_DAY_HOURS` is `WORKING_HOURS` from shift.ts, re-exported under this
  * name rather than redefined — the drafts workspace's timeline already assumes "one
@@ -28,7 +28,9 @@ export const KNOWN_STATIONS = [
 	'fold_bag',
 	'hang_tags',
 	'printed_relabel',
-	'wovens'
+	'wovens',
+	'dtf',
+	'dtg'
 ] as const;
 
 export const DEFAULT_STATION_DAY_HOURS = WORKING_HOURS;

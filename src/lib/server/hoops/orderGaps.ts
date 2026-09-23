@@ -35,6 +35,14 @@ export interface OrderInfoNote {
 export interface OrderGaps {
 	questions: OrderGapQuestion[];
 	infoNotes: OrderInfoNote[];
+	/**
+	 * NEW (2026-09-23): how many things stop this order from being valid — every
+	 * question above (approvals, artwork, missing estimate data) plus every line item
+	 * with no formula at all. Import-time flags don't count (they're context). Zero
+	 * means ready: confirmImport.ts refuses to confirm while this is > 0, and a
+	 * CONFIRMED order with this > 0 is shown as "Needs re-review".
+	 */
+	blockingCount: number;
 }
 
 export interface OrderGapLineItem extends EstimateHoursInput {
@@ -118,7 +126,15 @@ export function computeOrderGaps(
 		infoNotes.push({ key: `estimate:${reason}`, text: count === 1 ? `${firstDesign}: ${reason}` : `${reason} (${count} line items)` });
 	}
 
-	return { questions, infoNotes };
+	let noFormulaCount = 0;
+	for (const { count } of missingFormulaByReason.values()) noFormulaCount += count;
+
+	return { questions, infoNotes, blockingCount: questions.length + noFormulaCount };
+}
+
+/** "Can't confirm yet" copy shared by the confirm gate and the pages that show it. */
+export function describeBlockers(blockingCount: number): string {
+	return `${blockingCount} open item${blockingCount === 1 ? '' : 's'} to resolve (see Needs attention)`;
 }
 
 function fieldQuestion(field: MissingLineItemField, design: string): string {
@@ -135,5 +151,7 @@ function fieldQuestion(field: MissingLineItemField, design: string): string {
 			return `Is the matte finish on "${design}" a flat or specialty surface?`;
 		case 'foldBagGarment':
 			return `Is "${design}" being folded & bagged a short-sleeve tee or another garment?`;
+		case 'manualEstimatedHours':
+			return `How many hours does "${design}" need? (DTF/DTG has no formula — time depends on the artwork.)`;
 	}
 }
