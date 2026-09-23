@@ -77,6 +77,12 @@ export function computeSegments(startMin: number, workingMin: number): Array<{ s
 	return segments;
 }
 
+/** If `minute` lands inside a break, the moment that break ends; otherwise `minute`. */
+export function skipBreak(minute: number): number {
+	const inBreak = BREAKS.find((b) => minute >= b.startMin && minute < b.startMin + b.durationMin);
+	return inBreak ? inBreak.startMin + inBreak.durationMin : minute;
+}
+
 /**
  * Packs a station/day's jobs back-to-back starting at the shift's open, in the exact
  * order given — for the automatic engine, that's `sequenceOrder` (the ATCS batch
@@ -84,14 +90,20 @@ export function computeSegments(startMin: number, workingMin: number): Array<{ s
  * layout immediately, with no manual dragging needed to make it look right. Breaks are
  * skipped automatically (via wallClockEnd); no overlaps, since each job starts exactly
  * where the previous one's wall-clock span ended.
+ *
+ * `notBeforeInOrder` (2026-09-23, optional): a per-job earliest start. A finisher
+ * can't start until its print ends, so it waits there instead of packing flush
+ * against the previous job — the only way a gap appears in a packed day. Jobs without
+ * one pack exactly as before.
  */
-export function packSequentialStarts(workingMinutesInOrder: readonly number[]): number[] {
+export function packSequentialStarts(workingMinutesInOrder: readonly number[], notBeforeInOrder: readonly (number | undefined)[] = []): number[] {
 	const starts: number[] = [];
 	let cursor = SHIFT_START_MIN;
-	for (const workingMin of workingMinutesInOrder) {
-		starts.push(cursor);
-		cursor = wallClockEnd(cursor, workingMin);
-	}
+	workingMinutesInOrder.forEach((workingMin, i) => {
+		const start = skipBreak(Math.max(cursor, notBeforeInOrder[i] ?? SHIFT_START_MIN));
+		starts.push(start);
+		cursor = wallClockEnd(start, workingMin);
+	});
 	return starts;
 }
 
@@ -111,33 +123,4 @@ export function workingMinutesUntilShiftEnd(startMin: number): number {
 		cursor = segmentEnd;
 	}
 	return total;
-}
-
-/** Push-right: the first start at or after `desired` whose working span doesn't
- *  overlap any of `others` on the same (date, station). Skips forward out of a break
- *  if it lands inside one, and snaps past a conflicting block to the next 15 minutes.
- *  Bounded loop so a pathological input can't hang. Shared by the drafts workspace's
- *  drag-and-drop and the server's finisher push (draftDependencies.ts). */
-export function findNonOverlappingStart(
-	desired: number,
-	workingMin: number,
-	others: ReadonlyArray<{ startMin: number; durationMin: number }>
-): number {
-	const extents = others
-		.map((p) => ({ start: p.startMin, end: wallClockEnd(p.startMin, p.durationMin) }))
-		.sort((a, b) => a.start - b.start);
-
-	let candidate = desired;
-	for (let i = 0; i < 40; i++) {
-		const inBrk = BREAKS.find((b) => candidate >= b.startMin && candidate < b.startMin + b.durationMin);
-		if (inBrk) {
-			candidate = inBrk.startMin + inBrk.durationMin;
-			continue;
-		}
-		const end = wallClockEnd(candidate, workingMin);
-		const conflict = extents.find((o) => candidate < o.end && end > o.start);
-		if (!conflict) return candidate;
-		candidate = Math.ceil(conflict.end / 15) * 15;
-	}
-	return candidate;
 }

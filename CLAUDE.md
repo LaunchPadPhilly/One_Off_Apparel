@@ -510,10 +510,17 @@ for an order planned up front, not only after the print is marked done. So:
   dependency can't be placed, the dependent is flagged at risk ("waits on…"), never
   placed early. The engine now returns `startMinuteOfDay` itself because of this
   (`proposeIntoNewDraft.ts` used to pack start times afterward).
-- In a draft (`draftDependencies.ts`): dragging/placing a finisher before its print ends
-  is **refused** with a message. Moving a print later **pushes** its finishers only as far
-  as needed (same day if it fits, else the next day), cascading to anything waiting on
-  them; moving a print earlier leaves them alone.
+- In a draft (`draftDependencies.ts`, layered on the packed-queue model below): each
+  (station, day) still packs back-to-back from 8:00, but a finisher is **held** until the
+  job(s) it depends on end (`packSequentialStarts`' `notBefore`) — the only way a gap
+  appears in a packed day. Dropping a finisher on a day before its print's day, or on
+  the print's day when it can't fit after the print, is **refused** with a message;
+  dropping it earlier within the right day's queue just holds it. Moving a print later
+  re-settles its finishers only if they'd now start too early (held same day if they
+  fit, else moved to the front of the next day's queue), cascading to anything waiting
+  on them; moving a print earlier doesn't pull them along. The server returns every
+  moved position (`peers`, with `date`) plus `pushedCount`, and the board says "Moved N
+  finishing steps later…".
 - On the floor nothing changed: `startAssignment` refuses to Start a BLOCKED line item,
   so a scheduled finisher stays locked until its print is Stopped and `check_completion`
   unlocks it. The Production Board shows "Waiting on print" instead of Start.
@@ -685,6 +692,56 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   never matched anything real. Verified live: an order's total went from a permanent
   "0m" to a real "3.5h," and a relabel line item's tooltip now shows the actual
   `MissingFormulaError` reason instead of nothing.
+- **Draft board layout: every station visible per day, no tabs (2026-09-23).**
+  The board used to have a single station-tab strip at the top, and a day only
+  ever showed placements for whichever station was selected — an order that
+  touched two stations required a tab switch to see both halves. Now each day
+  card renders one row per station (fixed-width label column + bar), so the
+  whole (day × station) matrix is visible at once. Drop targets are per-row —
+  `handleTrackDrop` takes `stationName` explicitly instead of reading a
+  page-level `activeStation`, and the drop-highlight state is a
+  `date::station` key. Empty rows still render (dimmed) so a drop target is
+  always in the same place regardless of what's already placed. The time axis
+  (8a / 9a / … / 4:30p) is a single shared strip at the bottom of each day
+  card, aligned with the bar column, rather than repeated under every station
+  row. Do not reintroduce the tabs — the whole point was to stop the
+  "everything looks empty" surprise on a station tab that just wasn't the one
+  this order used.
+- **Draft board auto-shifts neighbors on any edit (2026-09-23).** The old drop
+  behavior was push-right (`findNonOverlappingStart`): a new/moved item snapped
+  forward past whatever it would overlap, and a removed item left a gap in the
+  bar. Now every place/move/remove triggers a repack of the affected (draft,
+  station, date), so items sit back-to-back from shift open in their current
+  relative order — dropping between two peers pushes the later ones back to make
+  room, removing or dragging away closes the gap. `$lib/schedule/repackDay.ts`
+  is the ONE source of truth for this layout math (`computeInsertRank`,
+  `insertAndRepack`, `repackOrdered`); both the client (`drafts/[id]/+page.svelte`)
+  and the server actions (`drafts/[id]/+page.server.ts`'s `placeAssignment` /
+  `moveAssignment` / `removeAssignment`) call it, and both delegate through to
+  the same `packSequentialStarts` helper the automatic engine
+  (`proposeIntoNewDraft.ts`) already uses — so a manual edit lands at the exact
+  wall-clock positions a fresh engine run would produce for the same queue.
+  Insertion rank is midpoint-based: dropping in the LEFT half of a peer's span
+  slots BEFORE that peer, dropping in the RIGHT half slots AFTER — the client
+  computes it, the server accepts an `insertRank` field on placeAssignment and
+  moveAssignment (replacing the old `startMinuteOfDay`, which no longer comes
+  from the client), makes room by bumping peers at rank >= insertRank in a
+  transaction, then normalizes sequenceOrder = 0..N-1 + rewrites
+  startMinuteOfDay via `packSequentialStarts`. Server actions return the peers'
+  new positions so the client can reconcile any drift after the optimistic
+  local repack. Deliberately NOT preserved: user-created gaps at the start of a
+  day (e.g. dragging the first job to 10:30 to hold the morning empty) — every
+  day always packs from 8:00 now. If that turns out to be a real workflow need,
+  the fix is a per-day "start offset" the packer honors, not a return to the
+  old push-right model — do not reintroduce `findNonOverlappingStart` (removed
+  from `shift.ts` in the 2026-09-23 merge). The one sanctioned exception to "no
+  gaps" is the finisher hold above: the packer honors a per-item `notBeforeMin`
+  (its print's end time) — the same mechanism a per-day start offset would use.
+  The server side of the repack now lives in `draftDependencies.ts`
+  (`repackDraftDays`), still built on `repackOrdered`/`packSequentialStarts`.
+  Client requests go through one `postAction` that uses SvelteKit's
+  `deserialize` (replacing the hand-rolled devalue walkers), so a server refusal's
+  message reaches the board.
 - **Per-line-item and per-order hour estimates, shown before scheduling
   (2026-09-21).** `estimateForDisplay.ts` wraps the same `estimateHours()` the engine
   uses and turns its result (or `MissingFormulaError`/`MissingLineItemDataError`) into

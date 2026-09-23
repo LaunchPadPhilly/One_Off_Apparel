@@ -1,4 +1,4 @@
-import { SHIFT_END_MIN, SHIFT_START_MIN, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
+import { SHIFT_END_MIN, SHIFT_START_MIN, skipBreak, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
 import { estimateHours, EstimationError } from './estimateHours';
 import type { AtRiskFlag, BacklogItem, CapacitySlot, ExternalDependencyState, ProposedAssignment, ProposeScheduleResult } from './types';
 
@@ -164,9 +164,12 @@ export function proposeSchedule(
 			let gapMin = 0;
 			if (earliest && dayMs === earliest.dayMs && earliest.minute > start) {
 				// Wait for the print to finish — the idle stretch before this job counts
-				// against the day's capacity, so later jobs don't overbook it.
-				gapMin = workingMinutesUntilShiftEnd(start) - workingMinutesUntilShiftEnd(earliest.minute);
-				start = earliest.minute;
+				// against the day's capacity, so later jobs don't overbook it. Same rule
+				// as the drafts board's repack (packSequentialStarts' notBefore), so an
+				// edit there reproduces this exact layout.
+				const waitUntil = skipBreak(earliest.minute);
+				gapMin = workingMinutesUntilShiftEnd(start) - workingMinutesUntilShiftEnd(waitUntil);
+				start = waitUntil;
 			}
 			if (slot.availableHrs < estimate.hours + gapMin / 60) continue;
 			// A dependency-constrained job on its dependency's day must actually finish

@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { prisma } from '$lib/server/prisma';
-import { ScheduleStrategy, ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
+import {
+	ScheduleAssignmentStatus,
+	ScheduleStrategy,
+	ScheduleDraftStatus
+} from '../../../../prisma/generated/prisma/enums';
 
 /**
  * A schedule draft is a named, editable proposal for a production window (1–4 weeks
@@ -40,4 +44,32 @@ export async function listDrafts() {
 
 export async function getDraft(id: string) {
 	return prisma.scheduleDraft.findUnique({ where: { id } });
+}
+
+/**
+ * Delete a draft and its still-proposed assignments in one transaction. Any
+ * assignments that have been committed (APPROVED / IN_PROGRESS / COMPLETE)
+ * survive the delete — the ScheduleAssignment → ScheduleDraft FK is
+ * onDelete: SetNull for exactly this reason, so a committed row is decoupled
+ * rather than cascaded. Deliberately hard delete (not a status flip to
+ * ARCHIVED): a draft the user actively deleted isn't one they might want to
+ * find in an archive later, and leaving orphaned PROPOSED rows behind would
+ * make them show up on future queries with no draft to explain them.
+ */
+export async function deleteDraft(id: string, actor: string) {
+	await prisma.$transaction(async (tx) => {
+		const removed = await tx.scheduleAssignment.deleteMany({
+			where: { scheduleDraftId: id, status: ScheduleAssignmentStatus.PROPOSED }
+		});
+		await tx.scheduleDraft.delete({ where: { id } });
+		await tx.domainAuditLog.create({
+			data: {
+				entity: 'ScheduleDraft',
+				entityId: id,
+				action: 'schedule_draft_deleted',
+				actor,
+				diff: { removedProposedAssignments: removed.count }
+			}
+		});
+	});
 }
