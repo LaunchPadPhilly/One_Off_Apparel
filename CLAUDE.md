@@ -648,6 +648,48 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   never matched anything real. Verified live: an order's total went from a permanent
   "0m" to a real "3.5h," and a relabel line item's tooltip now shows the actual
   `MissingFormulaError` reason instead of nothing.
+- **Draft board layout: every station visible per day, no tabs (2026-09-23).**
+  The board used to have a single station-tab strip at the top, and a day only
+  ever showed placements for whichever station was selected — an order that
+  touched two stations required a tab switch to see both halves. Now each day
+  card renders one row per station (fixed-width label column + bar), so the
+  whole (day × station) matrix is visible at once. Drop targets are per-row —
+  `handleTrackDrop` takes `stationName` explicitly instead of reading a
+  page-level `activeStation`, and the drop-highlight state is a
+  `date::station` key. Empty rows still render (dimmed) so a drop target is
+  always in the same place regardless of what's already placed. The time axis
+  (8a / 9a / … / 4:30p) is a single shared strip at the bottom of each day
+  card, aligned with the bar column, rather than repeated under every station
+  row. Do not reintroduce the tabs — the whole point was to stop the
+  "everything looks empty" surprise on a station tab that just wasn't the one
+  this order used.
+- **Draft board auto-shifts neighbors on any edit (2026-09-23).** The old drop
+  behavior was push-right (`findNonOverlappingStart`): a new/moved item snapped
+  forward past whatever it would overlap, and a removed item left a gap in the
+  bar. Now every place/move/remove triggers a repack of the affected (draft,
+  station, date), so items sit back-to-back from shift open in their current
+  relative order — dropping between two peers pushes the later ones back to make
+  room, removing or dragging away closes the gap. `$lib/schedule/repackDay.ts`
+  is the ONE source of truth for this layout math (`computeInsertRank`,
+  `insertAndRepack`, `repackOrdered`); both the client (`drafts/[id]/+page.svelte`)
+  and the server actions (`drafts/[id]/+page.server.ts`'s `placeAssignment` /
+  `moveAssignment` / `removeAssignment`) call it, and both delegate through to
+  the same `packSequentialStarts` helper the automatic engine
+  (`proposeIntoNewDraft.ts`) already uses — so a manual edit lands at the exact
+  wall-clock positions a fresh engine run would produce for the same queue.
+  Insertion rank is midpoint-based: dropping in the LEFT half of a peer's span
+  slots BEFORE that peer, dropping in the RIGHT half slots AFTER — the client
+  computes it, the server accepts an `insertRank` field on placeAssignment and
+  moveAssignment (replacing the old `startMinuteOfDay`, which no longer comes
+  from the client), makes room by bumping peers at rank >= insertRank in a
+  transaction, then normalizes sequenceOrder = 0..N-1 + rewrites
+  startMinuteOfDay via `packSequentialStarts`. Server actions return the peers'
+  new positions so the client can reconcile any drift after the optimistic
+  local repack. Deliberately NOT preserved: user-created gaps at the start of a
+  day (e.g. dragging the first job to 10:30 to hold the morning empty) — every
+  day always packs from 8:00 now. If that turns out to be a real workflow need,
+  the fix is a per-day "start offset" the packer honors, not a return to the
+  old push-right model — do not reintroduce `findNonOverlappingStart`.
 - **Per-line-item and per-order hour estimates, shown before scheduling
   (2026-09-21).** `estimateForDisplay.ts` wraps the same `estimateHours()` the engine
   uses and turns its result (or `MissingFormulaError`/`MissingLineItemDataError`) into

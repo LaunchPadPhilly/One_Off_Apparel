@@ -3,26 +3,69 @@
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig, storageKeyPrefix } from '$lib/appConfig';
 	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments } from '$lib/schedule/shift';
+	import { computeInsertRank, insertAndRepack, repackOrdered } from '$lib/schedule/repackDay';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
 
 	let search = $state('');
-	// activeStation reads from `data` inside a getter so it re-evaluates if the loaded
-	// stations/assignments change (e.g. after a server-only nav); a plain
-	// $state(data...) initializer would freeze on the first render's value.
-	//
-	// Defaults to whichever station actually HAS a placement (the earliest one, per
-	// the server's date/time-ordered assignments query), not just the alphabetically
-	// first station name — six known stations always exist now (fetchCapacity.ts
-	// upserts all of them so the automatic engine has somewhere to place jobs), and
-	// most orders only ever use one or two of them. Landing on an empty, irrelevant
-	// tab (e.g. "Embroidery" for a screen-print-only order) after an automatic
-	// schedule run made it look like nothing had been placed at all.
-	let activeStationOverride = $state<string | null>(null);
-	let activeStation = $derived(activeStationOverride ?? data.assignments[0]?.stationName ?? data.stationNames[0] ?? 'screen_print_auto');
-	function selectStation(name: string) {
-		activeStationOverride = name;
+
+	// The finishing stations — matte / relabel / fold & bag / hang tags / wovens
+	// — collapse under one shared "Finishing" group in the day timeline. Five
+	// mostly-empty rows per day would dominate the board when most orders touch
+	// only decoration + one finish. Kept in sync with KNOWN_STATIONS in
+	// $lib/schedule/defaultCapacity.ts; a station name not listed here is
+	// treated as a top-level production row.
+	const FINISHING_STATIONS = new Set<string>([
+		'matte_finish',
+		'fold_bag',
+		'hang_tags',
+		'printed_relabel',
+		'wovens'
+	]);
+	function isFinishing(stationName: string): boolean {
+		return FINISHING_STATIONS.has(stationName);
+	}
+
+	const FINISHING_COLLAPSED_KEY = `${storageKeyPrefix}scheduleFinishingCollapsed`;
+	function loadFinishingCollapsed(): boolean {
+		if (typeof window === 'undefined') return true;
+		try {
+			const saved = localStorage.getItem(FINISHING_COLLAPSED_KEY);
+			// Missing / any non-"expanded" value keeps the default (collapsed) so a
+			// fresh session doesn't drown the user in empty finishing rows.
+			return saved !== 'expanded';
+		} catch {
+			return true;
+		}
+	}
+	let finishingCollapsed = $state<boolean>(loadFinishingCollapsed());
+	function toggleFinishing() {
+		finishingCollapsed = !finishingCollapsed;
+		if (typeof window === 'undefined') return;
+		try {
+			localStorage.setItem(FINISHING_COLLAPSED_KEY, finishingCollapsed ? 'collapsed' : 'expanded');
+		} catch {
+			// localStorage unavailable — the choice just won't persist.
+		}
+	}
+
+	// Guard the destructive "Delete draft" submit with a browser confirm(). Any
+	// still-proposed assignments on this draft go with it; committed rows
+	// (APPROVED / IN_PROGRESS / COMPLETE) survive via the FK's onDelete: SetNull
+	// — surfaced in the confirm text so the click isn't blind.
+	function confirmDelete(event: SubmitEvent) {
+		const proposedCount = data.assignments.length;
+		const detail = proposedCount === 0
+			? ''
+			: `\n\nThis draft has ${proposedCount} proposed placement${proposedCount === 1 ? '' : 's'} — they will be discarded.`;
+		if (
+			!confirm(
+				`Delete draft "${data.draft.name}"? This cannot be undone.${detail}`
+			)
+		) {
+			event.preventDefault();
+		}
 	}
 
 	function strategyLabel(value: string): string {
@@ -241,6 +284,18 @@
 		return ordersById.get(orderId);
 	}
 
+	// Every line item on this draft, indexed by id so a placement can look up its
+	// design/step/quantity/color for the hover popover in O(1) rather than
+	// re-scanning all orders on every hover.
+	let lineItemsById = $derived(
+		new Map(
+			data.orders.flatMap((order) => order.lineItems.map((item) => [item.id, item] as const))
+		)
+	);
+	function findLineItem(lineItemId: string) {
+		return lineItemsById.get(lineItemId);
+	}
+
 	// ─── Inline edit state ─────────────────────────────────────────────────────
 	let editingOrderId = $state<string | null>(null);
 	let draftTitle = $state('');
@@ -307,6 +362,19 @@
 		}))
 	);
 
+	// Hover state — tracks which placement (across ALL its segments, if it spans a
+	// break) is currently hovered, so all segments highlight together and a shared
+	// details popover renders on the first segment. Set on mouseenter of any
+	// segment, cleared on mouseleave; a plain :hover CSS rule would only expand
+	// one segment at a time and each segment would want its own popover.
+	let hoveredPlacementId = $state<string | null>(null);
+	function beginHover(id: string) {
+		hoveredPlacementId = id;
+	}
+	function endHover(id: string) {
+		if (hoveredPlacementId === id) hoveredPlacementId = null;
+	}
+
 	// Which line items already have a placement somewhere in this draft — the sidebar
 	// showed every line item unconditionally, with nothing distinguishing "already on
 	// the timeline" from "not placed yet," which made a real, correct automatic
@@ -315,50 +383,42 @@
 	// added/removed/dragged, not just on page load.
 	let placedLineItemIds = $derived(new Set(placements.map((p) => p.lineItemId)));
 
-	function placementsForDay(date: string): Placement[] {
+	function placementsForDay(date: string, stationName: string): Placement[] {
 		return placements
-			.filter((p) => p.date === date && p.stationName === activeStation)
+			.filter((p) => p.date === date && p.stationName === stationName)
 			.sort((a, b) => a.startMin - b.startMin);
 	}
 
-	// Push-right: snap `desired` forward past any placements it would overlap on
-	// this (date, station). Also skips forward out of a break if the desired
-	// start lands inside one. Bounded loop so a pathological input can't hang.
-	function findNonOverlappingStart(
-		desired: number,
-		workingMin: number,
-		others: Placement[]
-	): number {
-		const extents = others
-			.map((p) => ({ start: p.startMin, end: wallClockEnd(p.startMin, p.durationMin) }))
-			.sort((a, b) => a.start - b.start);
-
-		let candidate = desired;
-		for (let i = 0; i < 40; i++) {
-			// If we're sitting inside a break, jump past it.
-			const inBrk = BREAKS.find(
-				(b) => candidate >= b.startMin && candidate < b.startMin + b.durationMin
-			);
-			if (inBrk) {
-				candidate = inBrk.startMin + inBrk.durationMin;
-				continue;
-			}
-			const end = wallClockEnd(candidate, workingMin);
-			const conflict = extents.find((o) => candidate < o.end && end > o.start);
-			if (!conflict) return candidate;
-			// Snap to just after the conflicting block, rounded up to the next 15m.
-			candidate = Math.ceil(conflict.end / 15) * 15;
-		}
-		return candidate;
+	/**
+	 * Repack a (date, station) day back-to-back from shift open, in the current
+	 * relative order. Called after any local edit (drop, move, remove) so the UI
+	 * reflects the auto-shift the server also performs — items sit adjacent, no
+	 * gaps, the way `packSequentialStarts` lays out the automatic engine's own
+	 * placements. `$lib/schedule/repackDay.ts` is the ONE source of truth for
+	 * this math; client and server import the same function.
+	 */
+	function repackDayLocally(date: string, stationName: string) {
+		const dayPlacements = placementsForDay(date, stationName);
+		const packed = repackOrdered(dayPlacements);
+		const packedById = new Map(packed.map((p) => [p.id, p]));
+		placements = placements.map((p) => {
+			const next = packedById.get(p.id);
+			return next ? { ...p, startMin: next.startMin } : p;
+		});
 	}
 
-	function snapTo15(dropMin: number, durationMin: number): number {
-		const rawStart = dropMin - durationMin / 2;
-		const clamped = Math.max(
-			SHIFT_START_MIN,
-			Math.min(SHIFT_END_MIN - Math.min(durationMin, SHIFT_LENGTH_MIN), rawStart)
-		);
-		return Math.round(clamped / 15) * 15;
+	/**
+	 * Apply the server's returned peer positions to local `placements` — normally
+	 * a no-op because the client repacked identically, but any drift (e.g. a
+	 * concurrent edit from another tab) is corrected here.
+	 */
+	function applyServerPeers(peers: Array<{ id: string; startMinuteOfDay: number }>) {
+		if (peers.length === 0) return;
+		const byId = new Map(peers.map((p) => [p.id, p.startMinuteOfDay]));
+		placements = placements.map((p) => {
+			const nextStart = byId.get(p.id);
+			return nextStart !== undefined ? { ...p, startMin: nextStart } : p;
+		});
 	}
 
 	function handleDragStart(
@@ -385,9 +445,16 @@
 		);
 	}
 
-	let dragOverDate = $state<string | null>(null);
+	// The drop-target highlight now needs to identify a (date, station) row —
+	// station tabs are gone, so a day shows every station stacked, and the user
+	// needs to see WHICH row they're dropping into. Single string key so a $state
+	// equality check flips one highlight at a time without extra bookkeeping.
+	let dragOverKey = $state<string | null>(null);
+	function trackKey(date: string, stationName: string): string {
+		return `${date}::${stationName}`;
+	}
 
-	function handleTrackDragOver(event: DragEvent, date: string) {
+	function handleTrackDragOver(event: DragEvent, date: string, stationName: string) {
 		const types = event.dataTransfer?.types;
 		if (
 			!types?.includes('application/x-line-item') &&
@@ -396,30 +463,20 @@
 			return;
 		event.preventDefault();
 		event.dataTransfer!.dropEffect = 'move';
-		dragOverDate = date;
+		dragOverKey = trackKey(date, stationName);
 	}
 
 	function handleTrackDragLeave() {
-		dragOverDate = null;
+		dragOverKey = null;
 	}
 
-	// Server persistence helpers. Every mutation applies optimistically to the
-	// $state array first (so drag feedback is instant), then POSTs to the form
-	// action. On failure we roll back and log. Errors surface in the console
-	// for now; a toast pass comes with the wider save-error UX.
-	async function postAction(action: string, body: FormData): Promise<boolean> {
-		try {
-			const res = await fetch(`?/${action}`, { method: 'POST', body });
-			return res.ok;
-		} catch (e) {
-			console.error(`${action} failed`, e);
-			return false;
-		}
-	}
-
-	async function handleTrackDrop(event: DragEvent, date: string) {
+	// Every mutation below applies optimistically to the $state array first (so
+	// drag feedback is instant), then POSTs to the form action; on failure the
+	// pre-mutation snapshot is restored. Errors surface in the console for now;
+	// a toast pass comes with the wider save-error UX.
+	async function handleTrackDrop(event: DragEvent, date: string, stationName: string) {
 		event.preventDefault();
-		dragOverDate = null;
+		dragOverKey = null;
 		if (!event.dataTransfer) return;
 		const track = event.currentTarget as HTMLElement;
 		const rect = track.getBoundingClientRect();
@@ -438,27 +495,50 @@
 			}
 			const existing = placements.find((p) => p.id === payload.placementId);
 			if (!existing) return;
-			const desired = snapTo15(dropMin, existing.durationMin);
-			const others = placements.filter(
-				(p) =>
-					p.date === date && p.stationName === activeStation && p.id !== existing.id
+
+			const priorSnapshot = placements;
+			const originDate = existing.date;
+			const originStation = existing.stationName;
+			const stayedOnSameDay = originDate === date && originStation === stationName;
+
+			// Rank in the destination row, computed against peers EXCLUDING the
+			// moving item itself so a same-row nudge to the right gets a natural
+			// rank, not one biased by its own current position.
+			const destinationPeers = placementsForDay(date, stationName).filter(
+				(p) => p.id !== existing.id
 			);
-			const startMin = findNonOverlappingStart(desired, existing.durationMin, others);
-			const before = { ...existing };
-			placements = placements.map((p) =>
-				p.id === existing.id
-					? { ...p, date, stationName: activeStation, startMin }
-					: p
-			);
+			const insertRank = computeInsertRank(dropMin, destinationPeers);
+
+			// Optimistic: insert-and-repack the destination row with the moved item at
+			// its new rank. Explicit rank-based insertion is required for a same-row
+			// reorder — updating only (date, station) wouldn't change the item's own
+			// startMin, so a simple repack-in-place would leave it in its OLD queue
+			// slot regardless of where the user actually dropped it.
+			const movedItem: Placement = { ...existing, date, stationName };
+			const destPacked = insertAndRepack(destinationPeers, movedItem, insertRank);
+			const destPackedById = new Map(destPacked.map((p) => [p.id, p]));
+			placements = placements
+				.filter((p) => p.id !== existing.id)
+				.map((p) => {
+					const next = destPackedById.get(p.id);
+					return next ? { ...p, startMin: next.startMin } : p;
+				})
+				.concat({ ...movedItem, startMin: destPackedById.get(existing.id)!.startMin });
+			if (!stayedOnSameDay) repackDayLocally(originDate, originStation);
+
 			const body = new FormData();
 			body.set('id', existing.id);
-			body.set('stationName', activeStation);
+			body.set('stationName', stationName);
 			body.set('date', date);
-			body.set('startMinuteOfDay', String(startMin));
-			const ok = await postAction('moveAssignment', body);
-			if (!ok) {
-				// Roll back to the last known good state.
-				placements = placements.map((p) => (p.id === existing.id ? before : p));
+			body.set('insertRank', String(insertRank));
+			try {
+				const res = await fetch('?/moveAssignment', { method: 'POST', body });
+				if (!res.ok) throw new Error(`moveAssignment failed: ${res.status}`);
+				const wire = (await res.json()) as { type: string; data?: string };
+				applyServerPeers(extractPeers(wire.data));
+			} catch (e) {
+				console.error('moveAssignment failed', e);
+				placements = priorSnapshot;
 			}
 			return;
 		}
@@ -472,69 +552,136 @@
 			return;
 		}
 		const durationMin = Math.max(15, Math.round((payload.hours || 1) * 60));
-		const desired = snapTo15(dropMin, durationMin);
-		const others = placements.filter(
-			(p) => p.date === date && p.stationName === activeStation
-		);
-		const startMin = findNonOverlappingStart(desired, durationMin, others);
+
+		const priorSnapshot = placements;
+		const destinationPeers = placementsForDay(date, stationName);
+		const insertRank = computeInsertRank(dropMin, destinationPeers);
+
 		// Optimistic: give it a temp id so it can be dragged again immediately;
 		// swap the temp id for the server-assigned one once the POST resolves.
 		const tempId = `tmp:${crypto.randomUUID()}`;
+		const incoming: Placement = {
+			id: tempId,
+			lineItemId: payload.lineItemId,
+			orderId: payload.orderId,
+			date,
+			stationName,
+			startMin: 0, // rewritten by repackOrdered below
+			durationMin
+		};
+		const packedDay = insertAndRepack(destinationPeers, incoming, insertRank);
+		const packedById = new Map(packedDay.map((p) => [p.id, p]));
 		placements = [
-			...placements,
-			{
-				id: tempId,
-				lineItemId: payload.lineItemId,
-				orderId: payload.orderId,
-				date,
-				stationName: activeStation,
-				startMin,
-				durationMin
-			}
+			...placements.map((p) => {
+				const next = packedById.get(p.id);
+				return next ? { ...p, startMin: next.startMin } : p;
+			}),
+			{ ...incoming, startMin: packedById.get(tempId)!.startMin }
 		];
+
 		const body = new FormData();
 		body.set('lineItemId', payload.lineItemId);
-		body.set('stationName', activeStation);
+		body.set('stationName', stationName);
 		body.set('date', date);
-		body.set('startMinuteOfDay', String(startMin));
+		body.set('insertRank', String(insertRank));
 		body.set('hours', String(durationMin / 60));
 		try {
 			const res = await fetch('?/placeAssignment', { method: 'POST', body });
 			if (!res.ok) throw new Error(`placeAssignment failed: ${res.status}`);
-			// SvelteKit form-action fetches return an ActionResult-wrapped JSON.
-			const wire = (await res.json()) as {
-				type: string;
-				data?: string;
-			};
-			const parsed = wire.data ? (JSON.parse(wire.data) as unknown[]) : [];
-			// ActionResult data is a positional array — { success, id } becomes
-			// [success, id] with the actual values at odd indices in the flat
-			// serialization. Walk it defensively.
-			let assignedId: string | null = null;
-			for (const value of parsed) {
-				if (typeof value === 'string' && value.length > 8 && value !== 'success') {
-					assignedId = value;
-					break;
-				}
-			}
+			const wire = (await res.json()) as { type: string; data?: string };
+			const { id: assignedId, peers } = extractPlaceResult(wire.data);
 			if (assignedId) {
-				placements = placements.map((p) => (p.id === tempId ? { ...p, id: assignedId! } : p));
+				placements = placements.map((p) => (p.id === tempId ? { ...p, id: assignedId } : p));
 			}
+			applyServerPeers(peers);
 		} catch (e) {
 			console.error('placeAssignment failed', e);
-			// Roll back.
-			placements = placements.filter((p) => p.id !== tempId);
+			placements = priorSnapshot;
 		}
 	}
 
 	async function removePlacement(id: string) {
-		const before = placements;
+		const target = placements.find((p) => p.id === id);
+		if (!target) return;
+		const priorSnapshot = placements;
+
+		// Optimistic: drop the row locally, then close the gap by repacking the day.
 		placements = placements.filter((p) => p.id !== id);
-		if (id.startsWith('tmp:')) return; // never persisted
+		repackDayLocally(target.date, target.stationName);
+
+		if (id.startsWith('tmp:')) return; // never persisted, nothing to remove server-side
 		const body = new FormData();
 		body.set('id', id);
-		const ok = await postAction('removeAssignment', body);
-		if (!ok) placements = before;
+		try {
+			const res = await fetch('?/removeAssignment', { method: 'POST', body });
+			if (!res.ok) throw new Error(`removeAssignment failed: ${res.status}`);
+			const wire = (await res.json()) as { type: string; data?: string };
+			applyServerPeers(extractPeers(wire.data));
+		} catch (e) {
+			console.error('removeAssignment failed', e);
+			placements = priorSnapshot;
+		}
+	}
+
+	/**
+	 * SvelteKit form-action fetches wrap their return value in an ActionResult:
+	 * `{ type, data }` where `data` is a JSON-encoded devalue array. Rather than
+	 * try to reconstruct that positional shape by hand, walk it for the two things
+	 * we actually need: the server-assigned id string, and the `peers` array of
+	 * `{ id, startMinuteOfDay }` records. Everything else is ignored.
+	 */
+	function extractPlaceResult(raw: string | undefined): {
+		id: string | null;
+		peers: Array<{ id: string; startMinuteOfDay: number }>;
+	} {
+		if (!raw) return { id: null, peers: [] };
+		try {
+			const parsed = JSON.parse(raw) as unknown[];
+			let id: string | null = null;
+			for (const value of parsed) {
+				if (typeof value === 'string' && value.length > 8 && value !== 'success') {
+					id = value;
+					break;
+				}
+			}
+			return { id, peers: extractPeersFromParsed(parsed) };
+		} catch {
+			return { id: null, peers: [] };
+		}
+	}
+
+	function extractPeers(raw: string | undefined): Array<{ id: string; startMinuteOfDay: number }> {
+		if (!raw) return [];
+		try {
+			const parsed = JSON.parse(raw) as unknown[];
+			return extractPeersFromParsed(parsed);
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Walk devalue's flat positional array for objects that look like a peer
+	 * record — i.e. carry both `id` (string) and `startMinuteOfDay` (number)
+	 * fields, dereferenced through the array's indices. The devalue format
+	 * stores object property values by index, so we resolve string/number
+	 * indices back to their real values.
+	 */
+	function extractPeersFromParsed(parsed: unknown[]): Array<{ id: string; startMinuteOfDay: number }> {
+		const peers: Array<{ id: string; startMinuteOfDay: number }> = [];
+		for (const value of parsed) {
+			if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+			const obj = value as Record<string, unknown>;
+			const idIdx = obj.id;
+			const startIdx = obj.startMinuteOfDay;
+			if (typeof idIdx !== 'number' || typeof startIdx !== 'number') continue;
+			const idValue = parsed[idIdx];
+			const startValue = parsed[startIdx];
+			if (typeof idValue === 'string' && typeof startValue === 'number') {
+				peers.push({ id: idValue, startMinuteOfDay: startValue });
+			}
+		}
+		return peers;
 	}
 
 	function formatMinutes(minutes: number): string {
@@ -569,7 +716,17 @@
 				{strategyLabel(data.draft.strategy)}
 			</p>
 		</div>
-		<span class="badge">{data.draft.status}</span>
+		<div class="header-actions">
+			<span class="badge">{data.draft.status}</span>
+			<!-- Full-page form POST rather than a fetch: the delete action
+			     redirects to /schedule, and letting SvelteKit follow the redirect
+			     natively is simpler than reconstructing the navigation client-side.
+			     The confirm() dialog is a plain-browser safeguard against an
+			     accidental click; a nicer inline confirmation would be a follow-up. -->
+			<form method="POST" action="?/deleteDraft" onsubmit={confirmDelete}>
+				<button type="submit" class="button button--danger">Delete draft</button>
+			</form>
+		</div>
 	</div>
 
 	<!-- One-time feedback right after "Create automatic schedule" — see
@@ -713,22 +870,11 @@
 			</div>
 		</aside>
 
-		<!-- Right: day-by-day timeline -->
+		<!-- Right: day-by-day timeline. Every station is shown at once — a day
+		     card renders one row per station so the whole board is visible with
+		     no tab-switching. Rows are ordered by data.stationNames (server-side
+		     station order, or KNOWN_STATIONS as the fallback). -->
 		<section class="main">
-			<div class="stations" role="tablist" aria-label="Station">
-				{#each data.stationNames as station (station)}
-					<button
-						class="station-tab"
-						class:station-tab--active={activeStation === station}
-						role="tab"
-						aria-selected={activeStation === station}
-						onclick={() => selectStation(station)}
-					>
-						{stationLabel(station)}
-					</button>
-				{/each}
-			</div>
-
 			<div class="days-toolbar">
 				<div class="segmented" role="tablist" aria-label="Days view">
 					<button
@@ -779,7 +925,11 @@
 			<div class="days">
 				{#each visibleDays as day (day.date)}
 					{@const label = formatDayLabel(day.date)}
-					{@const dayPlacements = placementsForDay(day.date)}
+					{@const productionStations = data.stationNames.filter((s) => !isFinishing(s))}
+					{@const finishingStationList = data.stationNames.filter(isFinishing)}
+					{@const finishingCount = placements.filter(
+						(p) => p.date === day.date && isFinishing(p.stationName)
+					).length}
 					<article class="day" class:day--weekend={isWeekend(day.date)}>
 						<header class="day__head">
 							<div class="day__label">
@@ -787,63 +937,158 @@
 								<span class="day__date">{label.date}</span>
 							</div>
 							<span class="day__capacity muted">
-								{formatHours(WORKING_HOURS)} available · 8a–4:30p
+								{formatHours(WORKING_HOURS)} per station · 8a–4:30p
 							</span>
 						</header>
-						<div class="bar" aria-label="{WORKING_HOURS} working hours available on {day.date}">
-							<div
-								class="bar__track"
-								class:bar__track--drag={dragOverDate === day.date}
-								role="presentation"
-								ondragover={(event) => handleTrackDragOver(event, day.date)}
-								ondragleave={handleTrackDragLeave}
-								ondrop={(event) => handleTrackDrop(event, day.date)}
-							>
-								<div class="bar__fill"></div>
-								{#each BREAKS as brk (brk.startMin)}
-									<div
-										class="bar__break"
-										style="left: {pctFromShiftStart(brk.startMin)}%; width: {pctWidth(brk.durationMin)}%;"
-										title="{brk.label} — {formatBreakLabel(brk.startMin, brk.durationMin)}"
-									>
-										<span class="bar__break-label">{brk.label}</span>
+						<div class="station-rows">
+							{#snippet stationRow(date: string, station: string)}
+								{@const rowPlacements = placementsForDay(date, station)}
+								{@const isDragTarget = dragOverKey === trackKey(date, station)}
+								<div class="station-row" class:station-row--empty={rowPlacements.length === 0}>
+									<div class="station-row__label" title={stationLabel(station)}>
+										{stationLabel(station)}
 									</div>
-								{/each}
-								{#each dayPlacements as placement (placement.id)}
-									{@const parent = findOrder(placement.orderId)}
-									{@const bg = orderColor(placement.orderId)}
-									{@const title = parent ? orderTitle(parent) : 'Order'}
-									{@const segments = computeSegments(placement.startMin, placement.durationMin)}
-									{@const wallEnd = wallClockEnd(placement.startMin, placement.durationMin)}
-									{#each segments as seg, i (seg.start)}
-										{@const isFirst = i === 0}
-										{@const isLast = i === segments.length - 1}
+									<div class="station-row__bar" aria-label="{stationLabel(station)} on {date}">
 										<div
-											class="placement"
-											class:placement--first={isFirst}
-											class:placement--last={isLast}
-											class:placement--middle={!isFirst && !isLast}
-											role="button"
-											tabindex="0"
-											draggable="true"
-											ondragstart={(event) => handlePlacementDragStart(event, placement.id)}
-											style="left: {pctFromShiftStart(seg.start)}%; width: {pctWidth(seg.end - seg.start)}%; --block-color: {bg};"
-											title="{title} · {formatClock(placement.startMin)} → {formatClock(wallEnd)} ({formatMinutes(placement.durationMin)} of work{segments.length > 1 ? `, split across ${segments.length} slices` : ''})"
+											class="bar__track"
+											class:bar__track--drag={isDragTarget}
+											role="presentation"
+											ondragover={(event) => handleTrackDragOver(event, date, station)}
+											ondragleave={handleTrackDragLeave}
+											ondrop={(event) => handleTrackDrop(event, date, station)}
 										>
-											{#if isFirst}
-												<span class="placement__label">{title}</span>
-												<span class="placement__time">{formatMinutes(placement.durationMin)}</span>
-												<button
-													type="button"
-													class="placement__remove"
-													aria-label="Remove"
-													onclick={() => removePlacement(placement.id)}
-												>×</button>
-											{/if}
+											<div class="bar__fill"></div>
+											{#each BREAKS as brk (brk.startMin)}
+												<div
+													class="bar__break"
+													style="left: {pctFromShiftStart(brk.startMin)}%; width: {pctWidth(brk.durationMin)}%;"
+													title="{brk.label} — {formatBreakLabel(brk.startMin, brk.durationMin)}"
+												>
+													<span class="bar__break-label">{brk.label}</span>
+												</div>
+											{/each}
+											{#each rowPlacements as placement (placement.id)}
+												{@const parent = findOrder(placement.orderId)}
+												{@const bg = orderColor(placement.orderId)}
+												{@const title = parent ? orderTitle(parent) : 'Order'}
+												{@const lineItem = findLineItem(placement.lineItemId)}
+												{@const segments = computeSegments(placement.startMin, placement.durationMin)}
+												{@const wallEnd = wallClockEnd(placement.startMin, placement.durationMin)}
+												{@const isHovered = hoveredPlacementId === placement.id}
+												{#each segments as seg, i (seg.start)}
+													{@const isFirst = i === 0}
+													{@const isLast = i === segments.length - 1}
+													<div
+														class="placement"
+														class:placement--first={isFirst}
+														class:placement--last={isLast}
+														class:placement--middle={!isFirst && !isLast}
+														class:placement--hover={isHovered}
+														role="button"
+														tabindex="0"
+														draggable="true"
+														ondragstart={(event) => handlePlacementDragStart(event, placement.id)}
+														onmouseenter={() => beginHover(placement.id)}
+														onmouseleave={() => endHover(placement.id)}
+														onfocus={() => beginHover(placement.id)}
+														onblur={() => endHover(placement.id)}
+														style="left: {pctFromShiftStart(seg.start)}%; width: {pctWidth(seg.end - seg.start)}%; --block-color: {bg};"
+													>
+														{#if isFirst}
+															<span class="placement__label">{title}</span>
+															<span class="placement__time">{formatMinutes(placement.durationMin)}</span>
+															<button
+																type="button"
+																class="placement__remove"
+																aria-label="Remove"
+																onclick={() => removePlacement(placement.id)}
+															>×</button>
+															{#if isHovered}
+																<div class="placement__details" role="tooltip">
+																	<div class="placement__details-design">
+																		{lineItem?.design || '(no design)'}
+																	</div>
+																	<div class="placement__details-chips">
+																		{#if lineItem}
+																			<span class="chip">{stepChip(lineItem)}</span>
+																			{#if lineItem.quantity}
+																				<span class="chip chip--muted">×{lineItem.quantity}</span>
+																			{/if}
+																			{#if lineItem.apparelColor}
+																				<span class="chip chip--muted">{lineItem.apparelColor}</span>
+																			{/if}
+																		{/if}
+																	</div>
+																	<div class="placement__details-order">
+																		<span class="placement__details-swatch" style="background: {bg}"></span>
+																		<span class="placement__details-title">{title}</span>
+																		{#if parent}
+																			<span class="placement__details-job">#{parent.hoopsOrderId}</span>
+																		{/if}
+																	</div>
+																	<div class="placement__details-time">
+																		{formatClock(placement.startMin)} → {formatClock(wallEnd)}
+																		<span class="placement__details-dot">·</span>
+																		{formatMinutes(placement.durationMin)} of work
+																		{#if segments.length > 1}
+																			<span class="placement__details-dot">·</span>
+																			split across {segments.length} slices
+																		{/if}
+																	</div>
+																</div>
+															{/if}
+														{/if}
+													</div>
+												{/each}
+											{/each}
 										</div>
+									</div>
+								</div>
+							{/snippet}
+
+							{#each productionStations as station (station)}
+								{@render stationRow(day.date, station)}
+							{/each}
+
+							<!-- Finishing group: a single collapsible header (default collapsed)
+							     covering the five finishing stations. Five mostly-empty rows per
+							     day would dominate the board when a typical order only touches one
+							     finish; collapsed by default keeps the day short, expand-in-place
+							     when a user needs to drop into a specific finishing station.
+							     The collapse state is shared across every day. -->
+							{#if finishingStationList.length > 0}
+								<button
+									type="button"
+									class="finishing-toggle"
+									class:finishing-toggle--expanded={!finishingCollapsed}
+									aria-expanded={!finishingCollapsed}
+									onclick={toggleFinishing}
+								>
+									<span class="finishing-toggle__chevron" aria-hidden="true">
+										{finishingCollapsed ? '▸' : '▾'}
+									</span>
+									<span class="finishing-toggle__label">Finishing</span>
+									<span class="finishing-toggle__count">
+										{finishingStationList.length} station{finishingStationList.length === 1 ? '' : 's'}
+										{#if finishingCount > 0}
+											· {finishingCount} placed
+										{/if}
+									</span>
+								</button>
+								{#if !finishingCollapsed}
+									{#each finishingStationList as station (station)}
+										{@render stationRow(day.date, station)}
 									{/each}
-								{/each}
-								<div class="bar__ticks">
+								{/if}
+							{/if}
+
+							<!-- One shared time axis under the last station row so the whole
+							     day reads against one ruler instead of a tick strip repeated
+							     per station. Aligned to the .station-row__bar column so its
+							     8a/9a/… marks sit directly under the placements above. -->
+							<div class="day__axis">
+								<div class="day__axis-spacer"></div>
+								<div class="day__axis-track">
 									{#each HOUR_TICKS as tick (tick.minutes)}
 										<span
 											class="tick tick--major"
@@ -852,7 +1097,6 @@
 											<span class="tick__label">{tick.label}</span>
 										</span>
 									{/each}
-									<!-- half-hour end marker so 4:30 shows -->
 									<span class="tick" style="left: 100%">
 										<span class="tick__label">4:30p</span>
 									</span>
@@ -864,10 +1108,10 @@
 			</div>
 
 			<p class="muted footnote">
-				Drag line items from the tray onto a day's bar. Blocks snap to 15-minute
-				increments; drop over a break and the block turns red to flag the conflict.
-				Placements live in the browser for now — persisting to
-				<code>schedule_assignments</code> comes next.
+				Drag line items from the tray onto a day's bar. Jobs sit back-to-back from
+				8a; drop between two jobs and the ones after shift back to make room, drag
+				a job away or remove it and the ones behind it slide forward to close the
+				gap.
 			</p>
 		</section>
 	</div>
@@ -902,6 +1146,13 @@
 
 	.header-row h1 {
 		margin: 0.1rem 0 0.15rem;
+	}
+
+	.header-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		flex-shrink: 0;
 	}
 
 	.auto-propose-feedback {
@@ -1248,42 +1499,6 @@
 		gap: var(--space-4);
 	}
 
-	.stations {
-		display: flex;
-		gap: 0.35rem;
-		flex-wrap: wrap;
-		padding: 0.35rem;
-		background: var(--warm-100);
-		border-radius: var(--radius-md);
-		position: sticky;
-		top: var(--space-4);
-		z-index: 2;
-		box-shadow: 0 4px 8px rgb(0 0 0 / 12%);
-	}
-
-	.station-tab {
-		border: none;
-		background: transparent;
-		padding: 0.4rem 0.85rem;
-		border-radius: var(--radius-sm);
-		font-size: var(--fs-sm);
-		font-weight: 550;
-		color: var(--ink-700);
-		cursor: pointer;
-		transition: background-color var(--motion-fast) var(--ease-standard),
-			color var(--motion-fast) var(--ease-standard);
-	}
-
-	.station-tab:hover {
-		color: var(--ink-900);
-	}
-
-	.station-tab--active {
-		background: var(--surface);
-		color: var(--warm-700);
-		box-shadow: var(--shadow-1);
-	}
-
 	.days-toolbar {
 		display: flex;
 		align-items: center;
@@ -1411,8 +1626,111 @@
 		font-size: var(--fs-xs);
 	}
 
-	.bar {
-		padding-bottom: 1.4rem; /* room for tick labels below track */
+	/* One stacked row per station within a day card. The label column is a fixed
+	   width so every day's rows line up vertically across the whole board — a
+	   day with only two placed stations still shows all six rows, just with
+	   empty bars, so a drop target is always in the same place. */
+	.station-rows {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.station-row {
+		display: grid;
+		grid-template-columns: 8.5rem 1fr;
+		align-items: center;
+		gap: 0.6rem;
+	}
+
+	.station-row--empty {
+		opacity: 0.75;
+	}
+
+	/* Finishing group toggle — sits between production rows and finishing rows
+	   as a full-width clickable header. Styled as an inline divider + label
+	   rather than a heavy button so it doesn't compete visually with the
+	   station rows themselves. */
+	.finishing-toggle {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		width: 100%;
+		border: 1px dashed var(--warm-300);
+		background: transparent;
+		color: var(--ink-700);
+		padding: 0.35rem 0.6rem;
+		border-radius: var(--radius-sm);
+		font-size: var(--fs-xs);
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		cursor: pointer;
+		margin: 0.15rem 0 0.1rem;
+		transition: background-color var(--motion-fast) var(--ease-standard),
+			border-color var(--motion-fast) var(--ease-standard),
+			color var(--motion-fast) var(--ease-standard);
+	}
+
+	.finishing-toggle:hover {
+		background: var(--warm-100);
+		border-color: var(--warm-500);
+		color: var(--warm-700);
+	}
+
+	.finishing-toggle:focus-visible {
+		outline: none;
+		box-shadow: var(--focus);
+	}
+
+	.finishing-toggle__chevron {
+		font-size: 0.85rem;
+		width: 0.9rem;
+		text-align: center;
+		color: var(--warm-500);
+	}
+
+	.finishing-toggle__label {
+		flex-shrink: 0;
+	}
+
+	.finishing-toggle__count {
+		margin-left: auto;
+		font-weight: 500;
+		text-transform: none;
+		letter-spacing: 0;
+		color: var(--ink-500);
+	}
+
+	.finishing-toggle--expanded {
+		background: var(--warm-100);
+		border-style: solid;
+	}
+
+	.station-row__label {
+		font-size: var(--fs-xs);
+		font-weight: 600;
+		color: var(--ink-700);
+		letter-spacing: 0.02em;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* Shared time axis: one strip under the last row, aligned with the .station-row
+	   column so the tick labels sit directly under the placement bars. */
+	.day__axis {
+		display: grid;
+		grid-template-columns: 8.5rem 1fr;
+		gap: 0.6rem;
+		margin-top: 0.35rem;
+		padding-bottom: 1rem;
+	}
+
+	.day__axis-track {
+		position: relative;
+		height: 0.5rem;
+		border-top: 1px solid var(--warm-200);
 	}
 
 	.bar__track {
@@ -1465,10 +1783,28 @@
 		box-shadow: 0 1px 3px rgb(0 0 0 / 25%);
 		overflow: hidden;
 		cursor: grab;
+		transition: transform var(--motion-fast) var(--ease-standard),
+			box-shadow var(--motion-fast) var(--ease-standard),
+			filter var(--motion-fast) var(--ease-standard);
 	}
 
 	.placement:active {
 		cursor: grabbing;
+	}
+
+	/* Hover: nudge the block outward (top/bottom expansion works with the
+	   absolute positioning; scaleY() would blur the text), brighten it slightly,
+	   float it above peers and break markers, and let the details popover
+	   escape the normally-hidden overflow. Applied to all segments of a
+	   multi-segment placement (via the shared hoveredPlacementId state) so a
+	   block that spans a break lifts as one, not piecewise. */
+	.placement--hover {
+		top: -1px;
+		bottom: -1px;
+		z-index: 5;
+		box-shadow: 0 4px 12px rgb(0 0 0 / 35%);
+		filter: brightness(1.08);
+		overflow: visible;
 	}
 
 	/* A single-segment block has both --first and --last, so its four
@@ -1531,12 +1867,108 @@
 		transition: opacity var(--motion-fast) var(--ease-standard);
 	}
 
-	.placement:hover .placement__remove {
+	.placement:hover .placement__remove,
+	.placement--hover .placement__remove {
 		opacity: 1;
 	}
 
 	.placement__remove:hover {
 		background: rgb(0 0 0 / 45%);
+	}
+
+	/* Details popover: floats above the placement on hover, revealing the line
+	   item's design / step / quantity / color and the placement's time range —
+	   the things the bar itself can't fit at any real timeline zoom. Positioned
+	   above by default; the CSS-only "flip" below re-anchors it downward on the
+	   top row of any day so it doesn't clip behind the sticky station tabs. */
+	.placement__details {
+		position: absolute;
+		left: 0;
+		bottom: calc(100% + 8px);
+		min-width: 14rem;
+		max-width: 22rem;
+		width: max-content;
+		z-index: 20;
+		background: var(--surface);
+		color: var(--ink-900);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+		padding: 0.55rem 0.7rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		font-weight: 400;
+		cursor: default;
+		pointer-events: none; /* purely presentational; drag/click passes through */
+		animation: placement-details-in 120ms var(--ease-standard);
+	}
+
+	@keyframes placement-details-in {
+		from {
+			opacity: 0;
+			transform: translateY(3px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	.placement__details-design {
+		font-size: var(--fs-sm);
+		font-weight: 600;
+		color: var(--ink-900);
+		line-height: 1.25;
+	}
+
+	.placement__details-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem;
+	}
+
+	.placement__details-order {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		font-size: var(--fs-xs);
+		color: var(--ink-500);
+		border-top: 1px solid var(--border);
+		padding-top: 0.35rem;
+		margin-top: 0.1rem;
+	}
+
+	.placement__details-swatch {
+		display: inline-block;
+		width: 0.6rem;
+		height: 0.6rem;
+		border-radius: 50%;
+		flex-shrink: 0;
+	}
+
+	.placement__details-title {
+		color: var(--ink-700);
+		font-weight: 600;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.placement__details-job {
+		color: var(--ink-500);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.placement__details-time {
+		font-size: var(--fs-xs);
+		color: var(--ink-500);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.placement__details-dot {
+		margin: 0 0.25rem;
+		color: var(--warm-300);
 	}
 
 	.bar__break {
@@ -1587,11 +2019,6 @@
 		opacity: 1;
 	}
 
-	.bar__ticks {
-		position: absolute;
-		inset: 0;
-	}
-
 	.tick {
 		position: absolute;
 		top: 0;
@@ -1630,12 +2057,5 @@
 		font-size: var(--fs-xs);
 		text-align: center;
 		margin-top: var(--space-2);
-	}
-
-	.footnote code {
-		font-size: 0.85em;
-		padding: 0 0.2em;
-		background: var(--warm-100);
-		border-radius: 4px;
 	}
 </style>

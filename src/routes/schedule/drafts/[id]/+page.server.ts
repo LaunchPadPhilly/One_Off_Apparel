@@ -1,9 +1,11 @@
-import { error, fail } from '@sveltejs/kit';
+import { error, fail, redirect } from '@sveltejs/kit';
 import { requireScopePage } from '$lib/server/auth/guards';
-import { getDraft } from '$lib/server/schedule/draft';
+import { deleteDraft, getDraft } from '$lib/server/schedule/draft';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { KNOWN_STATIONS, DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { packSequentialStarts } from '$lib/schedule/shift';
+import type { Prisma } from '../../../../../prisma/generated/prisma/client';
 import {
 	OrderStatus,
 	ScheduleAssignmentStatus
@@ -41,23 +43,88 @@ async function ensureStation(name: string) {
 	});
 }
 
-async function nextSequenceOrder(
+/**
+ * Repack a (draft, station, date) day's queue back-to-back from shift open,
+ * assigning sequenceOrder = 0..N-1 in the order the rows already have
+ * (sequenceOrder ASC, then startMinuteOfDay ASC as a tiebreak). Uses the same
+ * packSequentialStarts helper the automatic engine already runs on its own
+ * placements, so a manual edit here and an engine run in proposeIntoNewDraft.ts
+ * lay out identically.
+ *
+ * The caller stages the insert/move/delete first (with fractional or sentinel
+ * sequenceOrder values so a new item slots into its intended position); this
+ * function then normalizes and rewrites sequenceOrder + startMinuteOfDay across
+ * the whole day. Scope is deliberately one (draft, station, date) — committed
+ * rows and rows from other drafts are never touched, even if they share the
+ * same station and date.
+ *
+ * Returns the peers' new positions so the caller can hand them back to the
+ * client for a live reconciliation of any items whose position changed.
+ */
+async function repackDay(
+	tx: Prisma.TransactionClient,
+	draftId: string,
+	stationId: string,
+	date: Date
+): Promise<Array<{ id: string; sequenceOrder: number; startMinuteOfDay: number }>> {
+	const peers = await tx.scheduleAssignment.findMany({
+		where: { scheduleDraftId: draftId, stationId, date },
+		orderBy: [{ sequenceOrder: 'asc' }, { startMinuteOfDay: 'asc' }],
+		select: { id: true, estimatedHours: true }
+	});
+	const durations = peers.map((p) => Math.max(15, Math.round(p.estimatedHours * 60)));
+	const starts = packSequentialStarts(durations);
+	const updates: Array<{ id: string; sequenceOrder: number; startMinuteOfDay: number }> = [];
+	for (let i = 0; i < peers.length; i++) {
+		const next = { sequenceOrder: i, startMinuteOfDay: starts[i] };
+		await tx.scheduleAssignment.update({ where: { id: peers[i].id }, data: next });
+		updates.push({ id: peers[i].id, ...next });
+	}
+	return updates;
+}
+
+/**
+ * Stage-a-new-row's sequenceOrder value: the client passes `insertRank` (the 0-N
+ * position they want the new/moved item to end up at), and we hand the row that
+ * exact integer, then bump every peer at rank >= insertRank by 1 to make room.
+ * repackDay then normalizes the whole day to 0..N-1 and writes startMinuteOfDay.
+ */
+async function makeRoomAtRank(
+	tx: Prisma.TransactionClient,
+	draftId: string,
 	stationId: string,
 	date: Date,
+	insertRank: number,
 	excludeId?: string
-): Promise<number> {
-	// sequenceOrder is batch order within one station's day; keep placements
-	// densely packed so a later ATCS pass has clean numbers to work with.
-	const highest = await prisma.scheduleAssignment.findFirst({
+): Promise<void> {
+	const peers = await tx.scheduleAssignment.findMany({
 		where: {
+			scheduleDraftId: draftId,
 			stationId,
 			date,
 			...(excludeId ? { id: { not: excludeId } } : {})
 		},
-		orderBy: { sequenceOrder: 'desc' },
-		select: { sequenceOrder: true }
+		orderBy: [{ sequenceOrder: 'asc' }, { startMinuteOfDay: 'asc' }],
+		select: { id: true }
 	});
-	return (highest?.sequenceOrder ?? -1) + 1;
+	const clamped = Math.max(0, Math.min(peers.length, insertRank));
+	// Two-pass renumber so the (draftId, stationId, date, sequenceOrder) unique
+	// constraint — if one is ever added — can't collide mid-update. Even without
+	// a unique constraint, this keeps the intermediate state readable: everyone
+	// at rank >= clamped moves to a high offset first, then we compact.
+	const OFFSET = 10_000;
+	for (let i = clamped; i < peers.length; i++) {
+		await tx.scheduleAssignment.update({
+			where: { id: peers[i].id },
+			data: { sequenceOrder: OFFSET + i + 1 }
+		});
+	}
+	for (let i = clamped; i < peers.length; i++) {
+		await tx.scheduleAssignment.update({
+			where: { id: peers[i].id },
+			data: { sequenceOrder: i + 1 }
+		});
+	}
 }
 
 /**
@@ -226,14 +293,18 @@ export const actions: Actions = {
 		const lineItemId = form.get('lineItemId');
 		const stationName = form.get('stationName');
 		const date = toDate(form.get('date'));
-		const startMinuteOfDay = parseInt10(form.get('startMinuteOfDay'));
 		const hours = parseFloat10(form.get('hours'));
+		// `insertRank` is the 0-N position the client wants the new item at within the
+		// day's queue (derived from where the user dropped it, midpoint-compared to
+		// existing peers — see computeInsertRank in $lib/schedule/repackDay.ts). The
+		// server then makes room at that rank and repacks the whole day back-to-back
+		// from shift open, so `startMinuteOfDay` no longer comes from the client — it
+		// is always the packed layout math over the ordered queue.
+		const insertRank = parseInt10(form.get('insertRank')) ?? 0;
 
 		if (typeof lineItemId !== 'string' || !lineItemId) return fail(400, { message: 'lineItemId required' });
 		if (typeof stationName !== 'string' || !stationName) return fail(400, { message: 'stationName required' });
 		if (!date) return fail(400, { message: 'date required (YYYY-MM-DD)' });
-		if (startMinuteOfDay === null || startMinuteOfDay < 0 || startMinuteOfDay >= 1440)
-			return fail(400, { message: 'startMinuteOfDay out of range' });
 		if (hours === null || hours <= 0 || hours > 24)
 			return fail(400, { message: 'hours out of range' });
 
@@ -252,22 +323,31 @@ export const actions: Actions = {
 		}
 
 		const station = await ensureStation(stationName);
-		const sequenceOrder = await nextSequenceOrder(station.id, date);
 
-		const created = await prisma.scheduleAssignment.create({
-			data: {
-				lineItemId,
-				stationId: station.id,
-				date,
-				sequenceOrder,
-				startMinuteOfDay,
-				estimatedHours: hours,
-				status: ScheduleAssignmentStatus.PROPOSED,
-				proposedBy: user.email,
-				scheduleDraftId: params.id
-			}
+		// One transaction so a make-room-then-insert-then-repack sequence can't leave
+		// a half-shifted day if any step fails mid-way through.
+		const result = await prisma.$transaction(async (tx) => {
+			await makeRoomAtRank(tx, params.id, station.id, date, insertRank);
+			const created = await tx.scheduleAssignment.create({
+				data: {
+					lineItemId,
+					stationId: station.id,
+					date,
+					sequenceOrder: insertRank,
+					// Filled in by repackDay's normalize pass below; a valid placeholder
+					// so the NOT NULL constraint wouldn't be an obstacle if one existed
+					// (this field is Int?, but we always write it).
+					startMinuteOfDay: 8 * 60,
+					estimatedHours: hours,
+					status: ScheduleAssignmentStatus.PROPOSED,
+					proposedBy: user.email,
+					scheduleDraftId: params.id
+				}
+			});
+			const peers = await repackDay(tx, params.id, station.id, date);
+			return { id: created.id, peers };
 		});
-		return { success: true as const, id: created.id };
+		return { success: true as const, id: result.id, peers: result.peers };
 	},
 
 	moveAssignment: async ({ request, params, locals, url }) => {
@@ -276,12 +356,11 @@ export const actions: Actions = {
 		const id = form.get('id');
 		const stationName = form.get('stationName');
 		const date = toDate(form.get('date'));
-		const startMinuteOfDay = parseInt10(form.get('startMinuteOfDay'));
+		const insertRank = parseInt10(form.get('insertRank')) ?? 0;
 
 		if (typeof id !== 'string' || !id) return fail(400, { message: 'id required' });
 		if (typeof stationName !== 'string' || !stationName) return fail(400, { message: 'stationName required' });
 		if (!date) return fail(400, { message: 'date required (YYYY-MM-DD)' });
-		if (startMinuteOfDay === null) return fail(400, { message: 'startMinuteOfDay required' });
 
 		// Belongs-to-this-draft check: prevent a client from re-parenting an
 		// assignment from a different draft (or a committed one) through this
@@ -295,24 +374,37 @@ export const actions: Actions = {
 			return fail(404, { message: 'Assignment not in this draft' });
 
 		const station = await ensureStation(stationName);
-		const movingToNewSlot =
-			station.id !== existing.stationId ||
-			iso(date) !== iso(existing.date);
-		const sequenceOrder = movingToNewSlot
-			? await nextSequenceOrder(station.id, date, id)
-			: undefined;
 
-		await prisma.scheduleAssignment.update({
-			where: { id },
-			data: {
-				stationId: station.id,
-				date,
-				startMinuteOfDay,
-				...(sequenceOrder !== undefined ? { sequenceOrder } : {}),
-				proposedBy: user.email
-			}
+		const result = await prisma.$transaction(async (tx) => {
+			// Make room at the new rank first (excluding the moving row itself, in case
+			// it's already in the same day — otherwise we'd shift it against itself).
+			await makeRoomAtRank(tx, params.id, station.id, date, insertRank, id);
+
+			await tx.scheduleAssignment.update({
+				where: { id },
+				data: {
+					stationId: station.id,
+					date,
+					sequenceOrder: insertRank,
+					proposedBy: user.email
+				}
+			});
+
+			// Repack the destination day. If the row moved to a DIFFERENT (station, date),
+			// also repack the origin day so the peers it left behind close the gap.
+			const destinationPeers = await repackDay(tx, params.id, station.id, date);
+			const changedSlot =
+				existing.stationId !== station.id || iso(existing.date) !== iso(date);
+			const originPeers = changedSlot
+				? await repackDay(tx, params.id, existing.stationId, existing.date)
+				: [];
+			return { destinationPeers, originPeers };
 		});
-		return { success: true as const };
+
+		return {
+			success: true as const,
+			peers: [...result.destinationPeers, ...result.originPeers]
+		};
 	},
 
 	removeAssignment: async ({ request, params, locals, url }) => {
@@ -324,13 +416,16 @@ export const actions: Actions = {
 		// Only allow removal of assignments belonging to this draft.
 		const existing = await prisma.scheduleAssignment.findUnique({
 			where: { id },
-			select: { scheduleDraftId: true }
+			select: { scheduleDraftId: true, stationId: true, date: true }
 		});
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
 
-		await prisma.scheduleAssignment.delete({ where: { id } });
-		return { success: true as const };
+		const peers = await prisma.$transaction(async (tx) => {
+			await tx.scheduleAssignment.delete({ where: { id } });
+			return repackDay(tx, params.id, existing.stationId, existing.date);
+		});
+		return { success: true as const, peers };
 	},
 
 	updateOrderDisplay: async ({ request, locals, url }) => {
@@ -354,5 +449,17 @@ export const actions: Actions = {
 			data: { displayTitle: nextTitle, colorHex: nextColor }
 		});
 		return { success: true as const };
+	},
+
+	deleteDraft: async ({ params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		// Hard delete — the draft's still-proposed assignments go with it; any
+		// committed rows (APPROVED / IN_PROGRESS / COMPLETE) survive with a null
+		// scheduleDraftId via the FK's onDelete: SetNull. See deleteDraft in
+		// $lib/server/schedule/draft.ts for the transaction + audit entry.
+		await deleteDraft(params.id, user.email);
+		throw redirect(303, '/schedule');
 	}
 };
