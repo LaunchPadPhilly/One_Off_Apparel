@@ -1423,14 +1423,14 @@
 		padding: 0;
 		font: inherit;
 		font-size: var(--fs-xs);
-		color: var(--warm-700);
+		color: var(--brand-700);
 		cursor: pointer;
 		text-decoration: underline;
 		text-underline-offset: 2px;
 	}
 
 	.tray__bulk:hover {
-		color: var(--warm-500);
+		color: var(--brand-500);
 	}
 
 	.tray__search {
@@ -1595,7 +1595,7 @@
 	}
 
 	.order__head--toggle:hover {
-		background: var(--warm-50);
+		background: var(--brand-50);
 	}
 
 	.order__head--toggle:focus-visible {
