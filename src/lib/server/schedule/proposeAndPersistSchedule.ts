@@ -33,6 +33,7 @@ async function persistProposal(
 					stationId: assignment.stationId,
 					date: assignment.date,
 					sequenceOrder: assignment.sequenceOrder,
+					startMinuteOfDay: assignment.startMinuteOfDay,
 					estimatedHours: assignment.estimatedHours,
 					status: ScheduleAssignmentStatus.PROPOSED,
 					proposedBy
@@ -64,8 +65,8 @@ async function persistProposal(
  * the Production Board wouldn't either.
  */
 export async function proposeAndPersistSchedule(range: DateRange, proposedBy: string): Promise<ProposeAndPersistResult> {
-	const [backlog, capacity] = await Promise.all([fetchBacklog(), fetchCapacity(range)]);
-	const result = proposeSchedule(backlog, capacity);
+	const [{ backlog, externalDependencies }, capacity] = await Promise.all([fetchBacklog(), fetchCapacity(range)]);
+	const result = proposeSchedule(backlog, capacity, externalDependencies);
 
 	const touchedLineItemIds = [...result.assignments.map((a) => a.lineItemId), ...result.atRisk.map((a) => a.lineItemId)];
 	const assignments = await persistProposal(result.assignments, touchedLineItemIds, proposedBy);

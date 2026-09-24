@@ -16,10 +16,15 @@ export const simulateChangeSchema = z.discriminatedUnion('type', [
 		lineItem: z.object({
 			itemType: z.enum(['DECORATION', 'FINISHING']),
 			decorationType: z.enum(['SCREEN_PRINT', 'EMBROIDERY', 'DTF', 'DTG']).nullish(),
-			finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG']).nullish(),
+			finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG', 'WOVENS']).nullish(),
 			inkColorCount: z.number().int().nonnegative().nullish(),
 			screens: z.number().int().nonnegative().nullish(),
 			stitchCount: z.number().int().nonnegative().nullish(),
+			garmentStyle: z.enum(['FLAT', 'CAP']).nullish(),
+			capConstruction: z.enum(['STRUCTURED', 'UNSTRUCTURED']).nullish(),
+			matteSurface: z.enum(['FLAT', 'SPECIALTY']).nullish(),
+			foldBagGarment: z.enum(['SS_TEE', 'OTHER']).nullish(),
+			manualEstimatedHours: z.number().positive().nullish(),
 			quantity: z.number().int().positive(),
 			weightClass: z.enum(['THIN', 'POLY', 'BULKY']),
 			dueDate: z.iso.date()
@@ -45,13 +50,13 @@ export type SimulateChangeInput = z.infer<typeof simulateChangeSchema>;
  * copy of the real backlog.
  */
 export async function simulateChange(input: SimulateChangeInput): Promise<ProposeScheduleResult> {
-	const [backlog, capacity] = await Promise.all([fetchBacklog(), fetchCapacity(input.range)]);
+	const [{ backlog, externalDependencies }, capacity] = await Promise.all([fetchBacklog(), fetchCapacity(input.range)]);
 
 	if (input.type === 'rush_order') {
 		// dueDate arrives as an ISO date string (z.iso.date(), so the tool's advertised
 		// input schema stays representable in JSON Schema) — the engine needs a real Date.
 		const hypothetical = { ...input.lineItem, dueDate: new Date(input.lineItem.dueDate), id: `simulated-rush-${Date.now()}` };
-		return proposeSchedule([...backlog, hypothetical], capacity);
+		return proposeSchedule([...backlog, hypothetical], capacity, externalDependencies);
 	}
 
 	const target = backlog.find((item) => item.id === input.lineItemId);
@@ -60,5 +65,5 @@ export async function simulateChange(input: SimulateChangeInput): Promise<Propos
 	}
 	const hypotheticalDueDate = new Date(input.hypotheticalDueDate);
 	const modifiedBacklog = backlog.map((item) => (item.id === input.lineItemId ? { ...item, dueDate: hypotheticalDueDate } : item));
-	return proposeSchedule(modifiedBacklog, capacity);
+	return proposeSchedule(modifiedBacklog, capacity, externalDependencies);
 }

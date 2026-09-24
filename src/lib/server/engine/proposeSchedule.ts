@@ -1,5 +1,6 @@
-import { estimateHours, MissingFormulaError } from './estimateHours';
-import type { AtRiskFlag, BacklogItem, CapacitySlot, ProposedAssignment, ProposeScheduleResult } from './types';
+import { SHIFT_END_MIN, SHIFT_START_MIN, skipBreak, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
+import { estimateHours, EstimationError } from './estimateHours';
+import type { AtRiskFlag, BacklogItem, CapacitySlot, ExternalDependencyState, ProposedAssignment, ProposeScheduleResult } from './types';
 
 // Shared-setup family a job belongs to, for the ATCS-style batching preference:
 // "same ink color / screen count / decoration type" per CLAUDE.md. Finishing jobs
@@ -15,6 +16,30 @@ function slotKey(stationId: string, date: Date): string {
 	return `${stationId}__${date.toISOString().slice(0, 10)}`;
 }
 
+/** A wall-clock moment: which day (UTC midnight, ms) and which minute of that day. */
+interface TimePoint {
+	dayMs: number;
+	minute: number;
+}
+
+function laterOf(a: TimePoint, b: TimePoint): TimePoint {
+	if (a.dayMs !== b.dayMs) return a.dayMs > b.dayMs ? a : b;
+	return a.minute >= b.minute ? a : b;
+}
+
+/** Prefix every dependency-caused at-risk reason starts with — explainAtRisk.ts keys
+ *  its "waiting on another job" category off it, same pattern as estimateHours.ts's
+ *  error prefixes. */
+export const DEPENDENCY_REASON_PREFIX = 'dependency: ';
+
+interface SlotState {
+	slot: CapacitySlot;
+	// Next free wall-clock minute on this station's day (jobs pack back-to-back).
+	cursor: number;
+	placedCount: number;
+	families: Set<string>;
+}
+
 /**
  * Builds a proposed schedule. Never writes to the live schedule — only
  * commit_schedule, called after human approval, does that (see CLAUDE.md).
@@ -26,94 +51,174 @@ function slotKey(stationId: string, date: Date): string {
  * run back-to-back on one station's day (the published ATCS — Apparent Tardiness
  * Cost with Setups — heuristic that sequence_order exists for).
  *
+ * DEPENDENCIES (2026-09-23 decision, replacing the old "blocked items never reach the
+ * engine" rule): finishing rows are now scheduled ahead of time, and each one is
+ * placed so it starts no earlier than the wall-clock END of every job it depends on
+ * (`dependsOnIds`) — same day is fine, right after the print ends, no cure/dry buffer
+ * (decided 2026-09-23). A job's dependencies are always placed before it. If a
+ * dependency can't be placed (at risk, or not in this backlog and not already
+ * complete), the dependent is flagged at risk too, with a reason saying so — never
+ * placed before its print. This is enforced with real start/end times, which is why
+ * the engine now returns `startMinuteOfDay` itself. `sequenceOrder` is STILL only
+ * batch order within one station's day; cross-job ordering comes from dependsOnIds
+ * and wall-clock times, never from sequenceOrder (CLAUDE.md's naming rule stands).
+ * The floor-side lock is unchanged: a BLOCKED finisher can be on the schedule but
+ * can't be Started until check_completion unlocks it (startAssignment.ts).
+ *
+ * An order whose due date has already passed never reaches this function at all —
+ * fetchBacklog() excludes it entirely (2026-09-22 decision). A job that genuinely
+ * can't get an on-time slot within the given capacity is flagged at risk, full stop.
+ *
  * This is a simplified ATCS: it does not implement the heuristic's due-date/setup
  * lookahead weighting (those need tuning parameters this repo has no source for),
  * only its core idea of preferring a batch-mate's slot. Revisit once there's real
  * capacity data to tune against.
- *
- * Do not add dependency checking here — see CLAUDE.md: a blocked line item is
- * simply never in the backlog, and check_completion + LineItem.dependsOn already
- * own that. Reintroducing it here is the exact regression CLAUDE.md warns about.
  */
-export function proposeSchedule(backlog: readonly BacklogItem[], capacity: readonly CapacitySlot[]): ProposeScheduleResult {
-	const remaining = new Map<string, CapacitySlot>();
+export function proposeSchedule(
+	backlog: readonly BacklogItem[],
+	capacity: readonly CapacitySlot[],
+	externalDependencies: ReadonlyMap<string, ExternalDependencyState> = new Map()
+): ProposeScheduleResult {
+	const slots = new Map<string, SlotState>();
 	for (const slot of capacity) {
-		remaining.set(slotKey(slot.stationId, slot.date), { ...slot });
+		slots.set(slotKey(slot.stationId, slot.date), { slot: { ...slot }, cursor: SHIFT_START_MIN, placedCount: 0, families: new Set() });
 	}
-
-	// Which batch families already have a job sitting in a given (station, date) slot.
-	const familiesInSlot = new Map<string, Set<string>>();
-	// Running count of jobs already placed in a slot, for sequence_order.
-	const placedInSlot = new Map<string, number>();
 
 	const assignments: ProposedAssignment[] = [];
 	const atRisk: AtRiskFlag[] = [];
 	const reasoning: string[] = [];
 
-	const jobs = [...backlog].sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
+	const inBacklog = new Set(backlog.map((item) => item.id));
+	// Wall-clock end of every job placed so far — what a dependent must start after.
+	const placedEnd = new Map<string, TimePoint>();
+	// Jobs that couldn't be placed (at risk) — their dependents can't be placed either.
+	const unplaced = new Set<string>();
 
-	for (const item of jobs) {
+	function flag(item: BacklogItem, requiredStation: string, reason: string) {
+		atRisk.push({ lineItemId: item.id, requiredStation, dueDate: item.dueDate, reason });
+		reasoning.push(`${item.id}: AT RISK — ${reason}`);
+		unplaced.add(item.id);
+	}
+
+	// Earliest due date first; a job is only taken once every dependency in this
+	// backlog has been decided (placed or flagged), so prints always go before their
+	// finishers even when both share a due date.
+	const pending = [...backlog].sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
+	const isDecided = (id: string) => placedEnd.has(id) || unplaced.has(id) || !inBacklog.has(id);
+
+	while (pending.length > 0) {
+		const index = pending.findIndex((item) => (item.dependsOnIds ?? []).every(isDecided));
+		if (index === -1) {
+			// Only possible with a dependency cycle in the data — flag rather than loop.
+			for (const item of pending.splice(0)) {
+				flag(item, item.finishingStep ?? item.decorationType ?? 'unknown', `${DEPENDENCY_REASON_PREFIX}this job's dependencies form a cycle, so it can't be ordered.`);
+			}
+			break;
+		}
+		const [item] = pending.splice(index, 1);
+		const dependsOnIds = item.dependsOnIds ?? [];
+
+		const blockedBy = dependsOnIds.filter((id) => unplaced.has(id) || (!inBacklog.has(id) && externalDependencies.get(id) !== 'complete'));
+		if (blockedBy.length > 0) {
+			flag(
+				item,
+				item.finishingStep ?? item.decorationType ?? 'unknown',
+				`${DEPENDENCY_REASON_PREFIX}waits on ${blockedBy.length} other job${blockedBy.length === 1 ? '' : 's'} on this order that couldn't be scheduled, and has to come after ${blockedBy.length === 1 ? 'it' : 'them'}.`
+			);
+			continue;
+		}
+
 		let estimate;
 		try {
 			estimate = estimateHours(item);
 		} catch (error) {
-			if (error instanceof MissingFormulaError) {
-				atRisk.push({
-					lineItemId: item.id,
-					requiredStation: item.decorationType ?? item.finishingStep ?? 'unknown',
-					dueDate: item.dueDate,
-					reason: error.message
-				});
-				reasoning.push(`${item.id}: AT RISK — cannot estimate hours (${error.message})`);
+			// EstimationError covers both MissingFormulaError and MissingLineItemDataError:
+			// either way this job can't be estimated right now, so it's flagged at risk and
+			// skipped instead of crashing the whole proposal. Anything else is a real bug.
+			if (error instanceof EstimationError) {
+				flag(item, item.decorationType ?? item.finishingStep ?? 'unknown', error.message);
 				continue;
 			}
 			throw error;
 		}
 
-		const family = batchFamilyKey(item, estimate.station);
-		const candidates = [...remaining.values()]
-			.filter((slot) => slot.stationName === estimate.station)
-			.filter((slot) => slot.date.getTime() <= item.dueDate.getTime())
-			.filter((slot) => slot.availableHrs >= estimate.hours)
-			.sort((a, b) => {
-				const aBatched = familiesInSlot.get(slotKey(a.stationId, a.date))?.has(family) ?? false;
-				const bBatched = familiesInSlot.get(slotKey(b.stationId, b.date))?.has(family) ?? false;
-				if (aBatched !== bBatched) return aBatched ? -1 : 1;
-				return a.date.getTime() - b.date.getTime();
-			});
+		// The earliest moment this job may start: the latest end among its dependencies
+		// placed in this run (dependencies already complete impose no constraint).
+		let earliest: TimePoint | null = null;
+		for (const id of dependsOnIds) {
+			const end = placedEnd.get(id);
+			if (end) earliest = earliest ? laterOf(earliest, end) : end;
+		}
 
-		const bestSlot = candidates[0];
-		if (!bestSlot) {
-			atRisk.push({
-				lineItemId: item.id,
-				requiredStation: estimate.station,
-				dueDate: item.dueDate,
-				reason: `No open slot at "${estimate.station}" on or before ${item.dueDate.toISOString().slice(0, 10)} with ${estimate.hours.toFixed(2)}h free.`
-			});
-			reasoning.push(`${item.id}: AT RISK — due ${item.dueDate.toISOString().slice(0, 10)}, needs ${estimate.hours.toFixed(2)}h at "${estimate.station}", none found`);
+		const workingMin = estimate.hours * 60;
+		const family = batchFamilyKey(item, estimate.station);
+		const candidates: { state: SlotState; start: number; gapMin: number }[] = [];
+		for (const state of slots.values()) {
+			const { slot } = state;
+			if (slot.stationName !== estimate.station) continue;
+			const dayMs = slot.date.getTime();
+			if (dayMs > item.dueDate.getTime()) continue;
+			if (earliest && dayMs < earliest.dayMs) continue;
+
+			let start = state.cursor;
+			let gapMin = 0;
+			if (earliest && dayMs === earliest.dayMs && earliest.minute > start) {
+				// Wait for the print to finish — the idle stretch before this job counts
+				// against the day's capacity, so later jobs don't overbook it. Same rule
+				// as the drafts board's repack (packSequentialStarts' notBefore), so an
+				// edit there reproduces this exact layout.
+				const waitUntil = skipBreak(earliest.minute);
+				gapMin = workingMinutesUntilShiftEnd(start) - workingMinutesUntilShiftEnd(waitUntil);
+				start = waitUntil;
+			}
+			if (slot.availableHrs < estimate.hours + gapMin / 60) continue;
+			// A dependency-constrained job on its dependency's day must actually finish
+			// within the shift; otherwise it would visually pile up at 16:30.
+			if (earliest && dayMs === earliest.dayMs && workingMinutesUntilShiftEnd(start) < workingMin) continue;
+			candidates.push({ state, start, gapMin });
+		}
+		candidates.sort((a, b) => {
+			const aBatched = a.state.families.has(family);
+			const bBatched = b.state.families.has(family);
+			if (aBatched !== bBatched) return aBatched ? -1 : 1;
+			return a.state.slot.date.getTime() - b.state.slot.date.getTime();
+		});
+
+		const best = candidates[0];
+		if (!best) {
+			const due = item.dueDate.toISOString().slice(0, 10);
+			flag(
+				item,
+				estimate.station,
+				earliest
+					? `No open slot at "${estimate.station}" after the job it waits on finishes and on or before ${due} with ${estimate.hours.toFixed(2)}h free.`
+					: `No open slot at "${estimate.station}" on or before ${due} with ${estimate.hours.toFixed(2)}h free.`
+			);
 			continue;
 		}
 
-		const key = slotKey(bestSlot.stationId, bestSlot.date);
-		bestSlot.availableHrs -= estimate.hours;
-		const sequenceOrder = (placedInSlot.get(key) ?? 0) + 1;
-		placedInSlot.set(key, sequenceOrder);
-		const families = familiesInSlot.get(key) ?? new Set<string>();
-		const batched = families.has(family);
-		families.add(family);
-		familiesInSlot.set(key, families);
+		const { state, start, gapMin } = best;
+		const batched = state.families.has(family);
+		state.slot.availableHrs -= estimate.hours + gapMin / 60;
+		state.placedCount += 1;
+		state.families.add(family);
+		const end = Math.min(wallClockEnd(start, workingMin), SHIFT_END_MIN);
+		state.cursor = end;
+		placedEnd.set(item.id, { dayMs: state.slot.date.getTime(), minute: end });
 
 		assignments.push({
 			lineItemId: item.id,
-			stationId: bestSlot.stationId,
-			stationName: bestSlot.stationName,
-			date: bestSlot.date,
-			sequenceOrder,
+			stationId: state.slot.stationId,
+			stationName: state.slot.stationName,
+			date: state.slot.date,
+			sequenceOrder: state.placedCount,
+			startMinuteOfDay: start,
 			estimatedHours: estimate.hours
 		});
 		reasoning.push(
-			`${item.id}: placed at "${bestSlot.stationName}" on ${bestSlot.date.toISOString().slice(0, 10)} (slot #${sequenceOrder}, ${estimate.hours.toFixed(2)}h)` +
-				(batched ? ' — batched with a same-setup job already on that slot' : '')
+			`${item.id}: placed at "${state.slot.stationName}" on ${state.slot.date.toISOString().slice(0, 10)} (slot #${state.placedCount}, ${estimate.hours.toFixed(2)}h)` +
+				(batched ? ' — batched with a same-setup job already on that slot' : '') +
+				(earliest ? ' — after the job it waits on' : '')
 		);
 	}
 

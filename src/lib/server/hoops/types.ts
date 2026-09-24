@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
+import { ArtworkApprovalStatus, BlankOrderingStatus, CustomerApprovalStatus } from '../../../../prisma/generated/prisma/enums';
 
 /**
  * Candidate data for one line item, as already extracted from a Hoops export — by
@@ -19,7 +20,20 @@ export const lineItemCandidateBaseSchema = z.object({
 	design: z.string().min(1),
 	printLocation: z.enum(['FRONT', 'BACK', 'LEFT', 'RIGHT']).nullish(),
 	decorationType: z.enum(['SCREEN_PRINT', 'EMBROIDERY', 'DTF', 'DTG']).nullish(),
-	finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG']).nullish(),
+	finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG', 'WOVENS']).nullish(),
+	// NEW (2026-09-21): flat garment vs headwear — decoration-only, meaningful today for
+	// embroidery's estimate_hours formula. See prisma/schema.prisma's
+	// LineItem.garmentStyle comment. `.nullish()` means this field is optional and can
+	// be null/undefined — most existing line items won't have it set yet.
+	garmentStyle: z.enum(['FLAT', 'CAP']).nullish(),
+	// NEW (2026-09-21): only meaningful when garmentStyle above is 'CAP'.
+	capConstruction: z.enum(['STRUCTURED', 'UNSTRUCTURED']).nullish(),
+	// NEW (2026-09-23): finishing-only — MATTE rows use matteSurface, FOLD_BAG rows use
+	// foldBagGarment to pick their formula. See prisma/schema.prisma.
+	matteSurface: z.enum(['FLAT', 'SPECIALTY']).nullish(),
+	foldBagGarment: z.enum(['SS_TEE', 'OTHER']).nullish(),
+	// NEW (2026-09-23): reviewer-entered hours for DTF/DTG, which have no formula.
+	manualEstimatedHours: z.number().positive().max(200).nullish(),
 	// Another line item's `localId` in this same order candidate, or the literal
 	// "all_siblings" sentinel — never a real LineItem.id (none exist yet at import time).
 	dependsOn: z.string().nullish(),
@@ -77,12 +91,43 @@ export const ALL_SIBLINGS = ALL_SIBLINGS_DEPENDENCY;
 export const orderCorrectionSchema = z
 	.object({
 		customerName: z.string().min(1),
+		// internalDueDate defaults to 14 days before externalShipDate (see
+		// internalDueDate.ts) whenever externalShipDate changes without an explicit
+		// internalDueDate alongside it — but a human reviewing the order can still
+		// override it directly; the default is a starting point, not a lock. See
+		// updateOrderFields.ts / confirmImport.ts for exactly how the two interact.
 		externalShipDate: z.iso.date(),
-		internalDueDate: z.iso.date()
+		internalDueDate: z.iso.date(),
+		// Free-text, human-entered only — e.g. why a job ran late. See CLAUDE.md.
+		notes: z.string(),
+		// NEW: the pre-production approval gates buildBacklogAndCapacity.ts's
+		// fetchBacklog() requires (adopted from the schedule-creation-workflow branch).
+		// Not part of the Hoops import candidate — these aren't read off the export,
+		// they're set afterward as the shop actually orders blanks / gets customer
+		// sign-off. Without a way to set them, no order could ever reach the schedule
+		// backlog through the UI.
+		blankOrderingStatus: z.enum(BlankOrderingStatus),
+		customerApprovalStatus: z.enum(CustomerApprovalStatus)
 	})
 	.partial();
 
-export const lineItemCorrectionSchema = lineItemCandidateBaseSchema.omit({ localId: true, dependsOn: true }).partial();
+// This line builds a "correction" schema by starting from the base schema above and
+// removing two fields that don't make sense to edit after the fact (localId,
+// dependsOn), then making everything else optional (.partial()) so a correction can
+// touch just one field without having to resupply every other one. Because it's
+// DERIVED from lineItemCandidateBaseSchema rather than a separate hand-written list of
+// fields, the new garmentStyle/capConstruction fields added above automatically became
+// editable here too — nothing extra had to be added in this specific line.
+export const lineItemCorrectionSchema = lineItemCandidateBaseSchema
+	.omit({ localId: true, dependsOn: true })
+	.extend({
+		// NEW: same reasoning as Order.blankOrderingStatus/customerApprovalStatus above —
+		// the artwork-approval gate, but per decoration line item rather than per order.
+		// Null on finishing rows (checked by the caller, not enforced here — same pattern
+		// updateLineItemFields already uses for every other field).
+		artworkApprovalStatus: z.enum(ArtworkApprovalStatus)
+	})
+	.partial();
 
 export type OrderCorrection = z.infer<typeof orderCorrectionSchema>;
 export type LineItemCorrection = z.infer<typeof lineItemCorrectionSchema>;

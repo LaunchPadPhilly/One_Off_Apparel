@@ -1,6 +1,10 @@
 import type {
+	CapConstruction,
 	DecorationType,
 	FinishingStep,
+	FoldBagGarment,
+	GarmentStyle,
+	MatteSurface,
 	LineItemType,
 	WeightClass
 } from '../../../../prisma/generated/prisma/enums';
@@ -25,6 +29,18 @@ export interface EstimateHoursInput {
 	stitchCount?: number | null;
 	quantity: number;
 	weightClass: WeightClass;
+	// NEW (2026-09-21): decoration-only, meaningful today for embroidery's
+	// estimate_hours formula — see prisma/schema.prisma's LineItem.garmentStyle
+	// comment. The `?` marks these as optional and `| null` allows null too, matching
+	// how they're stored in the database (a line item might not have these set yet).
+	garmentStyle?: GarmentStyle | null;
+	capConstruction?: CapConstruction | null;
+	// NEW (2026-09-23): finishing-only — MATTE rows need matteSurface, FOLD_BAG rows
+	// need foldBagGarment. See prisma/schema.prisma's LineItem comments.
+	matteSurface?: MatteSurface | null;
+	foldBagGarment?: FoldBagGarment | null;
+	// NEW (2026-09-23): reviewer-entered hours for DTF/DTG (no formula exists).
+	manualEstimatedHours?: number | null;
 }
 
 export interface EstimateHoursResult {
@@ -40,7 +56,17 @@ export interface BacklogItem extends EstimateHoursInput {
 	// The order's internal_due_date — the hard floor propose_schedule sorts and
 	// places against. Never external_ship_date; see CLAUDE.md's orders table note.
 	dueDate: Date;
+	// NEW (2026-09-23): the line item ids this job must be scheduled AFTER — already
+	// resolved from LineItem.dependsOn (a specific id, or every sibling for
+	// "all_siblings"). Empty/absent for decoration rows. See proposeSchedule.ts.
+	dependsOnIds?: string[];
 }
+
+/** NEW (2026-09-23): what's known about a dependency that ISN'T in this backlog run —
+ *  either it's already done (no constraint), or it can't be scheduled yet (so its
+ *  dependents can't be either). A dependency id that's in neither the backlog nor this
+ *  map is treated as not schedulable. */
+export type ExternalDependencyState = 'complete' | 'not_schedulable';
 
 /** One day's open capacity at one station, as propose_schedule needs it. */
 export interface CapacitySlot {
@@ -56,6 +82,11 @@ export interface ProposedAssignment {
 	stationName: string;
 	date: Date;
 	sequenceOrder: number;
+	// NEW (2026-09-23): wall-clock start (minutes from midnight) on the shift model in
+	// $lib/schedule/shift.ts. The engine now owns this (it used to be packed afterward
+	// in proposeIntoNewDraft.ts) because a finisher's start has to come after its
+	// print's wall-clock end, not just on the same-or-later day.
+	startMinuteOfDay: number;
 	estimatedHours: number;
 }
 
