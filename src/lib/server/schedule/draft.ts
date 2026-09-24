@@ -73,3 +73,39 @@ export async function deleteDraft(id: string, actor: string) {
 		});
 	});
 }
+
+/**
+ * Delete multiple drafts in one transaction — every draft's still-proposed
+ * assignments go with it, and each delete gets its own audit-log entry (same
+ * `schedule_draft_deleted` action as the single-draft path, so a future audit
+ * query doesn't have to know about the bulk endpoint). All-or-nothing: if any
+ * one delete errors, the whole batch rolls back. Returns the count actually
+ * removed so the UI can confirm ("Deleted N drafts") without a re-fetch.
+ * A row that no longer exists (someone else deleted it between select and
+ * submit) is skipped rather than failing the batch.
+ */
+export async function deleteDrafts(ids: readonly string[], actor: string): Promise<number> {
+	if (ids.length === 0) return 0;
+	return prisma.$transaction(async (tx) => {
+		let deleted = 0;
+		for (const id of ids) {
+			const exists = await tx.scheduleDraft.findUnique({ where: { id }, select: { id: true } });
+			if (!exists) continue;
+			const removed = await tx.scheduleAssignment.deleteMany({
+				where: { scheduleDraftId: id, status: ScheduleAssignmentStatus.PROPOSED }
+			});
+			await tx.scheduleDraft.delete({ where: { id } });
+			await tx.domainAuditLog.create({
+				data: {
+					entity: 'ScheduleDraft',
+					entityId: id,
+					action: 'schedule_draft_deleted',
+					actor,
+					diff: { removedProposedAssignments: removed.count, bulk: true }
+				}
+			});
+			deleted += 1;
+		}
+		return deleted;
+	});
+}
