@@ -315,6 +315,21 @@ function estimateManualHours(item: EstimateHoursInput, station: string, label: s
 }
 
 /**
+ * Round to the nearest 15-minute increment, with a 15-minute floor so a very small
+ * job never rounds to zero (which would give the scheduler a zero-duration slot).
+ * Applied once here at the end of estimateHours so every consumer — Orders list,
+ * order detail, draft board, propose_schedule — sees quarter-hour-aligned numbers
+ * from the same source, without each caller re-implementing the rounding. Decision
+ * made 2026-09-24: quarter-hour granularity matches how the shop plans days and
+ * keeps the packed timeline from stacking irregular 3-minute overhangs.
+ */
+const QUARTER_HOUR = 0.25;
+function roundToQuarterHour(hours: number): number {
+	const rounded = Math.round(hours / QUARTER_HOUR) * QUARTER_HOUR;
+	return Math.max(QUARTER_HOUR, rounded);
+}
+
+/**
  * Works out how long one job takes, station by station. All math lives here —
  * Claude never computes hours or a schedule itself (see CLAUDE.md's non-negotiable
  * design principles). Pure and DB-free: callable with plain import-review data.
@@ -324,8 +339,17 @@ function estimateManualHours(item: EstimateHoursInput, station: string, label: s
  * smaller function knows how to do that specific math. If we don't have a real
  * formula for a given kind of job yet, we throw an error instead of guessing — see
  * the MissingFormulaError/MissingLineItemDataError classes above for why.
+ *
+ * The final hours are rounded to the nearest 15 minutes (see roundToQuarterHour
+ * above) so estimates shown at import/order creation and slots produced by
+ * propose_schedule share the same granularity.
  */
 export function estimateHours(item: EstimateHoursInput): EstimateHoursResult {
+	const raw = estimateHoursRaw(item);
+	return { station: raw.station, hours: roundToQuarterHour(raw.hours) };
+}
+
+function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {
 	if (item.itemType === LineItemType.DECORATION) {
 		switch (item.decorationType) {
 			case DecorationType.SCREEN_PRINT:

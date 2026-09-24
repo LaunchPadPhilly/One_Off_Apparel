@@ -6,6 +6,7 @@ import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { KNOWN_STATIONS, DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 import type { Prisma } from '../../../../../prisma/generated/prisma/client';
 import {
 	OrderStatus,
@@ -291,13 +292,33 @@ export const actions: Actions = {
 		// controls what's shown, not what this endpoint accepts, so a NEEDS_REVIEW
 		// order's line item, or one whose due date has already passed, must be rejected
 		// here too, not just kept out of the UI's drag source.
-		const lineItem = await prisma.lineItem.findUnique({ where: { id: lineItemId }, select: { order: { select: { status: true, internalDueDate: true } } } });
+		const lineItem = await prisma.lineItem.findUnique({
+			where: { id: lineItemId },
+			select: {
+				itemType: true,
+				decorationType: true,
+				finishingStep: true,
+				order: { select: { status: true, internalDueDate: true } }
+			}
+		});
 		if (!lineItem) return fail(404, { message: 'Line item not found' });
 		if (lineItem.order.status !== OrderStatus.CONFIRMED) {
 			return fail(400, { message: `This line item's order is ${lineItem.order.status}, not CONFIRMED — it can't be placed yet.` });
 		}
 		if (lineItem.order.internalDueDate.getTime() < startOfToday().getTime()) {
 			return fail(400, { message: "This order's due date has already passed — it can't be scheduled until the due date is corrected." });
+		}
+
+		// Row restriction: an embroidery item can only land on the `embroidery` row, a
+		// finishing step only on its own finishing row, and so on. Same rule the
+		// draft-board sidebar and drag-over guard enforce, mirrored here so a stale
+		// browser tab or a hand-crafted POST can't slip past it. `expectedStationFor`
+		// returns null for an as-yet-uncategorized type; we don't restrict those.
+		const expected = expectedStationFor(lineItem);
+		if (expected && expected !== stationName) {
+			return fail(400, {
+				message: `This job belongs on ${stationDisplayLabel(expected)}, not ${stationDisplayLabel(stationName)}.`
+			});
 		}
 
 		// A finisher has to start after the job(s) it waits on end — refused, not snapped
@@ -351,10 +372,29 @@ export const actions: Actions = {
 		// separation, but this covers the current UI.
 		const existing = await prisma.scheduleAssignment.findUnique({
 			where: { id },
-			select: { scheduleDraftId: true, stationId: true, date: true, lineItemId: true, estimatedHours: true }
+			select: {
+				scheduleDraftId: true,
+				stationId: true,
+				date: true,
+				lineItemId: true,
+				estimatedHours: true,
+				lineItem: {
+					select: { itemType: true, decorationType: true, finishingStep: true }
+				}
+			}
 		});
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
+
+		// Row restriction on move — same rule as placeAssignment above. Prevents a
+		// placed embroidery block from being dragged onto a finishing row (or vice
+		// versa) via a hand-crafted POST.
+		const expected = expectedStationFor(existing.lineItem);
+		if (expected && expected !== stationName) {
+			return fail(400, {
+				message: `This job belongs on ${stationDisplayLabel(expected)}, not ${stationDisplayLabel(stationName)}.`
+			});
+		}
 
 		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, existing.lineItemId, date, Math.max(15, Math.round(existing.estimatedHours * 60)));
 		if (dependencyProblem) return fail(400, { message: dependencyProblem });

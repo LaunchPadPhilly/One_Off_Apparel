@@ -4,6 +4,7 @@
 	import { appConfig, storageKeyPrefix } from '$lib/appConfig';
 	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments } from '$lib/schedule/shift';
 	import { computeInsertRank, insertAndRepack, repackOrdered } from '$lib/schedule/repackDay';
+	import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 	import { deserialize } from '$app/forms';
 	import type { PageProps } from './$types';
 
@@ -488,14 +489,16 @@
 		event: DragEvent,
 		lineItemId: string,
 		orderId: string,
-		hours: number | null
+		hours: number | null,
+		expectedStation: string | null
 	) {
 		if (!event.dataTransfer) return;
 		event.dataTransfer.effectAllowed = 'move';
 		event.dataTransfer.setData(
 			'application/x-line-item',
-			JSON.stringify({ lineItemId, orderId, hours: hours ?? 1 })
+			JSON.stringify({ lineItemId, orderId, hours: hours ?? 1, expectedStation })
 		);
+		activeExpectedStation = expectedStation;
 	}
 
 	function handlePlacementDragStart(event: DragEvent, placementId: string) {
@@ -506,7 +509,19 @@
 			'application/x-placement',
 			JSON.stringify({ placementId })
 		);
+		const placement = placements.find((p) => p.id === placementId);
+		const lineItem = placement ? findLineItem(placement.lineItemId) : undefined;
+		activeExpectedStation = lineItem ? expectedStationFor(lineItem) : null;
 	}
+
+	function handleDragEnd() {
+		activeExpectedStation = null;
+	}
+
+	// Which station the currently-dragging line item is allowed on. Set on dragstart
+	// (from the sidebar or an existing placement) and cleared on dragend. Rows whose
+	// station doesn't match dim during the drag; drops onto a wrong row are refused.
+	let activeExpectedStation = $state<string | null>(null);
 
 	// The drop-target highlight now needs to identify a (date, station) row —
 	// station tabs are gone, so a day shows every station stacked, and the user
@@ -524,6 +539,14 @@
 			!types?.includes('application/x-placement')
 		)
 			return;
+		// Refuse the drop at the browser level when the row's station doesn't match
+		// the dragging item's expected station — the not-allowed cursor appears and
+		// ondrop never fires. `activeExpectedStation === null` means we don't yet
+		// know (e.g. an uncategorized "Patch Install") so we don't restrict.
+		if (activeExpectedStation && activeExpectedStation !== stationName) {
+			event.dataTransfer!.dropEffect = 'none';
+			return;
+		}
 		event.preventDefault();
 		event.dataTransfer!.dropEffect = 'move';
 		dragOverKey = trackKey(date, stationName);
@@ -540,6 +563,7 @@
 	async function handleTrackDrop(event: DragEvent, date: string, stationName: string) {
 		event.preventDefault();
 		dragOverKey = null;
+		activeExpectedStation = null;
 		if (!event.dataTransfer) return;
 		const track = event.currentTarget as HTMLElement;
 		const rect = track.getBoundingClientRect();
@@ -558,6 +582,18 @@
 			}
 			const existing = placements.find((p) => p.id === payload.placementId);
 			if (!existing) return;
+			// Row-restriction: a placed embroidery block can't be moved onto the
+			// screen-print or a finishing row (see handleTrackDragOver — this is the
+			// same rule enforced at drop-time in case the drag-over guard was bypassed).
+			const movingItem = findLineItem(existing.lineItemId);
+			const movingStation = movingItem ? expectedStationFor(movingItem) : null;
+			if (movingStation && movingStation !== stationName) {
+				boardNotice = {
+					text: `${stepChip(movingItem!)} belongs on ${stationDisplayLabel(movingStation)}, not ${stationDisplayLabel(stationName)}.`,
+					tone: 'warn'
+				};
+				return;
+			}
 
 			const priorSnapshot = placements;
 			const originDate = existing.date;
@@ -606,10 +642,21 @@
 
 		const lineItemRaw = event.dataTransfer.getData('application/x-line-item');
 		if (!lineItemRaw) return;
-		let payload: { lineItemId: string; orderId: string; hours: number };
+		let payload: { lineItemId: string; orderId: string; hours: number; expectedStation: string | null };
 		try {
 			payload = JSON.parse(lineItemRaw);
 		} catch {
+			return;
+		}
+		// Row-restriction on a fresh drop from the sidebar (same rule as the move
+		// branch above and the ondragover guard). A payload from an older tab may not
+		// carry expectedStation; treat that as "unknown" and fall through.
+		if (payload.expectedStation && payload.expectedStation !== stationName) {
+			const item = findLineItem(payload.lineItemId);
+			boardNotice = {
+				text: `${item ? stepChip(item) : 'This job'} belongs on ${stationDisplayLabel(payload.expectedStation)}, not ${stationDisplayLabel(stationName)}.`,
+				tone: 'warn'
+			};
 			return;
 		}
 		const durationMin = Math.max(15, Math.round((payload.hours || 1) * 60));
@@ -832,12 +879,14 @@
 									{@const err = estimateError(item.estimate)}
 									{@const stationName = estimateStation(item.estimate)}
 									{@const placed = placedLineItemIds.has(item.id)}
+									{@const expected = expectedStationFor(item)}
 									<li
 										class="line-item"
 										class:line-item--error={err}
 										class:line-item--placed={placed}
 										draggable={!placed}
-										ondragstart={placed ? undefined : (event) => handleDragStart(event, item.id, order.id, hours)}
+										ondragstart={placed ? undefined : (event) => handleDragStart(event, item.id, order.id, hours, expected)}
+										ondragend={handleDragEnd}
 										title={placed ? 'Already on the timeline — remove it there first to move it.' : undefined}
 									>
 										<div class="line-item__row">
@@ -947,7 +996,12 @@
 							{#snippet stationRow(date: string, station: string)}
 								{@const rowPlacements = placementsForDay(date, station)}
 								{@const isDragTarget = dragOverKey === trackKey(date, station)}
-								<div class="station-row" class:station-row--empty={rowPlacements.length === 0}>
+								{@const isBlocked = activeExpectedStation !== null && activeExpectedStation !== station}
+								<div
+									class="station-row"
+									class:station-row--empty={rowPlacements.length === 0}
+									class:station-row--blocked={isBlocked}
+								>
 									<div class="station-row__label" title={stationLabel(station)}>
 										{stationLabel(station)}
 									</div>
@@ -991,6 +1045,7 @@
 														tabindex="0"
 														draggable="true"
 														ondragstart={(event) => handlePlacementDragStart(event, placement.id)}
+														ondragend={handleDragEnd}
 														onmouseenter={() => beginHover(placement.id)}
 														onmouseleave={() => endHover(placement.id)}
 														onfocus={() => beginHover(placement.id)}
@@ -1677,6 +1732,15 @@
 
 	.station-row--empty {
 		opacity: 0.75;
+	}
+
+	/* Dim rows whose station doesn't match the currently-dragging line item so the
+	   user sees the valid drop lanes at a glance. The pointer-events rule is
+	   defense-in-depth beside the ondragover guard: a browser that ignores
+	   dropEffect: 'none' still can't fire ondrop here. */
+	.station-row--blocked {
+		opacity: 0.35;
+		pointer-events: none;
 	}
 
 	/* Finishing group toggle — sits between production rows and finishing rows
