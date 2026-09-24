@@ -61,7 +61,10 @@
 		display: inline-flex;
 		gap: var(--space-1);
 		padding: var(--space-1);
-		background: var(--warm-100);
+		/* A darker tinted track with an edge, and a raised secondary-style pill for the
+		   selected tab, so neither blends into the panel behind it. */
+		background: var(--brand-200);
+		border: 1px solid var(--border);
 		border-radius: var(--radius-lg);
 	}
 
@@ -70,9 +73,10 @@
 		top: var(--space-1);
 		bottom: var(--space-1);
 		left: 0;
-		background: var(--surface);
+		background: var(--secondary-bg);
+		border: 1px solid var(--secondary-border);
 		border-radius: var(--radius-md);
-		box-shadow: var(--shadow-1);
+		box-shadow: var(--shadow-flat);
 		pointer-events: none;
 	}
 
@@ -81,12 +85,13 @@
 		z-index: 1;
 		background: transparent;
 		border: none;
+		box-shadow: none;
 		padding: var(--space-2) var(--space-4);
 		border-radius: var(--radius-md);
 		font: inherit;
 		font-weight: 600;
 		font-size: var(--fs-sm);
-		color: var(--ink-500);
+		color: var(--ink-700);
 		cursor: pointer;
 		transition: color var(--motion-fast) var(--ease-standard);
 		transform: scale(var(--press-scale, 1));

@@ -392,6 +392,7 @@
 	.picked-files__remove {
 		background: none;
 		border: none;
+		box-shadow: none;
 		color: var(--ink-500);
 		cursor: pointer;
 		font-size: 0.85rem;

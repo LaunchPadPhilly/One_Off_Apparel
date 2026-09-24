@@ -454,7 +454,7 @@
 		padding: 0.5rem 0.7rem;
 		border: 1px solid var(--border);
 		border-radius: 8px;
-		background: var(--warm-50);
+		background: var(--brand-50);
 		color: var(--ink-900);
 	}
 
@@ -503,7 +503,7 @@
 
 	.token {
 		background: var(--ink-900);
-		color: var(--warm-100);
+		color: var(--brand-100);
 		padding: 0.8rem 1rem;
 		border-radius: 8px;
 		overflow-x: auto;
@@ -541,7 +541,7 @@
 	}
 
 	.bars__track {
-		background: var(--warm-100);
+		background: var(--brand-100);
 		border-radius: 999px;
 		height: 0.55rem;
 		overflow: hidden;
@@ -550,7 +550,7 @@
 	.bars__fill {
 		display: block;
 		height: 100%;
-		background: var(--warm-500);
+		background: var(--brand-500);
 		border-radius: 999px;
 		transition: width var(--motion-fast) var(--ease-standard);
 	}

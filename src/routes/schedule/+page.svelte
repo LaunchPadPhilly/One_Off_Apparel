@@ -179,8 +179,8 @@
 	}
 
 	.draft-card:hover {
-		border-color: var(--warm-300);
-		background: var(--warm-100);
+		border-color: var(--brand-300);
+		background: var(--brand-100);
 	}
 
 	.draft-card__link {
