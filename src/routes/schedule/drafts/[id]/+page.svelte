@@ -281,6 +281,80 @@
 		return orderOverrides[order.id]?.title ?? order.customerName ?? order.hoopsOrderId;
 	}
 
+	// ─── Per-order collapse (sidebar) ──────────────────────────────────────────
+	// A shop with many active clients ends up with a long sidebar of expanded line
+	// items. Collapsing an order down to its header (customer / #job / due / total)
+	// lets a scheduler skim across clients without scrolling past every line item.
+	// State is stored per (draft, order) in localStorage so the sidebar remembers
+	// what you had open across reloads; defaults to expanded so a fresh visit
+	// still shows the items. A search query auto-expands matches so the item you
+	// searched for is never hidden by a collapsed parent.
+	// data.draft.id is stable for a page load, but Svelte 5 flags a top-level template
+	// literal that captures it; read it inside each accessor to avoid the warning
+	// without changing behavior.
+	function orderCollapsedStorageKey(): string {
+		return `${storageKeyPrefix}scheduleOrderCollapsed:${data.draft.id}`;
+	}
+	function loadOrderCollapsed(): Record<string, boolean> {
+		if (typeof window === 'undefined') return {};
+		try {
+			const saved = localStorage.getItem(orderCollapsedStorageKey());
+			if (!saved) return {};
+			const parsed = JSON.parse(saved) as unknown;
+			if (!parsed || typeof parsed !== 'object') return {};
+			const record: Record<string, boolean> = {};
+			for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
+				if (typeof value === 'boolean') record[id] = value;
+			}
+			return record;
+		} catch {
+			return {};
+		}
+	}
+	let orderCollapsed = $state<Record<string, boolean>>(loadOrderCollapsed());
+
+	function persistOrderCollapsed(next: Record<string, boolean>) {
+		if (typeof window === 'undefined') return;
+		try {
+			localStorage.setItem(orderCollapsedStorageKey(), JSON.stringify(next));
+		} catch {
+			// localStorage unavailable — the choice just won't persist across reloads.
+		}
+	}
+
+	function isOrderCollapsed(id: string): boolean {
+		// A search query overrides collapsed state — otherwise a filter to a design
+		// name would show only the header with no visible match. filteredOrders is
+		// already only the orders whose header, hoops id, or any line item matches.
+		if (search) return false;
+		return orderCollapsed[id] === true;
+	}
+
+	function toggleOrderCollapsed(id: string) {
+		const next = { ...orderCollapsed, [id]: !orderCollapsed[id] };
+		orderCollapsed = next;
+		persistOrderCollapsed(next);
+	}
+
+	function collapseAllOrders() {
+		const next: Record<string, boolean> = {};
+		for (const order of data.orders) next[order.id] = true;
+		orderCollapsed = next;
+		persistOrderCollapsed(next);
+	}
+
+	function expandAllOrders() {
+		const next: Record<string, boolean> = {};
+		orderCollapsed = next;
+		persistOrderCollapsed(next);
+	}
+
+	// True when every filtered order is currently collapsed — used to flip the
+	// bulk button between "Collapse all" and "Expand all".
+	let allCollapsed = $derived(
+		data.orders.length > 0 && data.orders.every((o) => orderCollapsed[o.id] === true)
+	);
+
 	let ordersById = $derived(new Map(data.orders.map((o) => [o.id, o] as const)));
 	function stepName(item: { itemType: string; decorationType: string | null; finishingStep: string | null }): string {
 		return stationLabel((item.itemType === 'FINISHING' ? item.finishingStep : item.decorationType) ?? item.itemType);
@@ -793,7 +867,18 @@
 		<aside class="tray card" aria-label="Orders backlog">
 			<div class="tray__head">
 				<h2>Orders</h2>
-				<span class="muted">{filteredOrders.length} of {data.orders.length}</span>
+				<div class="tray__head-actions">
+					<span class="muted">{filteredOrders.length} of {data.orders.length}</span>
+					{#if data.orders.length > 1}
+						<button
+							type="button"
+							class="tray__bulk"
+							onclick={allCollapsed ? expandAllOrders : collapseAllOrders}
+						>
+							{allCollapsed ? 'Expand all' : 'Collapse all'}
+						</button>
+					{/if}
+				</div>
 			</div>
 			<input
 				class="tray__search"
@@ -847,7 +932,27 @@
 								</div>
 							</div>
 						{:else}
-							<header class="order__head">
+							{@const collapsed = isOrderCollapsed(order.id)}
+							<!-- The whole header is a toggle: clicking anywhere on it collapses/
+							     expands the order's line items. Interactive children (Edit,
+							     Needs re-review) stopPropagation so they still work as their
+							     own actions. A search query hides the collapsed state (see
+							     isOrderCollapsed) so the matching item is never buried. -->
+							<div
+								class="order__head order__head--toggle"
+								role="button"
+								tabindex="0"
+								aria-expanded={!collapsed}
+								aria-controls="order-items-{order.id}"
+								onclick={() => toggleOrderCollapsed(order.id)}
+								onkeydown={(event) => {
+									if (event.key === 'Enter' || event.key === ' ') {
+										event.preventDefault();
+										toggleOrderCollapsed(order.id);
+									}
+								}}
+							>
+								<span class="order__chevron" aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
 								<div class="order__title">
 									<span class="order__customer">{orderTitle(order)}</span>
 									<span class="muted order__job">#{order.hoopsOrderId}</span>
@@ -856,6 +961,7 @@
 											class="order__re-review"
 											href="/orders/{order.id}"
 											title="{order.blockingCount} open item{order.blockingCount === 1 ? '' : 's'} on this order — open it to resolve."
+											onclick={(event) => event.stopPropagation()}
 										>Needs re-review</a>
 									{/if}
 								</div>
@@ -865,15 +971,19 @@
 										class="order__edit-btn"
 										title="Edit title & color"
 										aria-label="Edit order title and color"
-										onclick={() => beginEdit(order)}
+										onclick={(event) => {
+											event.stopPropagation();
+											beginEdit(order);
+										}}
 									>
 										Edit
 									</button>
 									<span class="muted">Due {order.internalDueDate}</span>
 									<span class="hours-total">{formatHours(orderTotalHours(order))}</span>
 								</div>
-							</header>
-							<ul class="line-items">
+							</div>
+							{#if !collapsed}
+							<ul class="line-items" id="order-items-{order.id}">
 								{#each order.lineItems as item (item.id)}
 									{@const hours = estimateHours(item.estimate)}
 									{@const err = estimateError(item.estimate)}
@@ -914,6 +1024,7 @@
 									</li>
 								{/each}
 							</ul>
+							{/if}
 						{/if}
 					</article>
 				{:else}
@@ -1296,6 +1407,30 @@
 		font-size: var(--fs-lg);
 	}
 
+	.tray__head-actions {
+		display: flex;
+		align-items: baseline;
+		gap: 0.6rem;
+	}
+
+	/* Small text-link-style button so "Expand all / Collapse all" doesn't compete
+	   with the primary controls but is still obviously interactive. */
+	.tray__bulk {
+		background: none;
+		border: none;
+		padding: 0;
+		font: inherit;
+		font-size: var(--fs-xs);
+		color: var(--warm-700);
+		cursor: pointer;
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+
+	.tray__bulk:hover {
+		color: var(--warm-500);
+	}
+
 	.tray__search {
 		width: 100%;
 		padding: 0.5rem 0.75rem;
@@ -1441,6 +1576,42 @@
 		align-items: flex-start;
 		gap: var(--space-2);
 		margin-bottom: 0.55rem;
+	}
+
+	/* The whole header is a click target when it's the collapse toggle. Reset the
+	   default role="button" cursor and add a subtle hover so the affordance is
+	   obvious. margin-bottom collapses when the order is closed so a collapsed
+	   card is tight against the swatch, not floating over empty space. */
+	.order__head--toggle {
+		cursor: pointer;
+		user-select: none;
+		border-radius: var(--radius-sm);
+		padding: 0.15rem 0.15rem;
+		margin: -0.15rem -0.15rem 0.4rem;
+		transition: background-color var(--motion-fast) var(--ease-standard);
+	}
+
+	.order__head--toggle:hover {
+		background: var(--warm-50);
+	}
+
+	.order__head--toggle:focus-visible {
+		outline: none;
+		box-shadow: var(--focus);
+	}
+
+	.order__head--toggle[aria-expanded='false'] {
+		margin-bottom: -0.15rem;
+	}
+
+	.order__chevron {
+		flex-shrink: 0;
+		width: 1rem;
+		text-align: center;
+		color: var(--ink-500);
+		font-size: var(--fs-xs);
+		line-height: 1.2;
+		margin-top: 0.15rem;
 	}
 
 	.order__title {
