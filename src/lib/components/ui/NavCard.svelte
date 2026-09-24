@@ -48,7 +48,7 @@
 	}
 
 	.nav-card:hover {
-		border-color: var(--warm-300);
+		border-color: var(--brand-300);
 		transform: translateY(-2px);
 		color: inherit;
 	}
@@ -67,7 +67,7 @@
 	}
 
 	.nav-card__icon {
-		color: var(--warm-600);
+		color: var(--brand-600);
 		display: inline-flex;
 	}
 

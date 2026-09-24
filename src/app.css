@@ -1,29 +1,98 @@
+/*
+ * Design tokens — "Midnight & Glacier".
+ *
+ *   Core:     Glacier #E8F0F8 · Mist #B9D0E8 · Ocean #5687C4 · Cobalt #285A96 · Midnight #142B49
+ *   Support:  Soft Teal #D9E8E8 · Muted Teal #398580 · Cool Silver #DCE5F0 · Warm Amber #E5A45B
+ *
+ * Light mode is a soft blue-gray canvas (never stark white) with brighter cards and
+ * Cobalt actions; dark mode is layered midnight blues (never pure black) with Ice-blue
+ * actions. Blue carries hierarchy and interaction (primary buttons, links, selected
+ * states, focus); teal is a quiet secondary accent; amber is ~2–5% of the UI (heading
+ * underlines, the brand mark) and doubles as the warning color. Surfaces, spacing and
+ * type do most of the work — borders are subtle and shadows are light.
+ *
+ * Containers must read clearly against the page: the spec's #F5F7FB cards on #E9EFF6
+ * were ~1.08:1 and washed together in the real app, so cards are white on a deeper
+ * #D9E3EE canvas (~1.3:1) with a visible #C5D3E3 edge and a soft shadow; dark mode
+ * uses the same idea (#182A44 cards on #0A1320).
+ *
+ * Deliberate deviations from the source spec, all for WCAG AA (4.5:1 text, 3:1 control
+ * boundaries):
+ *   muted text     #718198 → #4F6078  (spec value is 3.4–3.7:1 on the light surfaces)
+ *   teal as text   #398580 → #2E6C68  (3.75:1 → 5.2:1); #398580 stays for fills/lines
+ *   warning text   #A85C0A → #975208  (4.37:1 → 5.2:1 on its tint)
+ *   control edges  inputs and secondary buttons use --control-border (≥3:1) instead of
+ *                  the #DCE5F0 divider color (1.2:1), so they never blend into a card
+ *
+ * Roles the components read (values differ per theme):
+ *   --brand-50   page canvas                 --brand-500  Ocean: lines, bars, ticks
+ *   --brand-100  selected / hover fill       --brand-600  links
+ *   --brand-200  soft outline                --brand-700  emphasized text (link hover)
+ *   --brand-300  chip / highlight fill       --on-accent  text on --brand-300
+ *   --brand-400  chip hover
+ *   --primary / --primary-hover / --primary-pressed / --on-primary   the primary button
+ *   --secondary-bg / --secondary-hover / --secondary-border          secondary buttons
+ *   --control-border   edges of inputs and secondary controls
+ *   --accent-teal / --accent-teal-soft / --accent-teal-text          the teal accent
+ *   --accent-orange / --accent-orange-text                           the amber accent
+ */
 :root {
-	--warm-50: #fdf8f3;
-	--warm-100: #f7ece1;
-	--warm-200: #edd9c4;
-	--warm-300: #ddb894;
-	--warm-500: #b4653a;
-	--warm-600: #97502c;
-	--warm-700: #7a3f23;
-	--ink-900: #2b1c14;
-	--ink-700: #4d3a2e;
-	--ink-500: #7a6558;
-	--surface: #fffdfb;
-	--border: #e8d9c9;
-	--success-bg: #e8f2e4;
-	--success-fg: #3d6b31;
-	--danger-bg: #fbe9e5;
-	--danger-fg: #a03520;
-	--radius: 10px;
-	--shadow: 0 1px 2px rgb(43 28 20 / 6%), 0 4px 16px rgb(43 28 20 / 6%);
-	--focus: 0 0 0 3px rgb(180 101 58 / 35%);
-
-	/* Elevation scale — --shadow-1 aliases the original --shadow so nothing already
-	   using --shadow changes; --shadow-2/-3 are new, for the redesigned components. */
+	--brand-50: #d9e3ee;
+	--brand-100: #dce8f6;
+	--brand-200: #cddcee;
+	--brand-300: #b9d0e8;
+	--brand-400: #a7c3e2;
+	--brand-500: #5687c4;
+	--brand-600: #285a96;
+	--brand-700: #142b49;
+	--on-accent: #142b49;
+	--primary: #285a96;
+	--primary-hover: #204a7c;
+	--primary-pressed: #142b49;
+	--on-primary: #ffffff;
+	--edge: #204a7c;
+	--ink-900: #142b49;
+	--ink-700: #536780;
+	--ink-500: #4f6078;
+	--surface: #ffffff;
+	--surface-2: #eef3f9;
+	--surface-raised: #ffffff;
+	--field: #fbfcfe;
+	--border: #c5d3e3;
+	--border-strong: #b3c4d8;
+	--control-border: #7a90ad;
+	--selected: #dce8f6;
+	--accent-teal: #398580;
+	--accent-teal-soft: #d9e8e8;
+	--accent-teal-text: #2e6c68;
+	--accent-orange: #e5a45b;
+	--accent-orange-text: #975208;
+	--secondary-bg: #e4edf8;
+	--secondary-hover: #d6e4f4;
+	--secondary-border: #7a90ad;
+	--disabled-border: #c5d3e3;
+	--success-bg: #e1f2e8;
+	--success-fg: #237a4b;
+	--danger-bg: #fbe6e6;
+	--danger-fg: #b93838;
+	--warning-bg: #fbeedc;
+	--warning-fg: #975208;
+	--header-bg: #ffffff;
+	--header-border: #c5d3e3;
+	--nav-fg: #536780;
+	--nav-fg-active: #142b49;
+	--nav-indicator: #dce8f6;
+	--nav-indicator-border: transparent;
+	--gradient-brand: linear-gradient(115deg, #142b49, #285a96, #5687c4);
+	--brand-mark: var(--gradient-brand);
+	--focus-color: #285a96;
+	--focus: 0 0 0 3px #b9d0e8;
+	--radius: 12px;
+	--shadow: 0 1px 2px rgb(20 43 73 / 6%), 0 4px 14px rgb(20 43 73 / 7%);
+	--shadow-flat: 0 1px 1px rgb(20 43 73 / 12%);
 	--shadow-1: var(--shadow);
-	--shadow-2: 0 2px 6px rgb(43 28 20 / 8%), 0 10px 24px rgb(43 28 20 / 10%);
-	--shadow-3: 0 4px 10px rgb(43 28 20 / 10%), 0 20px 40px rgb(43 28 20 / 14%);
+	--shadow-2: 0 2px 6px rgb(20 43 73 / 7%), 0 10px 24px rgb(20 43 73 / 8%);
+	--shadow-3: 0 4px 10px rgb(20 43 73 / 9%), 0 18px 36px rgb(20 43 73 / 12%);
 
 	/* Spacing scale, 4px base. */
 	--space-1: 0.25rem;
@@ -35,10 +104,10 @@
 	--space-7: 2.5rem;
 	--space-8: 3rem;
 
-	/* Radius scale — --radius-md aliases the original --radius. */
-	--radius-sm: 6px;
+	/* Radius scale — --radius-md aliases --radius. */
+	--radius-sm: 8px;
 	--radius-md: var(--radius);
-	--radius-lg: 16px;
+	--radius-lg: 18px;
 
 	/* Type scale. */
 	--fs-xs: 0.75rem;
@@ -55,111 +124,197 @@
 	--motion-base: 220ms;
 	--motion-slow: 360ms;
 	--ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+	color-scheme: light;
 }
 
+/* Dark — layered midnight blues: page < cards < raised, Ice-blue actions. */
 @media (prefers-color-scheme: dark) {
-	:root {
-		--warm-50: #241a14;
-		--warm-100: #2e211a;
-		--warm-200: #3d2c22;
-		--warm-300: #5c4232;
-		--warm-500: #d08a5c;
-		--warm-600: #e0a074;
-		--warm-700: #eab88f;
-		--ink-900: #f6ece3;
-		--ink-700: #dcc9b8;
-		--ink-500: #a99283;
-		--surface: #2a1e17;
-		--border: #453227;
-		--success-bg: #23331f;
-		--success-fg: #a8d199;
-		--danger-bg: #3a1f19;
-		--danger-fg: #f0a894;
-		--shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 16px rgb(0 0 0 / 25%);
-		--shadow-2: 0 2px 6px rgb(0 0 0 / 32%), 0 10px 24px rgb(0 0 0 / 30%);
-		--shadow-3: 0 4px 10px rgb(0 0 0 / 36%), 0 20px 40px rgb(0 0 0 / 40%);
+	:root:not([data-theme='light']):not([data-theme='slate']) {
+		--brand-50: #0a1320;
+		--brand-100: #22406a;
+		--brand-200: #22405f;
+		--brand-300: #8db8ee;
+		--brand-400: #b1d0f7;
+		--brand-500: #6d9fd9;
+		--brand-600: #8db8ee;
+		--brand-700: #b1d0f7;
+		--on-accent: #0d1726;
+		--primary: #8db8ee;
+		--primary-hover: #b1d0f7;
+		--primary-pressed: #6d9fd9;
+		--on-primary: #0d1726;
+		--edge: #6d9fd9;
+		--ink-900: #e7eef8;
+		--ink-700: #a5b5ca;
+		--ink-500: #8294ac;
+		--surface: #182a44;
+		--surface-2: #14243b;
+		--surface-raised: #1f3453;
+		--field: #0f1c30;
+		--border: #2f4666;
+		--border-strong: #3a5478;
+		--control-border: #5f7b9f;
+		--selected: #22406a;
+		--accent-teal: #70bdb5;
+		--accent-teal-soft: #203b43;
+		--accent-teal-text: #70bdb5;
+		--accent-orange: #e5a45b;
+		--accent-orange-text: #f2b766;
+		--secondary-bg: #22406a;
+		--secondary-hover: #2a4c7c;
+		--secondary-border: #5f7b9f;
+		--disabled-border: #2f4666;
+		--success-bg: #143528;
+		--success-fg: #6dd6a0;
+		--danger-bg: #3d1a20;
+		--danger-fg: #ff8585;
+		--warning-bg: #3a2a14;
+		--warning-fg: #f2b766;
+		--header-bg: #14243b;
+		--header-border: #2f4666;
+		--nav-fg: #a5b5ca;
+		--nav-fg-active: #e7eef8;
+		--nav-indicator: #22406a;
+		--nav-indicator-border: transparent;
+		--gradient-brand: linear-gradient(115deg, #142b49, #285a96, #5687c4);
+		--brand-mark: linear-gradient(115deg, #285a96, #5687c4, #8db8ee);
+		--focus-color: #8db8ee;
+		--focus: 0 0 0 3px #285a96;
+		--shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 14px rgb(0 0 0 / 28%);
+		--shadow-flat: 0 1px 1px rgb(0 0 0 / 35%);
+		--shadow-2: 0 2px 6px rgb(0 0 0 / 30%), 0 10px 24px rgb(0 0 0 / 28%);
+		--shadow-3: 0 4px 10px rgb(0 0 0 / 34%), 0 18px 36px rgb(0 0 0 / 38%);
+		color-scheme: dark;
 	}
 }
 
 /*
  * Explicit theme choice from the Settings page (stored in localStorage, applied via
- * a pre-paint script in app.html). An attribute selector on :root outranks the plain
- * ":root" selector inside the prefers-color-scheme query above, so this always wins
- * over the OS setting once the user has picked one, in either direction.
+ * a pre-paint script in app.html). The OS query above skips itself whenever an
+ * explicit theme is set, so a saved choice always wins, in either direction.
  */
 :root[data-theme='dark'] {
-	--warm-50: #241a14;
-	--warm-100: #2e211a;
-	--warm-200: #3d2c22;
-	--warm-300: #5c4232;
-	--warm-500: #d08a5c;
-	--warm-600: #e0a074;
-	--warm-700: #eab88f;
-	--ink-900: #f6ece3;
-	--ink-700: #dcc9b8;
-	--ink-500: #a99283;
-	--surface: #2a1e17;
-	--border: #453227;
-	--success-bg: #23331f;
-	--success-fg: #a8d199;
-	--danger-bg: #3a1f19;
-	--danger-fg: #f0a894;
-	--shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 16px rgb(0 0 0 / 25%);
-	--shadow-2: 0 2px 6px rgb(0 0 0 / 32%), 0 10px 24px rgb(0 0 0 / 30%);
-	--shadow-3: 0 4px 10px rgb(0 0 0 / 36%), 0 20px 40px rgb(0 0 0 / 40%);
-}
-
-:root[data-theme='light'] {
-	--warm-50: #fdf8f3;
-	--warm-100: #f7ece1;
-	--warm-200: #edd9c4;
-	--warm-300: #ddb894;
-	--warm-500: #b4653a;
-	--warm-600: #97502c;
-	--warm-700: #7a3f23;
-	--ink-900: #2b1c14;
-	--ink-700: #4d3a2e;
-	--ink-500: #7a6558;
-	--surface: #fffdfb;
-	--border: #e8d9c9;
-	--success-bg: #e8f2e4;
-	--success-fg: #3d6b31;
-	--danger-bg: #fbe9e5;
-	--danger-fg: #a03520;
-	--shadow: 0 1px 2px rgb(43 28 20 / 6%), 0 4px 16px rgb(43 28 20 / 6%);
-	--shadow-2: 0 2px 6px rgb(43 28 20 / 8%), 0 10px 24px rgb(43 28 20 / 10%);
-	--shadow-3: 0 4px 10px rgb(43 28 20 / 10%), 0 20px 40px rgb(43 28 20 / 14%);
+	--brand-50: #0a1320;
+	--brand-100: #22406a;
+	--brand-200: #22405f;
+	--brand-300: #8db8ee;
+	--brand-400: #b1d0f7;
+	--brand-500: #6d9fd9;
+	--brand-600: #8db8ee;
+	--brand-700: #b1d0f7;
+	--on-accent: #0d1726;
+	--primary: #8db8ee;
+	--primary-hover: #b1d0f7;
+	--primary-pressed: #6d9fd9;
+	--on-primary: #0d1726;
+	--edge: #6d9fd9;
+	--ink-900: #e7eef8;
+	--ink-700: #a5b5ca;
+	--ink-500: #8294ac;
+	--surface: #182a44;
+	--surface-2: #14243b;
+	--surface-raised: #1f3453;
+	--field: #0f1c30;
+	--border: #2f4666;
+	--border-strong: #3a5478;
+	--control-border: #5f7b9f;
+	--selected: #22406a;
+	--accent-teal: #70bdb5;
+	--accent-teal-soft: #203b43;
+	--accent-teal-text: #70bdb5;
+	--accent-orange: #e5a45b;
+	--accent-orange-text: #f2b766;
+	--secondary-bg: #22406a;
+	--secondary-hover: #2a4c7c;
+	--secondary-border: #5f7b9f;
+	--disabled-border: #2f4666;
+	--success-bg: #143528;
+	--success-fg: #6dd6a0;
+	--danger-bg: #3d1a20;
+	--danger-fg: #ff8585;
+	--warning-bg: #3a2a14;
+	--warning-fg: #f2b766;
+	--header-bg: #14243b;
+	--header-border: #2f4666;
+	--nav-fg: #a5b5ca;
+	--nav-fg-active: #e7eef8;
+	--nav-indicator: #22406a;
+	--nav-indicator-border: transparent;
+	--gradient-brand: linear-gradient(115deg, #142b49, #285a96, #5687c4);
+	--brand-mark: linear-gradient(115deg, #285a96, #5687c4, #8db8ee);
+	--focus-color: #8db8ee;
+	--focus: 0 0 0 3px #285a96;
+	--shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 14px rgb(0 0 0 / 28%);
+	--shadow-flat: 0 1px 1px rgb(0 0 0 / 35%);
+	--shadow-2: 0 2px 6px rgb(0 0 0 / 30%), 0 10px 24px rgb(0 0 0 / 28%);
+	--shadow-3: 0 4px 10px rgb(0 0 0 / 34%), 0 18px 36px rgb(0 0 0 / 38%);
+	color-scheme: dark;
 }
 
 /*
- * "Slate Studio" — a fourth, explicit-only theme (no OS media-query equivalent,
- * chosen from Settings same as Dark/Light). Medium-dark, cool graphite/slate
- * neutrals rather than Dark's warm-brown-tinted near-black — a deliberately
- * different mood, not just "dark but lighter". The warm-500/600/700 accent ramp
- * is copied verbatim from Dark for continuity: buttons, links, and badges read
- * identically between the two dark themes, only the surrounding neutrals differ.
+ * "Slate Studio" — explicit-only (no OS equivalent). Graphite neutrals instead of
+ * Dark's midnight blues, same Ice-blue / teal / amber accents as Dark.
  */
 :root[data-theme='slate'] {
-	--warm-50: #2a2d33;
-	--warm-100: #33373e;
-	--warm-200: #3f434c;
-	--warm-300: #565b66;
-	--warm-500: #d08a5c;
-	--warm-600: #e0a074;
-	--warm-700: #eab88f;
+	--brand-50: #1b1e23;
+	--brand-100: #2f3a4a;
+	--brand-200: #384456;
+	--brand-300: #8db8ee;
+	--brand-400: #b1d0f7;
+	--brand-500: #6d9fd9;
+	--brand-600: #8db8ee;
+	--brand-700: #b1d0f7;
+	--on-accent: #0d1726;
+	--primary: #8db8ee;
+	--primary-hover: #b1d0f7;
+	--primary-pressed: #6d9fd9;
+	--on-primary: #0d1726;
+	--edge: #6d9fd9;
 	--ink-900: #edeef0;
-	--ink-700: #c5c9d0;
-	--ink-500: #8b909a;
-	--surface: #34383f;
-	--border: #454951;
-	--success-bg: #1f2e22;
-	--success-fg: #9bd6a6;
-	--danger-bg: #362127;
-	--danger-fg: #ef9ba6;
-	--shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 16px rgb(0 0 0 / 25%);
-	--shadow-2: 0 2px 6px rgb(0 0 0 / 32%), 0 10px 24px rgb(0 0 0 / 30%);
-	--shadow-3: 0 4px 10px rgb(0 0 0 / 36%), 0 20px 40px rgb(0 0 0 / 40%);
+	--ink-700: #c1c6ce;
+	--ink-500: #99a0ab;
+	--surface: #2c3139;
+	--surface-2: #272b32;
+	--surface-raised: #343a43;
+	--field: #23272d;
+	--border: #434a55;
+	--border-strong: #4a515d;
+	--control-border: #6b7483;
+	--selected: #2f3a4a;
+	--accent-teal: #70bdb5;
+	--accent-teal-soft: #243a3c;
+	--accent-teal-text: #70bdb5;
+	--accent-orange: #e5a45b;
+	--accent-orange-text: #f2b766;
+	--secondary-bg: #363c46;
+	--secondary-hover: #414856;
+	--secondary-border: #6b7483;
+	--disabled-border: #4f5664;
+	--success-bg: #1f2e24;
+	--success-fg: #6dd6a0;
+	--danger-bg: #3a2126;
+	--danger-fg: #ff8585;
+	--warning-bg: #372c1a;
+	--warning-fg: #f2b766;
+	--header-bg: #262a31;
+	--header-border: #434a55;
+	--nav-fg: #c1c6ce;
+	--nav-fg-active: #edeef0;
+	--nav-indicator: #2f3a4a;
+	--nav-indicator-border: transparent;
+	--gradient-brand: linear-gradient(115deg, #142b49, #285a96, #5687c4);
+	--brand-mark: linear-gradient(115deg, #285a96, #5687c4, #8db8ee);
+	--focus-color: #8db8ee;
+	--focus: 0 0 0 3px #285a96;
+	--shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 14px rgb(0 0 0 / 28%);
+	--shadow-flat: 0 1px 1px rgb(0 0 0 / 35%);
+	--shadow-2: 0 2px 6px rgb(0 0 0 / 30%), 0 10px 24px rgb(0 0 0 / 28%);
+	--shadow-3: 0 4px 10px rgb(0 0 0 / 34%), 0 18px 36px rgb(0 0 0 / 38%);
+	color-scheme: dark;
 }
+
+/* ─── Base ──────────────────────────────────────────────────────────────── */
 
 *,
 *::before,
@@ -169,27 +324,41 @@
 
 body {
 	margin: 0;
-	font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-	background: var(--warm-50);
+	font-family: 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+	background: var(--brand-50);
 	color: var(--ink-900);
 	line-height: 1.6;
 	-webkit-font-smoothing: antialiased;
 }
 
+::selection {
+	background: var(--brand-300);
+	color: var(--on-accent);
+}
+
 h1,
 h2,
 h3 {
+	color: var(--ink-900);
 	line-height: 1.25;
 	margin: 0 0 0.5rem;
-	letter-spacing: -0.01em;
+	letter-spacing: -0.015em;
 }
 
 h1 {
-	font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2rem);
+	font-size: clamp(1.6rem, 1.25rem + 1.4vw, 2.1rem);
+	font-weight: 800;
+	letter-spacing: -0.03em;
 }
 
 h2 {
-	font-size: 1.25rem;
+	font-size: 1.15rem;
+	font-weight: 700;
+}
+
+h3 {
+	font-size: 1rem;
+	font-weight: 700;
 }
 
 p {
@@ -197,18 +366,38 @@ p {
 }
 
 a {
-	color: var(--warm-600);
-	text-underline-offset: 2px;
+	color: var(--brand-600);
+	font-weight: 600;
+	text-underline-offset: 3px;
+	text-decoration-thickness: 1px;
+	transition: color var(--motion-fast) var(--ease-standard);
 }
 
 a:hover {
-	color: var(--warm-700);
+	color: var(--brand-700);
 }
 
+hr {
+	border: none;
+	border-top: 1px solid var(--border);
+	margin: var(--space-5) 0;
+}
+
+code {
+	font-size: 0.85em;
+	padding: 0.1em 0.4em;
+	border-radius: 6px;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	color: var(--brand-600);
+}
+
+/* ─── Layout ────────────────────────────────────────────────────────────── */
+
 .page {
-	max-width: 68rem;
+	max-width: 72rem;
 	margin: 0 auto;
-	padding: 2rem 1.25rem 4rem;
+	padding: 2.25rem 1.25rem 4rem;
 }
 
 .page--narrow {
@@ -216,18 +405,24 @@ a:hover {
 }
 
 .page--wide {
-	max-width: 84rem;
+	max-width: 88rem;
 }
 
+/* Header: a calm surface bar — the brand color lives in the mark and the selected
+   nav pill, not in a full-bleed band. */
 .site-header {
-	background: var(--surface);
-	border-bottom: 1px solid var(--border);
+	position: sticky;
+	top: 0;
+	z-index: 20;
+	background: color-mix(in srgb, var(--header-bg) 92%, transparent);
+	backdrop-filter: saturate(160%) blur(10px);
+	border-bottom: 1px solid var(--header-border);
 }
 
 .site-header__inner {
-	max-width: 68rem;
+	max-width: 72rem;
 	margin: 0 auto;
-	padding: 0.85rem 1.25rem;
+	padding: 0.65rem 1.25rem;
 	display: flex;
 	flex-wrap: wrap;
 	gap: 0.75rem 1.25rem;
@@ -235,10 +430,29 @@ a:hover {
 }
 
 .site-header__brand {
-	font-weight: 650;
-	color: var(--ink-900);
+	display: inline-flex;
+	align-items: center;
+	gap: 0.6rem;
+	font-weight: 800;
+	letter-spacing: -0.02em;
+	color: var(--nav-fg-active);
 	text-decoration: none;
 	margin-right: auto;
+}
+
+/* Brand mark: the signature Midnight → Cobalt → Ocean gradient, with an amber dot. */
+.site-header__brand::before {
+	content: '';
+	width: 1.25rem;
+	height: 1.25rem;
+	border-radius: 6px;
+	background:
+		radial-gradient(circle at 78% 22%, var(--accent-orange) 0 18%, transparent 19%),
+		var(--brand-mark);
+}
+
+.site-header__brand:hover {
+	color: var(--nav-fg-active);
 }
 
 .site-header__nav {
@@ -248,6 +462,11 @@ a:hover {
 	align-items: center;
 }
 
+.site-header .muted {
+	color: var(--nav-fg);
+}
+
+/* Cards lift clearly off the page: white (navy-slate in dark), a visible edge, a soft shadow. */
 .card {
 	background: var(--surface);
 	border: 1px solid var(--border);
@@ -262,7 +481,16 @@ a:hover {
 	align-items: baseline;
 	justify-content: space-between;
 	gap: 1rem;
-	margin-bottom: 0.75rem;
+	margin-bottom: 1rem;
+}
+
+/* Section headings carry the amber accent as a short underline. */
+.card__title h2 {
+	margin: 0;
+	text-decoration: underline;
+	text-decoration-color: var(--accent-orange);
+	text-decoration-thickness: 3px;
+	text-underline-offset: 7px;
 }
 
 .muted {
@@ -273,10 +501,10 @@ a:hover {
 .eyebrow {
 	display: block;
 	font-size: var(--fs-xs);
-	font-weight: 700;
-	letter-spacing: 0.08em;
+	font-weight: 800;
+	letter-spacing: 0.1em;
 	text-transform: uppercase;
-	color: var(--warm-600);
+	color: var(--accent-teal-text);
 	margin: 0 0 var(--space-2);
 }
 
@@ -284,23 +512,42 @@ a:hover {
 	display: grid;
 	gap: 1.25rem;
 	grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+	margin-bottom: 1.25rem;
 }
 
+/* Signature gradient — for the odd hero banner or feature moment only. */
+.surface-gradient {
+	background: var(--gradient-brand);
+	color: #ffffff;
+	border: none;
+}
+
+/* ─── Buttons ───────────────────────────────────────────────────────────── */
+
+/* Primary: Cobalt with white text (Ice blue with navy text in dark mode). */
 button,
 .button {
 	font: inherit;
-	font-weight: 550;
-	padding: 0.5rem 1rem;
-	border-radius: 8px;
-	border: 1px solid transparent;
-	/* warm-600, not warm-500: white on warm-500 measures 4.3:1, under the 4.5:1 AA
-	   threshold, which made labels look washed out. warm-600 measures 5.7:1. */
-	background: var(--warm-600);
-	color: #fff;
+	font-size: 0.925rem;
+	font-weight: 700;
+	line-height: 1.25;
+	padding: 0.55rem 1.1rem;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--edge);
+	background: var(--primary);
+	color: var(--on-primary);
+	box-shadow: var(--shadow-flat);
 	cursor: pointer;
 	text-decoration: none;
-	display: inline-block;
-	transition: background-color var(--motion-fast) var(--ease-standard), opacity var(--motion-fast) var(--ease-standard),
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.4rem;
+	transition:
+		background-color var(--motion-fast) var(--ease-standard),
+		border-color var(--motion-fast) var(--ease-standard),
+		color var(--motion-fast) var(--ease-standard),
+		box-shadow var(--motion-fast) var(--ease-standard),
 		transform var(--motion-fast) var(--ease-standard);
 	/* --press-scale is written by use:pressable (src/lib/actions/pressable.svelte.ts) —
 	   composes the tactile press feedback with whatever transform hover already sets,
@@ -310,53 +557,142 @@ button,
 
 button:hover:not(:disabled),
 .button:hover {
-	background: var(--warm-700);
-	color: #fff;
+	background: var(--primary-hover);
+	color: var(--on-primary);
 }
 
+button:active:not(:disabled),
+.button:active {
+	background: var(--primary-pressed);
+	box-shadow: none;
+}
+
+/* Focus: a 2px ring with a little breathing room. */
 button:focus-visible,
 .button:focus-visible,
 a:focus-visible {
-	outline: none;
-	box-shadow: var(--focus);
+	outline: 2px solid var(--focus-color);
+	outline-offset: 2px;
 }
 
 /*
- * Disabled buttons must stay readable. Dimming the whole button with opacity made
- * white label text vanish against the light page background — the label looked blank.
- * Swap to a muted fill with body-text colour so the label survives; both values are
- * theme variables, so this holds in dark mode too.
+ * Disabled buttons stay readable and don't blend into the card: a muted fill, a
+ * visible edge, body-text color, no shadow. All theme variables.
  */
 button:disabled,
 .button:disabled {
 	opacity: 1;
-	background: var(--warm-100);
-	border-color: var(--border);
+	background: var(--surface-2);
+	border: 1px solid var(--disabled-border);
 	color: var(--ink-500);
+	box-shadow: none;
 	cursor: not-allowed;
 }
 
+/* Secondary: a soft blue fill and a visible edge — distinct from the card behind it. */
 .button--secondary {
-	background: transparent;
-	border-color: var(--border);
-	color: var(--ink-700);
-}
-
-.button--secondary:hover:not(:disabled) {
-	background: var(--warm-100);
+	background: var(--secondary-bg);
+	border-color: var(--secondary-border);
 	color: var(--ink-900);
 }
 
+.button--secondary:hover:not(:disabled) {
+	background: var(--secondary-hover);
+	color: var(--ink-900);
+}
+
+.button--secondary:active:not(:disabled) {
+	background: var(--secondary-hover);
+}
+
 .button--danger {
-	background: transparent;
+	background: var(--danger-bg);
 	border-color: var(--danger-fg);
 	color: var(--danger-fg);
 }
 
-.button--danger:hover:not(:disabled) {
-	background: var(--danger-bg);
+.button--danger:hover:not(:disabled),
+.button--danger:active:not(:disabled) {
+	background: color-mix(in srgb, var(--danger-bg) 75%, var(--danger-fg));
 	color: var(--danger-fg);
 }
+
+/* ─── Form controls ─────────────────────────────────────────────────────── */
+
+input:not([type='checkbox'], [type='radio'], [type='file'], [type='range'], [type='color']),
+select,
+textarea {
+	font: inherit;
+	font-size: 0.925rem;
+	padding: 0.5rem 0.7rem;
+	border: 1px solid var(--control-border);
+	border-radius: var(--radius-sm);
+	background: var(--field);
+	color: var(--ink-900);
+	transition:
+		border-color var(--motion-fast) var(--ease-standard),
+		box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+input:not([type='checkbox'], [type='radio'], [type='file'], [type='range'], [type='color']):hover,
+select:hover,
+textarea:hover {
+	border-color: var(--brand-500);
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+	outline: none;
+	border-color: var(--focus-color);
+	box-shadow: var(--focus);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+	background: var(--surface-2);
+	color: var(--ink-500);
+	cursor: not-allowed;
+}
+
+::placeholder {
+	color: var(--ink-500);
+	opacity: 0.85;
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+	accent-color: var(--primary);
+	width: 1rem;
+	height: 1rem;
+}
+
+input[type='file'] {
+	font: inherit;
+	font-size: 0.9rem;
+	color: var(--ink-700);
+}
+
+input[type='file']::file-selector-button {
+	font: inherit;
+	font-weight: 700;
+	margin-right: 0.75rem;
+	padding: 0.45rem 0.9rem;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--secondary-border);
+	background: var(--secondary-bg);
+	color: var(--ink-900);
+	box-shadow: var(--shadow-flat);
+	cursor: pointer;
+	transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+input[type='file']::file-selector-button:hover {
+	background: var(--secondary-hover);
+}
+
+/* ─── Tables ────────────────────────────────────────────────────────────── */
 
 .table-scroll {
 	overflow-x: auto;
@@ -365,7 +701,7 @@ button:disabled,
 table {
 	width: 100%;
 	border-collapse: collapse;
-	font-size: 0.95rem;
+	font-size: 0.925rem;
 }
 
 th,
@@ -377,63 +713,73 @@ td {
 }
 
 th {
-	font-size: 0.78rem;
+	font-size: 0.72rem;
 	text-transform: uppercase;
-	letter-spacing: 0.06em;
-	color: var(--ink-500);
-	font-weight: 650;
+	letter-spacing: 0.08em;
+	color: var(--ink-700);
+	font-weight: 800;
+	background: var(--surface-2);
+	border-bottom: 1px solid var(--border-strong);
+}
+
+tbody tr {
+	transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
 tbody tr:hover {
-	background: var(--warm-100);
+	background: var(--selected);
 }
+
+/* ─── Badges ────────────────────────────────────────────────────────────── */
 
 .badge {
-	display: inline-block;
-	padding: 0.15rem 0.6rem;
+	display: inline-flex;
+	align-items: center;
+	padding: 0.12rem 0.6rem;
 	border-radius: 999px;
-	font-size: 0.78rem;
-	font-weight: 600;
-	background: var(--warm-100);
-	color: var(--warm-700);
-	border: 1px solid var(--border);
+	font-size: 0.75rem;
+	font-weight: 700;
+	letter-spacing: 0.01em;
+	background: var(--selected);
+	color: var(--brand-600);
+	border: 1px solid var(--brand-200);
 }
 
-.badge--on {
+.badge--on,
+.badge--success {
 	background: var(--success-bg);
 	color: var(--success-fg);
-	border-color: transparent;
+	border-color: color-mix(in srgb, var(--success-fg) 30%, transparent);
 }
 
 .badge--off {
 	background: transparent;
 	color: var(--ink-500);
+	border-color: var(--border-strong);
 }
 
+/* Amber — needs review, needs re-review, open items. */
 .badge--warn {
-	background: var(--danger-bg);
-	color: var(--danger-fg);
-	border-color: transparent;
+	background: var(--warning-bg);
+	color: var(--warning-fg);
+	border-color: color-mix(in srgb, var(--warning-fg) 30%, transparent);
 }
 
-/* Was referenced (orders/[id]/+page.svelte's CANCELLED badge) but never defined —
-   fixed as part of the schedule/orders redesign. Same danger palette as .badge--warn,
-   kept as its own class since "needs review" and "cancelled" are different meanings
-   even though today's token set only has one red pairing to draw from. */
+/* Red — cancelled, errors. */
 .badge--danger {
 	background: var(--danger-bg);
 	color: var(--danger-fg);
-	border-color: transparent;
+	border-color: color-mix(in srgb, var(--danger-fg) 30%, transparent);
 }
 
-/* A calmer, positive badge for "this is known/good" states — used for successful hour
-   estimates and non-warning schedule statuses, so those don't accidentally look like a
-   status closer to warm/attention-orange (which .badge's default already leans toward). */
-.badge--success {
-	background: var(--success-bg);
-	color: var(--success-fg);
-	border-color: transparent;
+/* Teal — secondary / informational chips. */
+.badge--teal {
+	background: var(--accent-teal-soft);
+	color: var(--accent-teal-text);
+	border-color: color-mix(in srgb, var(--accent-teal) 35%, transparent);
 }
+
+/* ─── Alerts ────────────────────────────────────────────────────────────── */
 
 .alert {
 	padding: 0.85rem 1rem;
@@ -445,12 +791,13 @@ tbody tr:hover {
 .alert--error {
 	background: var(--danger-bg);
 	color: var(--danger-fg);
+	border-color: color-mix(in srgb, var(--danger-fg) 30%, transparent);
 }
 
 .alert--info {
-	background: var(--warm-100);
-	color: var(--ink-700);
-	border-color: var(--border);
+	background: var(--selected);
+	color: var(--ink-900);
+	border-color: var(--brand-200);
 }
 
 .actions {
@@ -472,9 +819,7 @@ ul.plain {
 /*
  * Compact density (Settings > Appearance), applied via [data-density='compact']
  * on <html> the same way theme is. Targets the highest-impact, most repeated
- * surfaces — card padding, table cells, page padding, grid gaps — rather than
- * retrofitting every hardcoded gap in every component; those are the surfaces
- * that actually make a page feel "dense" or not.
+ * surfaces — card padding, table cells, page padding, grid gaps.
  */
 :root[data-density='compact'] .card {
 	padding: 1rem;

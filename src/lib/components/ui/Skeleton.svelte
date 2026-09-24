@@ -30,9 +30,9 @@
 		display: inline-block;
 		background: linear-gradient(
 			90deg,
-			var(--warm-100) 25%,
-			var(--warm-200) 37%,
-			var(--warm-100) 63%
+			var(--brand-100) 25%,
+			var(--brand-200) 37%,
+			var(--brand-100) 63%
 		);
 		background-size: 400% 100%;
 		animation: skeleton-shimmer 1.4s ease infinite;
@@ -50,7 +50,7 @@
 	@media (prefers-reduced-motion: reduce) {
 		.skeleton {
 			animation: none;
-			background: var(--warm-100);
+			background: var(--brand-100);
 		}
 	}
 </style>

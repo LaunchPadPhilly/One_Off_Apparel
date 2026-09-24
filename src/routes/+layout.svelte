@@ -100,8 +100,10 @@
 		top: 0;
 		bottom: 0;
 		left: 0;
-		background: var(--warm-100);
-		border-radius: var(--radius-md);
+		/* The selected-state pill (Soft blue / Deep blue). */
+		background: var(--nav-indicator);
+		border: 1px solid var(--nav-indicator-border);
+		border-radius: var(--radius-sm);
 		pointer-events: none;
 		z-index: 0;
 	}

@@ -236,19 +236,20 @@
 	}
 
 	// ─── Order colors + title overrides ────────────────────────────────────────
-	// A small palette of hues chosen to sit next to the warm base without clashing.
+	// A small palette of hues chosen to sit next to the blue base without clashing —
+	// mid-dark, similar lightness, each dark enough for white block labels.
 	// Deterministic hash → color assignment gives each order a stable default; the
 	// user can override via the inline edit UI. Overrides live in $state and are not
 	// persisted to the database yet — this pass is design only.
 	const ORDER_COLORS = [
-		'#c96f4a', // rust
-		'#4a8fc9', // sky
-		'#7ba055', // olive
-		'#c9a54a', // gold
-		'#8b5cb0', // plum
-		'#4ab09e', // teal
-		'#c94a7f', // rose
-		'#5a6ba8' // indigo
+		'#2f6fa8', // blue
+		'#2c8577', // teal
+		'#5566c2', // indigo
+		'#8756b5', // violet
+		'#bf4a78', // rose
+		'#b8612f', // copper
+		'#4f8a36', // green
+		'#8f7022' // ochre
 	] as const;
 
 	type OrderOverride = { color?: string; title?: string };
@@ -1305,7 +1306,7 @@
 	}
 
 	.back-link:hover {
-		color: var(--warm-700);
+		color: var(--brand-700);
 	}
 
 	.header-row {
@@ -1340,6 +1341,7 @@
 		margin-left: 0.5rem;
 		background: none;
 		border: none;
+		box-shadow: none;
 		color: inherit;
 		cursor: pointer;
 		font-size: 1rem;
@@ -1358,12 +1360,12 @@
 		padding: 0.65rem 0.85rem;
 		font-size: var(--fs-sm);
 		border: 1px solid var(--border);
-		background: var(--warm-100);
+		background: var(--brand-100);
 		border-radius: var(--radius-sm);
 	}
 
 	.auto-propose-feedback--warn {
-		border-color: var(--warm-300);
+		border-color: var(--brand-300);
 	}
 
 	.meta {
@@ -1421,14 +1423,14 @@
 		padding: 0;
 		font: inherit;
 		font-size: var(--fs-xs);
-		color: var(--warm-700);
+		color: var(--brand-700);
 		cursor: pointer;
 		text-decoration: underline;
 		text-underline-offset: 2px;
 	}
 
 	.tray__bulk:hover {
-		color: var(--warm-500);
+		color: var(--brand-500);
 	}
 
 	.tray__search {
@@ -1444,7 +1446,7 @@
 	.tray__search:focus-visible {
 		outline: none;
 		box-shadow: var(--focus);
-		border-color: var(--warm-500);
+		border-color: var(--brand-500);
 	}
 
 	.tray__list {
@@ -1475,14 +1477,15 @@
 		left: 0;
 		bottom: 0;
 		width: 4px;
-		background: var(--order-color, var(--warm-500));
+		background: var(--order-color, var(--brand-500));
 		border-radius: var(--radius-sm) 0 0 var(--radius-sm);
 	}
 
 	.order__edit-btn {
-		background: none;
-		border: 1px solid var(--border);
-		color: var(--ink-500);
+		background: var(--secondary-bg);
+		border: 1px solid var(--secondary-border);
+		box-shadow: none;
+		color: var(--ink-700);
 		padding: 0.1rem 0.4rem;
 		border-radius: 4px;
 		font-size: var(--fs-xs);
@@ -1493,8 +1496,8 @@
 	}
 
 	.order__edit-btn:hover {
-		color: var(--warm-700);
-		border-color: var(--warm-300);
+		background: var(--secondary-hover);
+		color: var(--ink-900);
 	}
 
 	.order__edit {
@@ -1529,7 +1532,7 @@
 	.order__edit-input:focus-visible {
 		outline: none;
 		box-shadow: var(--focus);
-		border-color: var(--warm-500);
+		border-color: var(--brand-500);
 	}
 
 	.palette {
@@ -1592,7 +1595,7 @@
 	}
 
 	.order__head--toggle:hover {
-		background: var(--warm-50);
+		background: var(--brand-50);
 	}
 
 	.order__head--toggle:focus-visible {
@@ -1643,7 +1646,7 @@
 	.hours-total {
 		font-variant-numeric: tabular-nums;
 		font-weight: 600;
-		color: var(--warm-700);
+		color: var(--brand-700);
 	}
 
 	.line-items {
@@ -1659,14 +1662,14 @@
 		border: 1px solid var(--border);
 		border-radius: var(--radius-sm);
 		padding: 0.4rem 0.55rem;
-		background: var(--warm-50);
+		background: var(--brand-50);
 		cursor: grab;
 		transition: border-color var(--motion-fast) var(--ease-standard),
 			transform var(--motion-fast) var(--ease-standard);
 	}
 
 	.line-item:hover {
-		border-color: var(--warm-300);
+		border-color: var(--brand-300);
 	}
 
 	.line-item:active {
@@ -1706,7 +1709,7 @@
 		font-variant-numeric: tabular-nums;
 		font-size: var(--fs-sm);
 		font-weight: 600;
-		color: var(--warm-700);
+		color: var(--brand-700);
 		flex-shrink: 0;
 	}
 
@@ -1726,9 +1729,9 @@
 		font-size: var(--fs-xs);
 		padding: 0.1rem 0.4rem;
 		border-radius: 999px;
-		background: var(--warm-100);
+		background: var(--brand-100);
 		color: var(--ink-700);
-		border: 1px solid var(--warm-200);
+		border: 1px solid var(--brand-200);
 	}
 
 	.chip--muted {
@@ -1738,14 +1741,14 @@
 	}
 
 	.chip--station {
-		background: var(--warm-500);
-		color: white;
-		border-color: var(--warm-500);
+		background: var(--brand-300);
+		color: var(--on-accent);
+		border-color: var(--brand-400);
 	}
 
 	.chip--placed {
-		background: var(--success-bg, #2f5c3f);
-		color: white;
+		background: var(--success-bg);
+		color: var(--success-fg);
 		border-color: transparent;
 		font-weight: 600;
 	}
@@ -1765,17 +1768,21 @@
 		flex-wrap: wrap;
 	}
 
+	/* Track is a darker tint with an edge; the selected option is a raised
+	   secondary-style pill, so neither blends into the panel behind it. */
 	.segmented {
 		display: inline-flex;
 		gap: 0.2rem;
 		padding: 0.2rem;
-		background: var(--warm-100);
+		background: var(--brand-200);
+		border: 1px solid var(--border);
 		border-radius: var(--radius-md);
 	}
 
 	.segmented__option {
-		border: none;
+		border: 1px solid transparent;
 		background: transparent;
+		box-shadow: none;
 		padding: 0.3rem 0.7rem;
 		border-radius: var(--radius-sm);
 		font-size: var(--fs-sm);
@@ -1791,9 +1798,10 @@
 	}
 
 	.segmented__option--active {
-		background: var(--surface);
-		color: var(--warm-700);
-		box-shadow: var(--shadow-1);
+		background: var(--secondary-bg);
+		border-color: var(--secondary-border);
+		color: var(--ink-900);
+		box-shadow: var(--shadow-flat);
 	}
 
 	.week-nav {
@@ -1810,9 +1818,10 @@
 	}
 
 	.week-nav__arrow {
-		border: 1px solid var(--border);
-		background: var(--surface);
-		color: var(--ink-700);
+		border: 1px solid var(--secondary-border);
+		background: var(--secondary-bg);
+		box-shadow: var(--shadow-flat);
+		color: var(--ink-900);
 		width: 1.9rem;
 		height: 1.9rem;
 		border-radius: var(--radius-sm);
@@ -1827,8 +1836,8 @@
 	}
 
 	.week-nav__arrow:hover:not(:disabled) {
-		border-color: var(--warm-300);
-		color: var(--warm-700);
+		background: var(--secondary-hover);
+		color: var(--ink-900);
 	}
 
 	.week-nav__arrow:disabled {
@@ -1923,8 +1932,9 @@
 		align-items: center;
 		gap: 0.5rem;
 		width: 100%;
-		border: 1px dashed var(--warm-300);
-		background: transparent;
+		border: 1px solid var(--border-strong);
+		background: var(--brand-100);
+		box-shadow: none;
 		color: var(--ink-700);
 		padding: 0.35rem 0.6rem;
 		border-radius: var(--radius-sm);
@@ -1940,9 +1950,9 @@
 	}
 
 	.finishing-toggle:hover {
-		background: var(--warm-100);
-		border-color: var(--warm-500);
-		color: var(--warm-700);
+		background: var(--brand-100);
+		border-color: var(--brand-500);
+		color: var(--brand-700);
 	}
 
 	.finishing-toggle:focus-visible {
@@ -1954,7 +1964,7 @@
 		font-size: 0.85rem;
 		width: 0.9rem;
 		text-align: center;
-		color: var(--warm-500);
+		color: var(--brand-500);
 	}
 
 	.finishing-toggle__label {
@@ -1970,7 +1980,7 @@
 	}
 
 	.finishing-toggle--expanded {
-		background: var(--warm-100);
+		background: var(--brand-100);
 		border-style: solid;
 	}
 
@@ -1997,14 +2007,14 @@
 	.day__axis-track {
 		position: relative;
 		height: 0.5rem;
-		border-top: 1px solid var(--warm-200);
+		border-top: 1px solid var(--brand-200);
 	}
 
 	.bar__track {
 		position: relative;
 		height: 2.25rem;
 		border-radius: var(--radius-sm);
-		background: var(--warm-100);
+		background: var(--brand-100);
 		overflow: visible;
 	}
 
@@ -2012,8 +2022,8 @@
 		position: absolute;
 		inset: 0;
 		width: 100%;
-		background: linear-gradient(180deg, var(--warm-200), var(--warm-100));
-		border: 1px dashed var(--warm-300);
+		background: linear-gradient(180deg, var(--brand-200), var(--brand-100));
+		border: 1px dashed var(--brand-300);
 		border-radius: var(--radius-sm);
 	}
 
@@ -2022,14 +2032,14 @@
 			45deg,
 			transparent,
 			transparent 6px,
-			var(--warm-200) 6px,
-			var(--warm-200) 8px
+			var(--brand-200) 6px,
+			var(--brand-200) 8px
 		);
 		border-style: dotted;
 	}
 
 	.bar__track--drag {
-		outline: 2px dashed var(--warm-500);
+		outline: 2px dashed var(--brand-500);
 		outline-offset: 2px;
 	}
 
@@ -2037,7 +2047,7 @@
 		position: absolute;
 		top: 3px;
 		bottom: 3px;
-		background: var(--block-color, var(--warm-500));
+		background: var(--block-color, var(--brand-500));
 		border: 1px solid rgb(0 0 0 / 20%);
 		border-radius: 0;
 		color: white;
@@ -2119,6 +2129,7 @@
 		background: rgb(0 0 0 / 25%);
 		color: white;
 		border: none;
+		box-shadow: none;
 		width: 1.05rem;
 		height: 1.05rem;
 		border-radius: 50%;
@@ -2235,7 +2246,7 @@
 
 	.placement__details-dot {
 		margin: 0 0.25rem;
-		color: var(--warm-300);
+		color: var(--brand-300);
 	}
 
 	.bar__break {
@@ -2249,7 +2260,7 @@
 			transparent 2px,
 			transparent 6px
 		);
-		background-color: rgb(122 101 88 / 20%);
+		background-color: color-mix(in srgb, var(--ink-500) 20%, transparent);
 		border-left: 1px solid var(--ink-500);
 		border-right: 1px solid var(--ink-500);
 		opacity: 0.55;
@@ -2291,13 +2302,13 @@
 		top: 0;
 		bottom: 0;
 		width: 1px;
-		background: var(--warm-300);
+		background: var(--brand-300);
 		opacity: 0.5;
 	}
 
 	.tick--major {
 		opacity: 1;
-		background: var(--warm-500);
+		background: var(--brand-500);
 	}
 
 	.tick:first-child,

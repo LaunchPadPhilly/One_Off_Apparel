@@ -272,7 +272,7 @@
 	}
 
 	.back-link:hover {
-		color: var(--warm-700);
+		color: var(--brand-700);
 	}
 
 	.layout {
@@ -325,7 +325,7 @@
 	.field select:focus-visible {
 		outline: none;
 		box-shadow: var(--focus);
-		border-color: var(--warm-600);
+		border-color: var(--brand-600);
 	}
 
 	.field textarea {
@@ -355,10 +355,10 @@
 		align-items: baseline;
 		gap: 0.3rem;
 		padding: 0.55rem 0.9rem;
-		border: 1px solid var(--border);
+		border: 1px solid var(--secondary-border);
 		border-radius: 999px;
-		background: var(--surface);
-		color: var(--ink-700);
+		background: var(--secondary-bg);
+		color: var(--ink-900);
 		cursor: pointer;
 		transition: background-color var(--motion-fast) var(--ease-standard),
 			border-color var(--motion-fast) var(--ease-standard),
@@ -373,14 +373,14 @@
 	}
 
 	.chip:hover {
-		border-color: var(--warm-300);
+		border-color: var(--brand-300);
 		color: var(--ink-900);
 	}
 
 	.chip--active {
-		background: var(--warm-600);
-		border-color: var(--warm-600);
-		color: #fff;
+		background: var(--brand-300);
+		border-color: var(--brand-500);
+		color: var(--on-accent);
 	}
 
 	.chip__num {
@@ -455,13 +455,13 @@
 	}
 
 	.calendar__cell--in {
-		background: var(--warm-100);
-		border-color: var(--warm-300);
+		background: var(--brand-100);
+		border-color: var(--brand-300);
 		color: var(--ink-900);
 	}
 
 	.calendar__cell--in.calendar__cell--weekend {
-		background: color-mix(in srgb, var(--warm-100) 55%, transparent);
+		background: color-mix(in srgb, var(--brand-100) 55%, transparent);
 		color: var(--ink-500);
 	}
 
@@ -472,15 +472,15 @@
 	}
 
 	.calendar__cell--start {
-		background: var(--warm-600);
-		border-color: var(--warm-700);
-		color: #fff;
+		background: var(--brand-300);
+		border-color: var(--brand-500);
+		color: var(--on-accent);
 		box-shadow: var(--focus);
 	}
 
 	.calendar__cell--end {
-		background: var(--warm-300);
-		border-color: var(--warm-500);
+		background: var(--brand-200);
+		border-color: var(--brand-400);
 		color: var(--ink-900);
 	}
 
@@ -523,12 +523,12 @@
 	}
 
 	.legend__swatch--in {
-		background: var(--warm-100);
-		border-color: var(--warm-300);
+		background: var(--brand-100);
+		border-color: var(--brand-300);
 	}
 
 	.legend__swatch--weekend {
-		background: color-mix(in srgb, var(--warm-100) 55%, transparent);
+		background: color-mix(in srgb, var(--brand-100) 55%, transparent);
 	}
 
 	.legend__swatch--out {

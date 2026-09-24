@@ -107,7 +107,7 @@
 	     items under Needs attention are resolved. The scheduler can't place what's
 	     missing in the meantime. -->
 	{#if needsReReview}
-		<p class="error re-review" role="status">
+		<p class="re-review" role="status">
 			<strong>Needs re-review:</strong> this order is confirmed but has {data.gaps.blockingCount} open
 			item{data.gaps.blockingCount === 1 ? '' : 's'} (below) — it can't be fully scheduled until they're resolved.
 		</p>
@@ -544,13 +544,33 @@
 		flex-wrap: wrap;
 	}
 
+	/* Amber = "needs attention", matching .badge--warn and the re-review banner. */
 	.needs-attention {
 		margin: 0.4rem 0 0.75rem;
-		padding: 0.65rem 0.85rem;
+		padding: 0.75rem 0.95rem;
 		font-size: 0.9rem;
-		border: 1px solid var(--warm-300);
-		background: var(--warm-100);
+		border: 1px solid color-mix(in srgb, var(--warning-fg) 30%, transparent);
+		border-left: 3px solid var(--warning-fg);
+		background: var(--warning-bg);
+		color: var(--ink-900);
 		border-radius: var(--radius-sm);
+	}
+
+	.needs-attention strong {
+		color: var(--warning-fg);
+	}
+
+	.re-review {
+		padding: 0.75rem 0.95rem;
+		border: 1px solid color-mix(in srgb, var(--warning-fg) 30%, transparent);
+		border-left: 3px solid var(--warning-fg);
+		background: var(--warning-bg);
+		color: var(--ink-900);
+		border-radius: var(--radius-sm);
+	}
+
+	.re-review strong {
+		color: var(--warning-fg);
 	}
 
 	.needs-attention ul {

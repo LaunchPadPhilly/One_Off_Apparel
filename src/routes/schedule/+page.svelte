@@ -289,13 +289,13 @@
 	}
 
 	.draft-card:hover {
-		border-color: var(--warm-300);
-		background: var(--warm-100);
+		border-color: var(--brand-300);
+		background: var(--brand-100);
 	}
 
 	.draft-card--selected {
-		border-color: var(--warm-500);
-		background: var(--warm-100);
+		border-color: var(--brand-500);
+		background: var(--brand-100);
 	}
 
 	/* Checkbox sits in its own column so it never becomes part of the link's click
@@ -311,7 +311,7 @@
 	.draft-card__select input {
 		width: 1.05rem;
 		height: 1.05rem;
-		accent-color: var(--warm-500);
+		accent-color: var(--brand-500);
 		cursor: pointer;
 	}
 
@@ -338,7 +338,7 @@
 	}
 
 	.draft-toolbar--active {
-		border-bottom-color: var(--warm-500);
+		border-bottom-color: var(--brand-500);
 	}
 
 	.draft-toolbar__select-all {
@@ -351,14 +351,14 @@
 	}
 
 	.draft-toolbar__select-all input {
-		accent-color: var(--warm-500);
+		accent-color: var(--brand-500);
 		cursor: pointer;
 	}
 
 	.draft-toolbar__count {
 		font-size: 0.85rem;
 		font-weight: 600;
-		color: var(--warm-700);
+		color: var(--brand-700);
 	}
 
 	.draft-toolbar__form {
