@@ -3,7 +3,7 @@ import { prisma } from '$lib/server/prisma';
 import { hasGrantedScope, requireScopePage } from '$lib/server/auth/guards';
 import { startAssignment } from '$lib/server/schedule/startAssignment';
 import { stopAssignment } from '$lib/server/schedule/stopAssignment';
-import { listDrafts } from '$lib/server/schedule/draft';
+import { deleteDrafts, listDrafts } from '$lib/server/schedule/draft';
 import { proposeIntoNewDraft } from '$lib/server/schedule/proposeIntoNewDraft';
 import { ScheduleAssignmentStatus } from '../../../prisma/generated/prisma/enums';
 import type { Actions, PageServerLoad } from './$types';
@@ -75,6 +75,25 @@ export const actions: Actions = {
 		// live snapshot is possible today); this just tells the draft page what to show
 		// immediately after creation, not a new persistence mechanism for that gap.
 		throw redirect(303, `/schedule/drafts/${result.draftId}?placed=${result.placedCount}&atRisk=${result.atRiskCount}`);
+	},
+	// Bulk delete drafts selected via the checkboxes on the drafts list. Same audit
+	// entries and same still-proposed-assignments cleanup as the per-draft delete
+	// (see deleteDrafts in $lib/server/schedule/draft.ts) — this is one endpoint over
+	// one transaction, not a client-side loop of the per-draft form action, so a
+	// partial failure rolls back rather than leaving half the batch deleted.
+	deleteDrafts: async ({ request, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const data = await request.formData();
+		const ids = data.getAll('draftId').filter((v): v is string => typeof v === 'string' && v.length > 0);
+		if (ids.length === 0) return fail(400, { message: 'Select at least one draft to delete.' });
+
+		let deleted: number;
+		try {
+			deleted = await deleteDrafts(ids, user.email);
+		} catch (error) {
+			return fail(500, { message: (error as Error).message });
+		}
+		return { deleted };
 	},
 	start: async ({ request, locals, url }) => {
 		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);

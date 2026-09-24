@@ -7,6 +7,49 @@
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
+
+	// Draft ids selected via the per-card checkboxes. Not persisted across reloads
+	// — this is one-off cleanup, not a saved view — so localStorage is deliberately
+	// skipped. `enhance`'s post-submit reset() clears it when the delete succeeds.
+	let selectedDraftIds = $state<string[]>([]);
+
+	// Drafts still exist on the server; a stale selection (a draft another session
+	// deleted between load and submit) is filtered out here so the count and the
+	// submitted form both match what's actually deletable.
+	let liveSelected = $derived(
+		selectedDraftIds.filter((id) => data.drafts.some((d) => d.id === id))
+	);
+	let allDraftIds = $derived(data.drafts.map((d) => d.id));
+	let allSelected = $derived(
+		allDraftIds.length > 0 && allDraftIds.every((id) => liveSelected.includes(id))
+	);
+
+	function toggleSelectAll() {
+		selectedDraftIds = allSelected ? [] : [...allDraftIds];
+	}
+
+	function clearSelection() {
+		selectedDraftIds = [];
+	}
+
+	// Simple browser confirm() before the destructive submit — matches the pattern
+	// on the single-draft page (drafts/[id]/+page.svelte's Delete button). `cancel`
+	// stops the submission; the returned callback clears the local selection after
+	// SvelteKit re-runs load() so the server's fresh drafts list drives the UI.
+	function confirmBulkDelete({ cancel }: { cancel: () => void }) {
+		const n = liveSelected.length;
+		const ok = confirm(
+			`Delete ${n} draft${n === 1 ? '' : 's'}? Their proposed placements will be discarded. This cannot be undone.`
+		);
+		if (!ok) {
+			cancel();
+			return;
+		}
+		return async ({ update }: { update: (options?: { reset?: boolean }) => Promise<void> }) => {
+			await update({ reset: false });
+			selectedDraftIds = [];
+		};
+	}
 </script>
 
 <svelte:head>
@@ -54,9 +97,68 @@
 				{/if}
 			</p>
 		{:else}
+			<!-- Bulk selection toolbar. Only interactive to users with SCHEDULE_WRITE
+			     (canCreate mirrors that scope for this route). Renders in one of two
+			     states so the toolbar doesn't shift the drafts list up and down as
+			     rows are selected: a resting row with "Select all" / count, or an
+			     active row with the delete form. -->
+			{#if data.canCreate}
+				<div class="draft-toolbar" class:draft-toolbar--active={liveSelected.length > 0}>
+					<label class="draft-toolbar__select-all">
+						<input
+							type="checkbox"
+							checked={allSelected}
+							indeterminate={liveSelected.length > 0 && !allSelected}
+							onchange={toggleSelectAll}
+						/>
+						<span>Select all</span>
+					</label>
+					{#if liveSelected.length > 0}
+						<span class="draft-toolbar__count">
+							{liveSelected.length} selected
+						</span>
+						<form
+							method="POST"
+							action="?/deleteDrafts"
+							use:enhance={confirmBulkDelete}
+							class="draft-toolbar__form"
+						>
+							{#each liveSelected as id (id)}
+								<input type="hidden" name="draftId" value={id} />
+							{/each}
+							<button
+								type="button"
+								class="button button--secondary"
+								onclick={clearSelection}
+							>
+								Clear
+							</button>
+							<button type="submit" class="button button--danger" use:pressable>
+								Delete {liveSelected.length} draft{liveSelected.length === 1 ? '' : 's'}
+							</button>
+						</form>
+					{/if}
+				</div>
+			{/if}
 			<ul class="draft-list">
 				{#each data.drafts as draft (draft.id)}
-					<li class="draft-card">
+					{@const isSelected = liveSelected.includes(draft.id)}
+					<li class="draft-card" class:draft-card--selected={isSelected}>
+						{#if data.canCreate}
+							<!-- Checkbox is a sibling of the anchor, NOT nested inside it — an
+							     anchor would otherwise swallow the click and navigate instead of
+							     toggling. Siblings don't bubble to each other so no
+							     stopPropagation is needed. -->
+							<label class="draft-card__select">
+								<input
+									type="checkbox"
+									name="draft-select"
+									aria-label="Select {draft.name}"
+									bind:group={selectedDraftIds}
+									value={draft.id}
+								/>
+							</label>
+						{/if}
 						<a href="/schedule/drafts/{draft.id}" class="draft-card__link">
 							<div class="draft-card__head">
 								<span class="draft-card__name">{draft.name}</span>
@@ -70,6 +172,11 @@
 					</li>
 				{/each}
 			</ul>
+			{#if form && 'deleted' in form && typeof form.deleted === 'number'}
+				<p class="muted draft-list__feedback">
+					Deleted {form.deleted} draft{form.deleted === 1 ? '' : 's'}.
+				</p>
+			{/if}
 		{/if}
 	</section>
 
@@ -175,7 +282,10 @@
 		border: 1px solid var(--border);
 		border-radius: var(--radius-sm);
 		background: var(--surface);
-		transition: border-color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+		display: flex;
+		align-items: stretch;
+		transition: border-color var(--motion-fast) var(--ease-standard),
+			background-color var(--motion-fast) var(--ease-standard);
 	}
 
 	.draft-card:hover {
@@ -183,11 +293,84 @@
 		background: var(--brand-100);
 	}
 
+	.draft-card--selected {
+		border-color: var(--warm-500);
+		background: var(--warm-100);
+	}
+
+	/* Checkbox sits in its own column so it never becomes part of the link's click
+	   target — clicking the card away from the checkbox still navigates as before. */
+	.draft-card__select {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0 0.5rem 0 0.85rem;
+		cursor: pointer;
+	}
+
+	.draft-card__select input {
+		width: 1.05rem;
+		height: 1.05rem;
+		accent-color: var(--warm-500);
+		cursor: pointer;
+	}
+
 	.draft-card__link {
+		flex: 1;
 		display: block;
 		padding: 0.85rem 1rem;
 		color: inherit;
 		text-decoration: none;
+		min-width: 0;
+	}
+
+	/* Bulk-actions toolbar above the drafts grid. Stays visible even with nothing
+	   selected (Select all + count) so the affordance is discoverable, and swaps
+	   in the delete form once at least one row is checked. */
+	.draft-toolbar {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+		padding: 0.5rem 0.15rem;
+		margin-bottom: 0.6rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.draft-toolbar--active {
+		border-bottom-color: var(--warm-500);
+	}
+
+	.draft-toolbar__select-all {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.85rem;
+		color: var(--ink-500);
+		cursor: pointer;
+	}
+
+	.draft-toolbar__select-all input {
+		accent-color: var(--warm-500);
+		cursor: pointer;
+	}
+
+	.draft-toolbar__count {
+		font-size: 0.85rem;
+		font-weight: 600;
+		color: var(--warm-700);
+	}
+
+	.draft-toolbar__form {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		margin-left: auto;
+	}
+
+	.draft-list__feedback {
+		margin-top: 0.75rem;
+		font-size: 0.85rem;
 	}
 
 	.draft-card__head {
