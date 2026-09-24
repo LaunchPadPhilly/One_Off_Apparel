@@ -127,7 +127,9 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 	try {
 		response = await client.messages.create({
 			model: MODEL,
-			max_tokens: 4096,
+			// Room for large orders: Job 100128 (24 line items) needs ~3.7k output tokens,
+			// right at the old 4096 cap, and intermittently got cut off mid-list (2026-09-23).
+			max_tokens: 16000,
 			system: SYSTEM_PROMPT,
 			tools: [extractionTool],
 			tool_choice: { type: 'tool', name: extractionTool.name },
@@ -143,6 +145,12 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 		});
 	} catch (error) {
 		throw new PdfExtractionError(`Claude API call failed while extracting "${filename}"`, error);
+	}
+
+	// A cut-off response has a partial tool input (typically no lineItems at all), which
+	// would otherwise surface as a misleading "failed schema validation" error.
+	if (response.stop_reason === 'max_tokens') {
+		throw new PdfExtractionError(`"${filename}" is too large to extract in one response (Claude's answer was cut off). Try importing it again; if it keeps happening, the order may need splitting.`);
 	}
 
 	const toolUse = response.content.find((block) => block.type === 'tool_use');
@@ -181,6 +189,12 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 		return { ...validated, confidenceFlags };
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
-		throw new PdfExtractionError(`"${filename}" extracted but failed schema validation even after dropping bad line items: ${detail}`, error);
+		// Include why line items were dropped — otherwise an order that loses every line
+		// item just reports "expected array to have >=1 items" with no hint of the cause.
+		const dropped = confidenceFlags.filter((flag) => flag.startsWith('Excluded "'));
+		throw new PdfExtractionError(
+			`"${filename}" extracted but failed schema validation even after dropping bad line items: ${detail}${dropped.length ? ` — dropped: ${dropped.join(' | ')}` : ''}`,
+			error
+		);
 	}
 }
