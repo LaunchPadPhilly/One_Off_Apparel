@@ -5,6 +5,7 @@
 	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments } from '$lib/schedule/shift';
 	import { computeInsertRank, insertAndRepack, repackOrdered } from '$lib/schedule/repackDay';
 	import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
+	import { isFinishingKind } from '$lib/schedule/stationKinds';
 	import { deserialize } from '$app/forms';
 	import type { PageProps } from './$types';
 
@@ -12,21 +13,24 @@
 
 	let search = $state('');
 
-	// The finishing stations — matte / relabel / fold & bag / hang tags / wovens
+	// Stations are admin-managed (2026-09-25): rows are keyed by the station's unique
+	// `name`, labelled with its editable `label`, and restricted by its `kind` (which
+	// formula it runs — see $lib/schedule/stationKinds.ts). Two auto presses are two
+	// rows of the same kind; a screen print job may go on either.
+	const stationByName = $derived(new Map(data.stations.map((station) => [station.name, station])));
+	function kindOf(stationName: string): string | null {
+		return stationByName.get(stationName)?.kind ?? null;
+	}
+	function rowLabel(stationName: string): string {
+		return stationByName.get(stationName)?.label ?? stationLabel(stationName);
+	}
+
+	// Finishing-kind stations — matte / relabel / fold & bag / hang tags / wovens
 	// — collapse under one shared "Finishing" group in the day timeline. Five
 	// mostly-empty rows per day would dominate the board when most orders touch
-	// only decoration + one finish. Kept in sync with KNOWN_STATIONS in
-	// $lib/schedule/defaultCapacity.ts; a station name not listed here is
-	// treated as a top-level production row.
-	const FINISHING_STATIONS = new Set<string>([
-		'matte_finish',
-		'fold_bag',
-		'hang_tags',
-		'printed_relabel',
-		'wovens'
-	]);
+	// only decoration + one finish.
 	function isFinishing(stationName: string): boolean {
-		return FINISHING_STATIONS.has(stationName);
+		return isFinishingKind(kindOf(stationName));
 	}
 
 	const FINISHING_COLLAPSED_KEY = `${storageKeyPrefix}scheduleFinishingCollapsed`;
@@ -618,7 +622,7 @@
 		// the dragging item's expected station — the not-allowed cursor appears and
 		// ondrop never fires. `activeExpectedStation === null` means we don't yet
 		// know (e.g. an uncategorized "Patch Install") so we don't restrict.
-		if (activeExpectedStation && activeExpectedStation !== stationName) {
+		if (activeExpectedStation && activeExpectedStation !== kindOf(stationName)) {
 			event.dataTransfer!.dropEffect = 'none';
 			return;
 		}
@@ -662,9 +666,9 @@
 			// same rule enforced at drop-time in case the drag-over guard was bypassed).
 			const movingItem = findLineItem(existing.lineItemId);
 			const movingStation = movingItem ? expectedStationFor(movingItem) : null;
-			if (movingStation && movingStation !== stationName) {
+			if (movingStation && movingStation !== kindOf(stationName)) {
 				boardNotice = {
-					text: `${stepChip(movingItem!)} belongs on ${stationDisplayLabel(movingStation)}, not ${stationDisplayLabel(stationName)}.`,
+					text: `${stepChip(movingItem!)} belongs on a ${stationDisplayLabel(movingStation)} station, not ${rowLabel(stationName)}.`,
 					tone: 'warn'
 				};
 				return;
@@ -726,10 +730,10 @@
 		// Row-restriction on a fresh drop from the sidebar (same rule as the move
 		// branch above and the ondragover guard). A payload from an older tab may not
 		// carry expectedStation; treat that as "unknown" and fall through.
-		if (payload.expectedStation && payload.expectedStation !== stationName) {
+		if (payload.expectedStation && payload.expectedStation !== kindOf(stationName)) {
 			const item = findLineItem(payload.lineItemId);
 			boardNotice = {
-				text: `${item ? stepChip(item) : 'This job'} belongs on ${stationDisplayLabel(payload.expectedStation)}, not ${stationDisplayLabel(stationName)}.`,
+				text: `${item ? stepChip(item) : 'This job'} belongs on a ${stationDisplayLabel(payload.expectedStation)} station, not ${rowLabel(stationName)}.`,
 				tone: 'warn'
 			};
 			return;
@@ -1019,7 +1023,7 @@
 												<span class="chip chip--muted">{item.apparelColor}</span>
 											{/if}
 											{#if stationName}
-												<span class="chip chip--station">{stationLabel(stationName)}</span>
+												<span class="chip chip--station">{stationDisplayLabel(stationName)}</span>
 											{/if}
 										</div>
 									</li>
@@ -1037,7 +1041,7 @@
 		<!-- Right: day-by-day timeline. Every station is shown at once — a day
 		     card renders one row per station so the whole board is visible with
 		     no tab-switching. Rows are ordered by data.stationNames (server-side
-		     station order, or KNOWN_STATIONS as the fallback). -->
+		     admin sortOrder from Settings → Stations; archived stations are not shown). -->
 		<section class="main">
 			<div class="days-toolbar">
 				<div class="segmented" role="tablist" aria-label="Days view">
@@ -1108,16 +1112,16 @@
 							{#snippet stationRow(date: string, station: string)}
 								{@const rowPlacements = placementsForDay(date, station)}
 								{@const isDragTarget = dragOverKey === trackKey(date, station)}
-								{@const isBlocked = activeExpectedStation !== null && activeExpectedStation !== station}
+								{@const isBlocked = activeExpectedStation !== null && activeExpectedStation !== kindOf(station)}
 								<div
 									class="station-row"
 									class:station-row--empty={rowPlacements.length === 0}
 									class:station-row--blocked={isBlocked}
 								>
-									<div class="station-row__label" title={stationLabel(station)}>
-										{stationLabel(station)}
+									<div class="station-row__label" title={rowLabel(station)}>
+										{rowLabel(station)}
 									</div>
-									<div class="station-row__bar" aria-label="{stationLabel(station)} on {date}">
+									<div class="station-row__bar" aria-label="{rowLabel(station)} on {date}">
 										<div
 											class="bar__track"
 											class:bar__track--drag={isDragTarget}

@@ -8,7 +8,7 @@ import {
 	OrderStatus
 } from '../../../../prisma/generated/prisma/enums';
 import { ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
-import { KNOWN_STATIONS, DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import type { DateRange } from './types';
 
 function startOfToday(): Date {
@@ -131,35 +131,42 @@ function* enumerateDays(range: DateRange): Generator<string> {
 }
 
 /**
- * Every station's open capacity within a date range. A real CapacityCalendar row
- * always wins; anywhere one doesn't exist yet, this fills the gap with
- * DEFAULT_STATION_DAY_HOURS for each known station (see
- * defaultCapacity.ts's doc comment for exactly why and what business assumption that
- * represents) — otherwise the deterministic engine would see literally zero capacity
- * anywhere and flag every job at risk, even though the drafts workspace's own timeline
- * already displays that same default as if it were real. Ensuring a real Station row
- * exists for each known name (upsert-on-read, same idempotent pattern the drag-and-drop
- * workspace's own ensureStation() already uses) is what lets a default slot reference a
- * real id.
+ * Open capacity within a date range, for the automatic engine only (every caller is a
+ * propose/simulate run). Covers every station an admin has set up at
+ * /settings?screen=stations that is active (not archived) and open to automatic
+ * scheduling (`autoSchedule` — false for e.g. the manual press, which people choose per
+ * design). A real CapacityCalendar row always wins; anywhere one doesn't exist yet,
+ * this fills the gap with DEFAULT_STATION_DAY_HOURS (see defaultCapacity.ts's doc
+ * comment for exactly why and what business assumption that represents) — otherwise
+ * the deterministic engine would see literally zero capacity anywhere and flag every
+ * job at risk, even though the drafts workspace's own timeline already displays that
+ * same default as if it were real.
+ *
+ * This used to upsert a hard-coded list of station names on every read; it no longer
+ * creates stations at all (2026-09-25), since that would resurrect a station an admin
+ * archived (e.g. DTG, which isn't done in house).
  */
 export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
+	const stations = await prisma.station.findMany({
+		where: { archivedAt: null, autoSchedule: true },
+		select: { id: true, name: true, kind: true }
+	});
+	const stationIds = stations.map((station) => station.id);
+
 	// range.from/to are z.iso.date() strings; Prisma's runtime validation needs a real
 	// Date (see getSchedule.ts for why they aren't Date-typed at the schema level).
 	const rows = await prisma.capacityCalendar.findMany({
-		where: { date: { gte: new Date(range.from), lte: new Date(range.to) } },
-		include: { station: { select: { id: true, name: true } } }
+		where: { stationId: { in: stationIds }, date: { gte: new Date(range.from), lte: new Date(range.to) } },
+		include: { station: { select: { id: true, name: true, kind: true } } }
 	});
 
 	const realSlots: CapacitySlot[] = rows.map((row) => ({
 		stationId: row.station.id,
 		stationName: row.station.name,
+		stationKind: row.station.kind,
 		date: row.date,
 		availableHrs: row.availableHrs
 	}));
-
-	const stations = await Promise.all(
-		KNOWN_STATIONS.map((name) => prisma.station.upsert({ where: { name }, create: { name, type: 'production' }, update: {} }))
-	);
 
 	const existingKeys = new Set(realSlots.map((slot) => `${slot.stationId}__${iso(slot.date)}`));
 	const defaultSlots: CapacitySlot[] = [];
@@ -167,7 +174,7 @@ export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
 		for (const day of enumerateDays(range)) {
 			const key = `${station.id}__${day}`;
 			if (existingKeys.has(key)) continue;
-			defaultSlots.push({ stationId: station.id, stationName: station.name, date: new Date(`${day}T00:00:00Z`), availableHrs: DEFAULT_STATION_DAY_HOURS });
+			defaultSlots.push({ stationId: station.id, stationName: station.name, stationKind: station.kind, date: new Date(`${day}T00:00:00Z`), availableHrs: DEFAULT_STATION_DAY_HOURS });
 		}
 	}
 

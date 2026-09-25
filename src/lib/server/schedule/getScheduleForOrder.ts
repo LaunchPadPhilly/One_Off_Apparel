@@ -32,7 +32,7 @@ export async function getScheduleForOrder(orderId: string) {
 		// something readable like "Screen print — Front logo" instead of just IDs).
 		include: {
 			lineItem: { select: { id: true, design: true, itemType: true, decorationType: true, finishingStep: true } },
-			station: { select: { id: true, name: true } }
+			station: { select: { id: true, name: true, label: true } }
 		},
 		// Sort by date first, then by the job's position within that day's queue at its
 		// station (sequenceOrder), so the results read top-to-bottom in the same order

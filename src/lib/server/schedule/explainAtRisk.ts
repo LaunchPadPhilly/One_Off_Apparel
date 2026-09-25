@@ -1,6 +1,7 @@
 import { prisma } from '$lib/server/prisma';
 import { DEPENDENCY_REASON_PREFIX } from '$lib/server/engine/proposeSchedule';
 import type { AtRiskFlag } from '$lib/server/engine/types';
+import { stationKindLabel } from '$lib/schedule/stationKinds';
 
 /**
  * Translates propose_schedule's at_risk flags into something Toby or Nate can actually
@@ -122,7 +123,10 @@ export async function groupAtRiskForDisplay(atRisk: readonly AtRiskFlag[]): Prom
 			// "no open slot" message — the formula and job data are both fine, there's
 			// just no available station capacity to actually place the job into.
 			category = 'capacity';
-			reason = `No open production capacity for "${flag.requiredStation}" before this job's due date — capacity hasn't been set up for that station yet.`;
+			// requiredStation is a station kind (stationKinds.ts) — any active,
+			// auto-scheduled station of that kind could have taken it, so the message
+			// names the kind, not one machine.
+			reason = `No open capacity on any ${stationKindLabel(flag.requiredStation)} station before this job's due date — either every one is full, or none is set up (or all are archived / manual-only) in Settings → Stations.`;
 		}
 
 		// Jobs get grouped together only if they share the SAME category, station, AND

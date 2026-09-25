@@ -24,7 +24,7 @@ export async function getReportData(range: { from: string; to: string }) {
 
 	const completedAssignments = await prisma.scheduleAssignment.findMany({
 		where: { status: ScheduleAssignmentStatus.COMPLETE, completedAt: { gte: from, lte: to } },
-		include: { lineItem: { select: { design: true } }, station: { select: { id: true, name: true } } }
+		include: { lineItem: { select: { design: true } }, station: { select: { id: true, name: true, label: true } } }
 	});
 
 	const actuals = await prisma.actual.findMany({ where: { completedAt: { gte: from, lte: to } } });
@@ -38,7 +38,7 @@ export async function getReportData(range: { from: string; to: string }) {
 			return {
 				lineItemId: assignment.lineItemId,
 				design: assignment.lineItem.design,
-				stationName: assignment.station.name,
+				stationName: assignment.station.label,
 				estimatedHours: assignment.estimatedHours,
 				actualHours: actual.actualHours,
 				varianceHours: actual.actualHours - assignment.estimatedHours

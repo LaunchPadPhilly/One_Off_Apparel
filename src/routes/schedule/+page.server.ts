@@ -24,7 +24,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			where: { status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] } },
 			include: {
 				lineItem: { select: { id: true, design: true, itemType: true, decorationType: true, finishingStep: true, orderId: true, status: true } },
-				station: { select: { id: true, name: true } }
+				station: { select: { id: true, name: true, label: true } }
 			},
 			orderBy: [{ stationId: 'asc' }, { sequenceOrder: 'asc' }]
 		}),

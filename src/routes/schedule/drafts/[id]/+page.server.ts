@@ -5,7 +5,7 @@ import { checkFinisherPlacement, repackDraftDays } from '$lib/server/schedule/dr
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
-import { KNOWN_STATIONS, DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 import type { Prisma } from '../../../../../prisma/generated/prisma/client';
 import {
@@ -33,16 +33,19 @@ function startOfToday(): Date {
 	return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
-async function ensureStation(name: string) {
-	// Interactive placements can name a station that has no row yet — the
-	// activeStation defaults to the first `KNOWN_STATIONS` even when the
-	// stations table is empty. Upsert-on-write keeps the drop path working
-	// on a fresh database.
-	return prisma.station.upsert({
-		where: { name },
-		create: { name, type: 'production' },
-		update: {}
-	});
+// Stations are admin-managed (/settings?screen=stations, 2026-09-25): a drop may only
+// target an existing, non-archived one. This used to upsert-on-write, which would
+// have silently recreated a station an admin archived.
+function findActiveStation(name: string) {
+	return prisma.station.findFirst({ where: { name, archivedAt: null }, select: { id: true, name: true, label: true, kind: true } });
+}
+
+// Same rule the board's drag-over guard applies: a job may only land on a station of
+// the kind its type maps to. `expectedStationFor` returns null for an as-yet-
+// uncategorized type; we don't restrict those.
+function kindMismatchMessage(expected: string | null, station: { label: string; kind: string }): string | null {
+	if (!expected || expected === station.kind) return null;
+	return `This job belongs on a ${stationDisplayLabel(expected)} station, not ${station.label}.`;
 }
 
 /**
@@ -137,7 +140,11 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			include: { lineItems: { orderBy: { id: 'asc' } } },
 			orderBy: [{ internalDueDate: 'asc' }, { createdAt: 'desc' }]
 		}),
-		prisma.station.findMany({ orderBy: { name: 'asc' } }),
+		prisma.station.findMany({
+			where: { archivedAt: null },
+			orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }],
+			select: { id: true, name: true, label: true, kind: true, autoSchedule: true }
+		}),
 		prisma.capacityCalendar.findMany({
 			where: { date: { gte: draft.startDate, lte: endDate } }
 		}),
@@ -158,9 +165,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	for (let i = 0; i < draft.weeks * 7; i++) {
 		days.push(iso(addDays(startIso, i)));
 	}
-	const stationNames = stations.length
-		? stations.map((station) => station.name)
-		: [...KNOWN_STATIONS];
+	// Row order is the admin's (sortOrder, then label). No fallback list any more —
+	// the migration seeds the original stations, and an empty list means an admin
+	// archived them all.
+	const stationNames = stations.map((station) => station.name);
 	const capacityMap = new Map<string, number>();
 	for (const row of capacityRows) {
 		capacityMap.set(`${row.stationId}:${iso(row.date)}`, row.availableHrs);
@@ -240,6 +248,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			status: a.status
 		})),
 		stationNames,
+		// name → display label / formula kind, for the board's row labels, the
+		// finishing-group split and the drop restriction.
+		stations: stations.map((station) => ({ name: station.name, label: station.label, kind: station.kind, autoSchedule: station.autoSchedule })),
 		capacity,
 		defaultStationDayHours: DEFAULT_STATION_DAY_HOURS
 	};
@@ -309,24 +320,20 @@ export const actions: Actions = {
 			return fail(400, { message: "This order's due date has already passed — it can't be scheduled until the due date is corrected." });
 		}
 
-		// Row restriction: an embroidery item can only land on the `embroidery` row, a
-		// finishing step only on its own finishing row, and so on. Same rule the
-		// draft-board sidebar and drag-over guard enforce, mirrored here so a stale
-		// browser tab or a hand-crafted POST can't slip past it. `expectedStationFor`
-		// returns null for an as-yet-uncategorized type; we don't restrict those.
-		const expected = expectedStationFor(lineItem);
-		if (expected && expected !== stationName) {
-			return fail(400, {
-				message: `This job belongs on ${stationDisplayLabel(expected)}, not ${stationDisplayLabel(stationName)}.`
-			});
-		}
+		const station = await findActiveStation(stationName);
+		if (!station) return fail(400, { message: 'That station no longer exists (it may have been archived in Settings → Stations). Reload the board.' });
+
+		// Row restriction: an embroidery item can only land on an embroidery station, a
+		// finishing step only on its own kind of finishing station, and so on. Same rule
+		// the draft-board sidebar and drag-over guard enforce, mirrored here so a stale
+		// browser tab or a hand-crafted POST can't slip past it.
+		const mismatch = kindMismatchMessage(expectedStationFor(lineItem), station);
+		if (mismatch) return fail(400, { message: mismatch });
 
 		// A finisher has to start after the job(s) it waits on end — refused, not snapped
 		// (2026-09-23 decision). See draftDependencies.ts.
 		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, lineItemId, date, Math.max(15, Math.round(hours * 60)));
 		if (dependencyProblem) return fail(400, { message: dependencyProblem });
-
-		const station = await ensureStation(stationName);
 
 		// One transaction so a make-room-then-insert-then-repack sequence can't leave
 		// a half-shifted day if any step fails mid-way through.
@@ -386,20 +393,17 @@ export const actions: Actions = {
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
 
+		const station = await findActiveStation(stationName);
+		if (!station) return fail(400, { message: 'That station no longer exists (it may have been archived in Settings → Stations). Reload the board.' });
+
 		// Row restriction on move — same rule as placeAssignment above. Prevents a
 		// placed embroidery block from being dragged onto a finishing row (or vice
 		// versa) via a hand-crafted POST.
-		const expected = expectedStationFor(existing.lineItem);
-		if (expected && expected !== stationName) {
-			return fail(400, {
-				message: `This job belongs on ${stationDisplayLabel(expected)}, not ${stationDisplayLabel(stationName)}.`
-			});
-		}
+		const mismatch = kindMismatchMessage(expectedStationFor(existing.lineItem), station);
+		if (mismatch) return fail(400, { message: mismatch });
 
 		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, existing.lineItemId, date, Math.max(15, Math.round(existing.estimatedHours * 60)));
 		if (dependencyProblem) return fail(400, { message: dependencyProblem });
-
-		const station = await ensureStation(stationName);
 
 		const result = await prisma.$transaction(async (tx) => {
 			// Make room at the new rank first (excluding the moving row itself, in case

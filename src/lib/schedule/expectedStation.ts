@@ -3,9 +3,12 @@ import {
 	FinishingStep,
 	LineItemType
 } from '../../../prisma/generated/prisma/enums';
+import { stationKindLabel } from './stationKinds';
 
 /**
- * The station a line item is allowed to be placed on. Same value the engine's
+ * The station *kind* (stationKinds.ts) a line item is allowed to be placed on — any
+ * active station of that kind qualifies (2026-09-25; before admin-managed stations
+ * there was exactly one station per kind and this was its name). Same value the engine's
  * estimate_hours picks per branch (see estimateHours.ts's `station:` returns), but
  * computed straight from the line item's type — no formula, no runtime data required.
  * Both client and server import this so the draft board's drop-restriction rule
@@ -54,7 +57,7 @@ export function expectedStationFor(item: {
 	return null;
 }
 
-/** A human-readable label for the mismatch refusal message on the board. */
-export function stationDisplayLabel(name: string): string {
-	return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+/** A human-readable label for a station kind, for the board's mismatch refusal message. */
+export function stationDisplayLabel(kind: string): string {
+	return stationKindLabel(kind);
 }

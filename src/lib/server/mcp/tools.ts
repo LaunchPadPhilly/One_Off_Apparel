@@ -105,7 +105,7 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		name: 'get_schedule',
 		description:
 			"Looks up what's currently scheduled (approved and beyond — not draft proposals) in a date range, " +
-			"optionally for one station. Example question: 'what's running at screen_print_auto next week?' → " +
+			"optionally for one station. Example question: 'what's running on Screen Print Auto 1 next week?' → " +
 			"{ from: '2026-09-15', to: '2026-09-19', stationId: '...' }. Returns { assignments }.",
 		inputSchema: {
 			from: z.iso.date(),

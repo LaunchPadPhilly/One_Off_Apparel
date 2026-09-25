@@ -197,7 +197,7 @@
 				<tbody>
 					{#each data.assignments as assignment (assignment.id)}
 						<tr>
-							<td>{assignment.station.name}</td>
+							<td>{assignment.station.label}</td>
 							<td>{assignment.lineItem.design}</td>
 							<td>{assignment.date}</td>
 							<td><span class="badge">{assignment.status}</span></td>
