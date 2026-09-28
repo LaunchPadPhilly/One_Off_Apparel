@@ -661,10 +661,24 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     (person X unavailable today, a rush order, …) via MCP tools, the deterministic
     engine re-plans, and Claude reports what changed. Per the non-negotiables, Claude
     never computes the schedule itself and the re-plan is a proposal a human approves.
-  - **Editable formulas.** Admins can edit the formula numbers in settings (e.g. rates
-    per hour as the team gets faster), industry-standard "rate table" style rather
-    than free-form formulas. Already-approved assignments keep the hours they were
-    approved with; only new plans use new numbers.
+  - **Editable formulas — done (2026-09-28).** `/settings?screen=formulas` (admin
+    only) exposes every per-station rate and factor as a plain number input —
+    screen-print initial units and rate tables (< 5 vs 5+ screens, all three weight
+    classes) plus setup terms, embroidery thread-change minutes and both flat and
+    cap plans (five factors each), and every finishing step's units-per-hour /
+    matte numerator / etc. Storage is one singleton `FormulaSettings` row holding a
+    JSON blob of overrides; every field missing from the row falls back to
+    `DEFAULT_FORMULAS` in `$lib/server/engine/formulaSettings.ts`, so a fresh install
+    with no row still works. `estimateHours.ts` reads live values via
+    `currentFormulas()` (module-level cache, refreshed at server startup by
+    hooks.server.ts and on every save; TTL-refreshed lazily on estimate calls so
+    multi-container ECS staleness is bounded to ~30s). Already-approved
+    assignments keep the hours they were approved with (that's structural — 
+    `ScheduleAssignment.estimatedHours` is stored at placement time and never
+    recomputed); every live-computed estimate (Orders page, drafts board,
+    `proposeSchedule`) uses the current formulas. DTF / DTG / OTHER aren't in the
+    settings page because they have no formula — hours are entered per line item
+    on the order page instead.
   - **Finisher dependencies — done (2026-09-28).** Only matte (after its print)
     and fold & bag (after everything) wait; see `depends_on` in the `line_items` table.
   - **Weekly screen count — done (2026-09-28).** "Screens to prep" = the sum of

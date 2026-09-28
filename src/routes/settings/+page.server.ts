@@ -16,6 +16,7 @@ import {
 	updateStationSchema
 } from '$lib/server/config/stations';
 import { WorkerConfigError, createWorker, listWorkers, setWorkerArchived, updateWorker, updateWorkerSchema, workerSchema } from '$lib/server/config/workers';
+import { DEFAULT_FORMULAS, currentFormulas, saveFormulas, type FormulaSettings } from '$lib/server/engine/formulaSettings';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ locals, url }) => {
@@ -45,7 +46,14 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		})),
 		// Shop config (Stations / People tabs, 2026-09-25) — admins only; null hides
 		// the tabs. The actions below re-check admin on every write.
-		shopConfig: isAdmin(locals.user) ? await loadShopConfig() : null
+		shopConfig: isAdmin(locals.user) ? await loadShopConfig() : null,
+		// Formula settings (Formulas tab, 2026-09-28) — admin-only editable per-station
+		// rates and factors. Both current (with any DB overrides applied) and pristine
+		// defaults are sent so the form can render each field with a "default: N" hint,
+		// so an admin sees where the baseline is before overriding it.
+		formulaConfig: isAdmin(locals.user)
+			? { current: currentFormulas(), defaults: DEFAULT_FORMULAS }
+			: null
 	};
 };
 
@@ -159,8 +167,127 @@ export const actions: Actions = {
 			await setWorkerArchived(requireId(data), false, actor);
 			return 'Person restored.';
 		});
+	},
+
+	// --- Formulas tab (2026-09-28) ---
+	// One-shot save: reads every editable formula constant off the form, validates as a
+	// positive number, and writes them as one merged FormulaSettings object. Blank
+	// inputs fall back to whatever was already stored (never coerced to 0), so an admin
+	// only saving one field doesn't accidentally zero out the rest.
+	saveFormulas: async ({ request, locals }) => {
+		const actor = requireAdminApi(locals.user).email;
+		const data = await request.formData();
+		return runFormulasSave(async () => {
+			const next = parseFormulaFields(data, currentFormulas());
+			await saveFormulas(next, actor);
+			return 'Formulas saved. New estimates will use the updated numbers.';
+		});
 	}
 };
+
+async function runFormulasSave(run: () => Promise<string | null>) {
+	try {
+		const notice = await run();
+		return { screen: 'formulas' as const, success: true as const, notice };
+	} catch (err) {
+		if (err instanceof ConfigInputError) return fail(400, { screen: 'formulas' as const, message: err.message });
+		throw err;
+	}
+}
+
+/**
+ * Reads every formula field off `data`, using dotted names like
+ * "sp.ratePerHour.LT_5.THIN" that map to nested FormulaSettings fields. A blank input
+ * falls back to the CURRENT value (not the default), so partial saves don't overwrite
+ * unrelated fields. Invalid input (non-numeric, negative, zero for rate-like fields)
+ * throws ConfigInputError so runFormulasSave returns a form message instead of a 500.
+ */
+function parseFormulaFields(data: FormData, current: FormulaSettings): FormulaSettings {
+	function readPositive(name: string, fallback: number, allowZero = false): number {
+		const raw = data.get(name);
+		if (typeof raw !== 'string' || raw.trim() === '') return fallback;
+		const n = Number(raw);
+		if (!Number.isFinite(n) || (allowZero ? n < 0 : n <= 0)) {
+			throw new ConfigInputError(`"${name}" must be a positive number${allowZero ? ' (or zero)' : ''}.`);
+		}
+		return n;
+	}
+	return {
+		screenPrint: {
+			initialUnits: {
+				THIN: readPositive('sp.initialUnits.THIN', current.screenPrint.initialUnits.THIN),
+				POLY: readPositive('sp.initialUnits.POLY', current.screenPrint.initialUnits.POLY),
+				BULKY: readPositive('sp.initialUnits.BULKY', current.screenPrint.initialUnits.BULKY)
+			},
+			ratePerHour: {
+				SCREENS_LT_5: {
+					THIN: readPositive('sp.ratePerHour.LT_5.THIN', current.screenPrint.ratePerHour.SCREENS_LT_5.THIN),
+					POLY: readPositive('sp.ratePerHour.LT_5.POLY', current.screenPrint.ratePerHour.SCREENS_LT_5.POLY),
+					BULKY: readPositive('sp.ratePerHour.LT_5.BULKY', current.screenPrint.ratePerHour.SCREENS_LT_5.BULKY)
+				},
+				SCREENS_GT_4: {
+					THIN: readPositive('sp.ratePerHour.GT_4.THIN', current.screenPrint.ratePerHour.SCREENS_GT_4.THIN),
+					POLY: readPositive('sp.ratePerHour.GT_4.POLY', current.screenPrint.ratePerHour.SCREENS_GT_4.POLY),
+					BULKY: readPositive('sp.ratePerHour.GT_4.BULKY', current.screenPrint.ratePerHour.SCREENS_GT_4.BULKY)
+				}
+			},
+			setupMinutesPerScreen: readPositive('sp.setupMinutesPerScreen', current.screenPrint.setupMinutesPerScreen, true),
+			setupMinutesPerInkColor: readPositive('sp.setupMinutesPerInkColor', current.screenPrint.setupMinutesPerInkColor, true),
+			setupFixedMinutes: readPositive('sp.setupFixedMinutes', current.screenPrint.setupFixedMinutes, true)
+		},
+		embroidery: {
+			threadChangeMinPerColor: readPositive('emb.threadChangeMinPerColor', current.embroidery.threadChangeMinPerColor, true),
+			flat: {
+				THIN: readEmbroideryPlan(data, 'emb.flat.THIN', current.embroidery.flat.THIN, readPositive),
+				POLY: readEmbroideryPlan(data, 'emb.flat.POLY', current.embroidery.flat.POLY, readPositive),
+				BULKY: readEmbroideryPlan(data, 'emb.flat.BULKY', current.embroidery.flat.BULKY, readPositive)
+			},
+			cap: {
+				STRUCTURED: readEmbroideryPlan(data, 'emb.cap.STRUCTURED', current.embroidery.cap.STRUCTURED, readPositive),
+				UNSTRUCTURED: readEmbroideryPlan(data, 'emb.cap.UNSTRUCTURED', current.embroidery.cap.UNSTRUCTURED, readPositive)
+			}
+		},
+		finishing: {
+			relabelUnitsPerHour: {
+				THIN: readPositive('fin.relabelUnitsPerHour.THIN', current.finishing.relabelUnitsPerHour.THIN),
+				POLY: readPositive('fin.relabelUnitsPerHour.POLY', current.finishing.relabelUnitsPerHour.POLY),
+				BULKY: readPositive('fin.relabelUnitsPerHour.BULKY', current.finishing.relabelUnitsPerHour.BULKY)
+			},
+			hangTagUnitsPerHour: {
+				THIN: readPositive('fin.hangTagUnitsPerHour.THIN', current.finishing.hangTagUnitsPerHour.THIN),
+				POLY: readPositive('fin.hangTagUnitsPerHour.POLY', current.finishing.hangTagUnitsPerHour.POLY),
+				BULKY: readPositive('fin.hangTagUnitsPerHour.BULKY', current.finishing.hangTagUnitsPerHour.BULKY)
+			},
+			foldBagUnitsPerHour: {
+				SS_TEE: readPositive('fin.foldBagUnitsPerHour.SS_TEE', current.finishing.foldBagUnitsPerHour.SS_TEE),
+				OTHER: readPositive('fin.foldBagUnitsPerHour.OTHER', current.finishing.foldBagUnitsPerHour.OTHER)
+			},
+			matteFlatMinutesNumerator: readPositive('fin.matteFlatMinutesNumerator', current.finishing.matteFlatMinutesNumerator),
+			matteFlatRate: {
+				THIN: readPositive('fin.matteFlatRate.THIN', current.finishing.matteFlatRate.THIN),
+				POLY: readPositive('fin.matteFlatRate.POLY', current.finishing.matteFlatRate.POLY),
+				BULKY: readPositive('fin.matteFlatRate.BULKY', current.finishing.matteFlatRate.BULKY)
+			},
+			matteSpecialtyMinutesPerUnit: readPositive('fin.matteSpecialtyMinutesPerUnit', current.finishing.matteSpecialtyMinutesPerUnit),
+			wovensUnitsPerHour: readPositive('fin.wovensUnitsPerHour', current.finishing.wovensUnitsPerHour)
+		}
+	};
+}
+
+function readEmbroideryPlan(
+	data: FormData,
+	prefix: string,
+	current: { setupBoxingDivisor: number; hoopingFactor: number; loadUnloadFactor: number; cleanupFactor: number; sewRateDivisor: number },
+	readPositive: (name: string, fallback: number, allowZero?: boolean) => number
+) {
+	return {
+		setupBoxingDivisor: readPositive(`${prefix}.setupBoxingDivisor`, current.setupBoxingDivisor),
+		hoopingFactor: readPositive(`${prefix}.hoopingFactor`, current.hoopingFactor, true),
+		loadUnloadFactor: readPositive(`${prefix}.loadUnloadFactor`, current.loadUnloadFactor, true),
+		cleanupFactor: readPositive(`${prefix}.cleanupFactor`, current.cleanupFactor, true),
+		sewRateDivisor: readPositive(`${prefix}.sewRateDivisor`, current.sewRateDivisor)
+	};
+}
 
 class ConfigInputError extends Error {}
 

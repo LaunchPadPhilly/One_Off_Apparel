@@ -515,6 +515,25 @@ model ScheduleDraft {
   @@index([startDate])
 }
 
+// Editable estimate_hours formula constants (2026-09-28). A single row (id fixed to
+// "current") holds a JSON blob of every rate/factor an admin can tune in Settings →
+// Formulas — e.g. the screen-print run rate per hour, embroidery hooping factor, or a
+// finishing step's units-per-hour rate. Any field not overridden falls back to the
+// built-in default in $lib/server/engine/formulaSettings.ts's DEFAULT_FORMULAS, so an
+// empty row (or no row at all) means "use every default" — no seeding required.
+//
+// Contract from CLAUDE.md's config-settings roadmap: "already-approved assignments
+// keep the hours they were approved with; only new plans use new numbers." That's why
+// ScheduleAssignment.estimatedHours is a stored value (frozen at placement time),
+// while every live-computed estimate — orderGaps, estimateForDisplay, proposeSchedule —
+// reads the current formulas each time.
+model FormulaSettings {
+  id        String   @id @default("current")
+  formulas  Json
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+}
+
 // Domain-specific audit trail for order/line-item/schedule changes. Distinct
 // from the platform's generic AuditEvent (admin activity log) — see the
 // open question recorded in CLAUDE.md about whether these should merge.
