@@ -1,6 +1,6 @@
 import { prisma } from '$lib/server/prisma';
-import { LineItemStatus, OrderStatus } from '../../../../prisma/generated/prisma/enums';
-import { ALL_SIBLINGS_DEPENDENCY } from './types';
+import { LineItemStatus, LineItemType, OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY } from './types';
 
 /**
  * Runs the moment the "Stop" button fires for the last station on a line item. Part
@@ -28,6 +28,10 @@ export async function checkCompletion(lineItemId: string): Promise<void> {
 			.filter((candidate) => candidate.id !== completed.id && candidate.status === LineItemStatus.BLOCKED)
 			.filter((candidate) => {
 				if (candidate.dependsOn === completed.id) return true;
+				// A matte not linked to one design (2026-09-28) waits on every design.
+				if (candidate.dependsOn === ALL_DECORATIONS_DEPENDENCY) {
+					return siblings.filter((sibling) => sibling.itemType === LineItemType.DECORATION).every((sibling) => sibling.status === LineItemStatus.COMPLETE);
+				}
 				if (candidate.dependsOn === ALL_SIBLINGS_DEPENDENCY) {
 					return siblings.every((sibling) => sibling.id === candidate.id || sibling.status === LineItemStatus.COMPLETE);
 				}

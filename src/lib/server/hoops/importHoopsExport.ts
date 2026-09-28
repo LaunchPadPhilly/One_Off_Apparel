@@ -4,6 +4,7 @@ import { ArtworkApprovalStatus, LineItemStatus, LineItemType, OrderStatus } from
 import type { LineItem, Order } from '../../../../prisma/generated/prisma/client';
 import { ALL_SIBLINGS, orderCandidateSchema, type OrderCandidate } from './types';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
+import { ALL_DECORATIONS_DEPENDENCY } from '$lib/server/engine/types';
 
 export interface ImportHoopsExportResult {
 	orderIds: string[];
@@ -15,8 +16,8 @@ export interface ImportHoopsExportResult {
  * A finishing row's real dependency and starting status, per finishingDependencies.ts
  * (2026-09-28): matte waits on its decoration, fold & bag on everything, the rest on
  * nothing. A matte row the extraction didn't wire to a decoration is linked to the
- * order's only decoration when there's exactly one; otherwise it conservatively waits
- * on everything (still "after the print") and says so in a confidence flag, rather
+ * order's only decoration when there's exactly one; otherwise it waits on every
+ * design on the order ("all_decorations" — still "after the print") and says so in a flag, rather
  * than guessing which print it belongs to.
  */
 function resolveFinishingDependency(
@@ -33,8 +34,13 @@ function resolveFinishingDependency(
 	const target = decorations.find((candidate) => candidate.localId === item.dependsOn) ?? (decorations.length === 1 ? decorations[0] : undefined);
 	if (target) return { dependsOn: localIdToRealId.get(target.localId)!, status: LineItemStatus.BLOCKED };
 
-	flags.push(`Matte finish "${item.design}" isn't linked to a specific print, so it will wait until every other job on the order is done, rather than guessing which print it belongs to.`);
-	return { dependsOn: ALL_SIBLINGS, status: LineItemStatus.BLOCKED };
+	// Not linked to one design: wait on every design on the order (still "after the
+	// print"). Never "all_siblings" — that includes fold & bag, which waits on
+	// everything too, and the two would wait on each other forever. With no designs at
+	// all there's nothing to wait for, so it isn't blocked.
+	if (decorations.length === 0) return { dependsOn: null, status: LineItemStatus.NEEDS_REVIEW };
+	flags.push(`Matte finish "${item.design}" isn't linked to a specific design, so it will wait until every design on the order is done, rather than guessing which one it belongs to.`);
+	return { dependsOn: ALL_DECORATIONS_DEPENDENCY, status: LineItemStatus.BLOCKED };
 }
 
 async function createLineItemsForOrder(

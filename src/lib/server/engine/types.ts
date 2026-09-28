@@ -13,6 +13,11 @@ import type {
 // see the schema note in prisma/schema.prisma and CLAUDE.md's Domain section. Shared
 // here so check_completion and whatever creates finishing rows never drift on the string.
 export const ALL_SIBLINGS_DEPENDENCY = 'all_siblings' as const;
+// NEW (2026-09-28): only for a MATTE row the import couldn't link to its design — it
+// waits on every DECORATION row on the order instead. Deliberately NOT "all_siblings":
+// that would include fold & bag, which itself waits on everything, and the two would
+// wait on each other forever.
+export const ALL_DECORATIONS_DEPENDENCY = 'all_decorations' as const;
 
 /**
  * The subset of LineItem fields estimate_hours needs. Deliberately not the full Prisma
