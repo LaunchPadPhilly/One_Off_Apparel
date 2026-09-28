@@ -50,6 +50,9 @@ export interface EstimateHoursInput {
 	// "Patch Install") — the export's name for it, and the station a reviewer assigned.
 	otherJobType?: string | null;
 	assignedStationId?: string | null;
+	// NEW (2026-09-28): a person's corrected one-person estimate (order page). Replaces
+	// the formula's hours when set — see estimateHours.ts' applyEstimateOverride.
+	estimatedHoursOverride?: number | null;
 }
 
 export interface EstimateHoursResult {
@@ -64,6 +67,10 @@ export interface EstimateHoursResult {
 	// NEW (2026-09-28): how much of the ONE-person time speeds up with a bigger crew
 	// (unrounded). estimateHours(item, crewSize) divides only this part by the crew.
 	crewDivisibleHours?: number;
+	// NEW (2026-09-28): true when a person's edited estimate replaced the formula, and
+	// what the formula alone would say (rounded; null when it can't run yet).
+	overridden?: boolean;
+	formulaHours?: number | null;
 }
 
 /** One line item waiting to be placed, as propose_schedule needs it. */

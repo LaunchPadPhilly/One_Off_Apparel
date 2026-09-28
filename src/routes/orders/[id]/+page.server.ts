@@ -168,6 +168,27 @@ export const actions: Actions = {
 			return fail(400, { message: (err as Error).message });
 		}
 	},
+	// NEW (2026-09-28): correct a job's estimate when the formula's number is off. Its own
+	// action (not part of updateLineItem's form) so saving other fields never pins the
+	// shown estimate by accident. `clear` goes back to the formula.
+	setEstimate: async ({ request, locals, url }) => {
+		const user = requireScopePage(locals.user, 'IMPORT_WRITE', url.pathname);
+		const data = await request.formData();
+		const lineItemId = data.get('lineItemId');
+		if (typeof lineItemId !== 'string' || !lineItemId) return fail(400, { message: 'lineItemId is required' });
+
+		let estimatedHoursOverride: number | null = null;
+		if (data.get('clear') !== 'true') {
+			const hours = Number(data.get('hours'));
+			if (!Number.isFinite(hours) || hours <= 0 || hours > 200) return fail(400, { message: 'Enter the estimate as hours, more than 0 and up to 200 (e.g. 2.5).' });
+			estimatedHoursOverride = hours;
+		}
+		try {
+			await updateLineItemFields(lineItemId, { estimatedHoursOverride }, user.email);
+		} catch (err) {
+			return fail(400, { message: (err as Error).message });
+		}
+	},
 	updateLineItem: async ({ request, locals, url }) => {
 		const user = requireScopePage(locals.user, 'IMPORT_WRITE', url.pathname);
 		const data = await request.formData();

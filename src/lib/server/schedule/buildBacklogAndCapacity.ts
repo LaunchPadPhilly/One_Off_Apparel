@@ -130,6 +130,7 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			manualEstimatedHours: item.manualEstimatedHours,
 			otherJobType: item.otherJobType,
 			assignedStationId: item.assignedStationId,
+			estimatedHoursOverride: item.estimatedHoursOverride,
 			// Never null here: the `internalDueDate: { gte: … }` filter above excludes orders
 			// with no ship date yet (they can't be confirmed without one anyway).
 			dueDate: item.order.internalDueDate!,

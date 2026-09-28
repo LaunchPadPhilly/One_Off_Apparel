@@ -10,6 +10,9 @@
 
 	let { data, form }: PageProps = $props();
 
+	// Which line item's estimate is being edited inline (2026-09-28), if any.
+	let editingEstimateId = $state<string | null>(null);
+
 	// Internal due date defaults to 14 days before external ship date (see
 	// internalDueDate.ts) but stays a real, independently editable field — a human
 	// reviewing the order can set it to whatever they want. This only re-suggests the
@@ -340,12 +343,64 @@
 					     badge when we can compute it, or a warn-toned badge with the reason in
 					     a hover tooltip when we can't yet (missing formula vs missing job data;
 					     see estimateForDisplay.ts). -->
-					{#if item.estimate.ok}
-						<span class="badge badge--success">~{item.estimate.hours.toFixed(2)}h</span>
+					<!-- NEW (2026-09-28): click the estimate to correct it when the formula's
+					     number is off (setEstimate). An edited estimate says so, shows what
+					     the formula would say, and can go back to the formula. -->
+					{#if data.canEdit && editingEstimateId === item.id}
+						<form
+							method="POST"
+							action="?/setEstimate"
+							class="estimate-edit"
+							use:enhance={() => async ({ result, update }) => {
+								await update({ reset: false });
+								if (result.type === 'success') editingEstimateId = null;
+							}}
+						>
+							<input type="hidden" name="lineItemId" value={item.id} />
+							<label class="estimate-edit__field">
+								<span class="visually-hidden">Estimated hours for {item.design}</span>
+								<input
+									name="hours"
+									type="number"
+									min="0.25"
+									max="200"
+									step="0.25"
+									value={item.estimate.ok ? item.estimate.hours : ''}
+									required
+									autocomplete="off"
+								/>
+								h
+							</label>
+							<button type="submit" use:pressable>Save</button>
+							<button type="button" class="button--secondary" onclick={() => (editingEstimateId = null)}>Cancel</button>
+						</form>
+					{:else if item.estimate.ok}
+						{#if data.canEdit}
+							<button type="button" class="badge badge--success badge--button" title="Click to edit this estimate" onclick={() => (editingEstimateId = item.id)}>
+								~{item.estimate.hours.toFixed(2)}h ✎
+							</button>
+						{:else}
+							<span class="badge badge--success">~{item.estimate.hours.toFixed(2)}h</span>
+						{/if}
+						{#if item.estimate.overridden}
+							<span class="badge" title="Set by hand on this page">
+								edited{#if item.estimate.formulaHours != null} · formula says {item.estimate.formulaHours.toFixed(2)}h{/if}
+							</span>
+							{#if data.canEdit}
+								<form method="POST" action="?/setEstimate" use:enhance class="estimate-reset">
+									<input type="hidden" name="lineItemId" value={item.id} />
+									<input type="hidden" name="clear" value="true" />
+									<button type="submit" class="button--secondary button--small" use:pressable>Use formula</button>
+								</form>
+							{/if}
+						{/if}
 					{:else}
 						<span class="badge badge--warn" title={item.estimate.reason}>
 							{item.estimate.category === 'missing_formula' ? 'No formula yet' : 'Missing job details'}
 						</span>
+						{#if data.canEdit && (item.estimate.category === 'missing_formula' || item.estimate.field !== 'assignedStationId')}
+							<button type="button" class="badge badge--button" onclick={() => (editingEstimateId = item.id)}>Set estimate ✎</button>
+						{/if}
 					{/if}
 				</div>
 				<p class="muted">
@@ -485,6 +540,48 @@
 </div>
 
 <style>
+	/* Editable estimate (2026-09-28). */
+	.badge--button {
+		cursor: pointer;
+		font: inherit;
+		font-size: 0.8rem;
+	}
+
+	.badge--button:hover {
+		filter: brightness(1.08);
+	}
+
+	.estimate-edit,
+	.estimate-reset {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.estimate-edit__field {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+	}
+
+	.estimate-edit__field input {
+		width: 5.5rem;
+	}
+
+	.button--small {
+		padding: 0.2rem 0.6rem;
+		font-size: 0.8rem;
+	}
+
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+	}
+
 	.fields {
 		display: flex;
 		gap: 0.75rem;
