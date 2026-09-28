@@ -27,10 +27,11 @@ schedulable:** `estimate_hours` now has real numbers for every station
 (`screen_print_auto`, `embroidery`, and all five finishing steps — matte, relabel,
 fold_bag, hang_tag, wovens, added 2026-09-23). DTF/DTG have no formula — a reviewer
 enters the hours per job (`LineItem.manualEstimatedHours`, 2026-09-23). Even with real
-formulas, `propose_schedule` still needs `Station`/`CapacityCalendar` rows
-that barely exist in the real database — nothing in the app can create a *real* one
-today. `fetchCapacity()` now fills that gap with a stand-in default (7.5h/day per known
-station, matching the drafts workspace's own display fallback — see
+formulas, `propose_schedule` still needs `CapacityCalendar` rows that barely exist in
+the real database — nothing in the app can create a *real* one today (`Station` rows,
+by contrast, are admin-managed at `/settings?screen=stations` since 2026-09-25, along with
+the worker roster at `/settings?screen=people`). `fetchCapacity()` now fills that gap with a
+stand-in default (7.5h/day per active, auto-scheduled station, matching the drafts workspace's own display fallback — see
 `$lib/schedule/defaultCapacity.ts`, 2026-09-22) so a job with a real estimate but no real
 capacity data no longer automatically comes back at_risk; a real `CapacityCalendar` row
 still always overrides the default the moment one exists. A job still comes back
@@ -136,6 +137,10 @@ contract).
   unconditionally; `guardedToolResult` is the gate.
 - Scopes are the `McpScope` enum plus one map in `src/lib/server/mcp/scopes.ts`. Adding a
   scope is those two edits (plus a migration); the admin UI and discovery follow.
+- `/settings` has `?screen=general|stations|people`. General is every user's own account
+  and display preferences; Stations and People (shop config, 2026-09-25) render only for
+  admins and every load/action behind them re-checks `isAdmin`/`requireAdminApi`
+  server-side. Shop config lives here, not under `/admin`, by the client's choice.
 - Admin is one `/admin` route with `?screen=agents|clients|activity|users`; only
   `/admin/users/[id]` is a separate route.
 - Svelte 5 runes mode is forced in `vite.config.ts` (there is no `svelte.config.js`):
@@ -282,13 +287,31 @@ its own `depends_on`. An order with a print, an embroidery, and two finishes is 
 in this table.
 
 #### `stations`
-One row per machine/station.
+One row per machine/station — **admin-managed since 2026-09-25** (`/settings?screen=stations`,
+`src/lib/server/config/stations.ts`). The shop has e.g. two auto presses and one manual
+press: three rows of the same kind.
 
 | field | notes |
 |---|---|
 | `id` | |
-| `name` | e.g. "screen_print_auto" |
-| `type` | what kind of station it is |
+| `name` | unique internal identifier, never edited (the draft board keys rows by it). Pre-existing rows keep their old names (`screen_print_auto`, …); new ones are slugged from the first label |
+| `label` | what people see; admin-editable; unique (case-insensitive) among active stations |
+| `kind` | which `estimate_hours` formula it runs — one of `STATION_KINDS` (`src/lib/schedule/stationKinds.ts`), validated in code. This is the value `estimate_hours` returns as `station` and `expectedStationFor()` returns; the engine may place a job on **any** active auto-scheduled station of that kind. Fixed at creation (archive + re-create to change it) |
+| `autoSchedule` | false = the automatic engine never places jobs here; people drag jobs onto it by hand. The manual press: the shop picks it per design on artistic judgment, same time assumption as the autos (client, 2026-09-25) |
+| `sortOrder` | board row order |
+| `archivedAt` | "delete" — hidden from the board, the engine's capacity and certification pickers; history (Actuals, Reports) kept. Refused while the station has PROPOSED/APPROVED/IN_PROGRESS assignments |
+| `type` | legacy, always `"production"`, unused |
+
+Nothing creates stations implicitly any more — `fetchCapacity()` and the draft board used
+to upsert a hard-coded name list on every read/write, which would resurrect an archived
+station. The migration `add_station_config_and_workers` seeds the nine original names once.
+
+#### `workers` / `worker_certifications` (2026-09-25)
+The shop-floor roster (`/settings?screen=people`, `src/lib/server/config/workers.ts`): a name,
+optional notes, `archivedAt` ("delete"), and a many-to-many to `stations` — certified **per
+station**, not per kind, so someone can be cleared for the autos but not the manual press.
+Deliberately not linked to `User`: floor staff don't log in. Nothing reads certifications
+yet — see "Config settings roadmap" under Known open items.
 
 #### `capacity_calendar`
 How much time each station has open, per day.
@@ -585,6 +608,42 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   above), and each has its own station (`dtf`, `dtg`) rather than borrowing another one.
   If the client ever produces a real formula, it replaces `estimateManualHours` in
   `estimateHours.ts`.
+  **Update 2026-09-25: DTG is not done in house** — the shop doesn't schedule or account
+  for it, so an admin archives the DTG station. Still open (not built, needs a decision
+  before it is): with no active DTG station, a DTG line item is flagged at risk ("no open
+  capacity on any DTG station") rather than skipped, the confirm gate still asks for its
+  manual hours, and `check_completion` still waits on it, so an order with a DTG line
+  never auto-completes. Likely answer: an "outsourced" treatment that excludes it from
+  scheduling, the confirm gate and completion — confirm the exact rule first.
+- **Config settings roadmap (decisions from the client, 2026-09-25).** Built in step 1
+  (branch `feature/config-setting`): admin CRUD for stations and people (see the
+  `stations` / `workers` tables above). Decided but **not built yet**:
+  - **Crew size.** The client's formulas are the max rate for *one* person. More people
+    on a job divide only the **run** portion (setup — screens, ink, thread changes —
+    stays fixed): screen print's `run` term; embroidery's hooping/load-unload/cleanup
+    (the machine's sew time does not speed up with more people); every finishing formula
+    is all run. There is **no max crew per station** — the floor is organic (e.g.
+    shipping & receiving staff get pulled onto printing), so don't invent a cap.
+  - **Certification.** Only people certified on a station may be assigned to it.
+  - **Engine picks people.** The automatic schedule assigns whoever it needs to make
+    the schedule as efficient as possible; everyone is full time (the standard shift).
+    People can then change assignments by hand on the board.
+  - **Organic changes go through Claude.** Sick days, mid-day changes and rush orders:
+    Nate or Toby tell Claude in chat; Claude turns that into structured inputs
+    (person X unavailable today, a rush order, …) via MCP tools, the deterministic
+    engine re-plans, and Claude reports what changed. Per the non-negotiables, Claude
+    never computes the schedule itself and the re-plan is a proposal a human approves.
+  - **Editable formulas.** Admins can edit the formula numbers in settings (e.g. rates
+    per hour as the team gets faster), industry-standard "rate table" style rather
+    than free-form formulas. Already-approved assignments keep the hours they were
+    approved with; only new plans use new numbers.
+  - **Finisher dependencies change.** Only **fold & bag** and **matte finish** must come
+    after the print; relabel, hang tags and wovens can happen any time (relabel is
+    sometimes done *before* print). Current code (`fetchBacklog()` / `dependsOn`) still
+    makes every finisher wait — change it in its own PR.
+  - Order: (2) crew-based estimates + manual people assignment on the board,
+    (3) engine auto-assigns people, (4) the Claude/MCP availability-and-changes tools.
+    Editable formula numbers and the finisher-dependency change fit between them.
 - **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
   the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
   covers the whole flow, not just Start/Stop: a date window (default 28 days from

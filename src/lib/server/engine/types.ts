@@ -44,8 +44,9 @@ export interface EstimateHoursInput {
 }
 
 export interface EstimateHoursResult {
-	// The station *name* (e.g. "screen_print_auto"), not a Station.id — resolving a
-	// name to a real row is the caller's job (engine code stays DB-agnostic).
+	// The station *kind* (e.g. "screen_print_auto" — see $lib/schedule/stationKinds.ts),
+	// not a Station.id — which real station of that kind a job lands on is
+	// propose_schedule's choice (engine code stays DB-agnostic).
 	station: string;
 	hours: number;
 }
@@ -72,6 +73,10 @@ export type ExternalDependencyState = 'complete' | 'not_schedulable';
 export interface CapacitySlot {
 	stationId: string;
 	stationName: string;
+	// The station's kind (2026-09-25) — what propose_schedule matches an estimate's
+	// `station` against, so a job can land on any station of the right kind (e.g.
+	// either of two auto presses).
+	stationKind: string;
 	date: Date;
 	availableHrs: number;
 }

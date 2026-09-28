@@ -352,13 +352,56 @@ model LineItem {
   @@index([status])
 }
 
+// Admin-managed since 2026-09-25 (/settings?screen=stations). `name` is a unique,
+// never-edited internal identifier (the draft board keys rows by it); `label` is
+// what people see and can rename; `kind` is which estimate_hours formula this
+// station runs — one of STATION_KINDS in $lib/schedule/stationKinds.ts, validated
+// in code (not an enum) because it doubles as the engine's station key.
+// `archivedAt` is "delete": hidden from scheduling and the board, history kept.
 model Station {
-  id                  String               @id @default(cuid())
-  name                String               @unique
+  id                  String                @id @default(cuid())
+  name                String                @unique
   type                String
+  label               String
+  kind                String
+  // false = the automatic engine never places jobs here; a person (or Claude,
+  // on a person's say-so) moves jobs onto it by hand. E.g. the manual press,
+  // which the shop picks per design on artistic judgment.
+  autoSchedule        Boolean               @default(true)
+  sortOrder           Int                   @default(0)
+  archivedAt          DateTime?
+  createdAt           DateTime              @default(now())
   capacityCalendar    CapacityCalendar[]
   scheduleAssignments ScheduleAssignment[]
   actuals             Actual[]
+  certifications      WorkerCertification[]
+
+  @@index([kind])
+}
+
+// A person on the shop floor (2026-09-25). A roster of names, deliberately NOT
+// linked to User — floor staff don't log in. `archivedAt` is "delete".
+model Worker {
+  id             String                @id @default(cuid())
+  name           String
+  notes          String?
+  archivedAt     DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  certifications WorkerCertification[]
+}
+
+// Which stations a worker is certified to run. Per station rather than per kind,
+// so e.g. someone can be cleared for the autos but not the manual press.
+model WorkerCertification {
+  workerId  String
+  stationId String
+  createdAt DateTime @default(now())
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  station   Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
+
+  @@id([workerId, stationId])
+  @@index([stationId])
 }
 
 model CapacityCalendar {

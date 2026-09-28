@@ -76,7 +76,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			date: assignment.date.toISOString().slice(0, 10),
 			status: assignment.status,
 			estimatedHours: assignment.estimatedHours,
-			stationName: assignment.station.name,
+			stationName: assignment.station.label,
 			lineItemDesign: assignment.lineItem.design,
 			// A line item is either a "decoration" (has a decorationType) or a
 			// "finishing" step (has a finishingStep) — never both. This just picks

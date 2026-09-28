@@ -1,11 +1,9 @@
 import { WORKING_HOURS } from './shift';
 
 /**
- * The stand-in capacity assumption used until a shop's real Station/CapacityCalendar
- * data exists (see CLAUDE.md's Known open items — "no station or its daily capacity
- * has ever been entered"). `KNOWN_STATIONS` mirrors the six stations CLAUDE.md's engine
- * section documents (screen print, embroidery, matte, fold & bag, hang tag, relabel,
- * wovens, dtf, dtg — added 2026-09-23).
+ * The stand-in capacity assumption used until a shop's real CapacityCalendar data
+ * exists (see CLAUDE.md's Known open items — "no station or its daily capacity has
+ * ever been entered").
  *
  * `DEFAULT_STATION_DAY_HOURS` is `WORKING_HOURS` from shift.ts, re-exported under this
  * name rather than redefined — the drafts workspace's timeline already assumes "one
@@ -15,22 +13,14 @@ import { WORKING_HOURS } from './shift';
  * the same reason, so what a human sees on the timeline and what the deterministic
  * engine actually schedules against can never quietly diverge into two conventions.
  *
- * This is a real, visible business assumption, not an invented fact: every known
+ * This is a real, visible business assumption, not an invented fact: every active
  * station is treated as open every single day of a draft's window (including
  * weekends, matching the timeline's existing display convention) until someone enters
  * real capacity data. A real CapacityCalendar row always overrides this default the
  * moment one exists for that (station, day).
+ *
+ * Which stations exist is no longer a hard-coded list here (2026-09-25): admins manage
+ * Station rows at /settings?screen=stations, and each station's formula comes from its
+ * `kind` (see stationKinds.ts).
  */
-export const KNOWN_STATIONS = [
-	'screen_print_auto',
-	'embroidery',
-	'matte_finish',
-	'fold_bag',
-	'hang_tags',
-	'printed_relabel',
-	'wovens',
-	'dtf',
-	'dtg'
-] as const;
-
 export const DEFAULT_STATION_DAY_HOURS = WORKING_HOURS;

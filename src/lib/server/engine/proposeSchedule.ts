@@ -155,7 +155,8 @@ export function proposeSchedule(
 		const candidates: { state: SlotState; start: number; gapMin: number }[] = [];
 		for (const state of slots.values()) {
 			const { slot } = state;
-			if (slot.stationName !== estimate.station) continue;
+			// Any station of the job's kind will do — e.g. either of two auto presses.
+			if (slot.stationKind !== estimate.station) continue;
 			const dayMs = slot.date.getTime();
 			if (dayMs > item.dueDate.getTime()) continue;
 			if (earliest && dayMs < earliest.dayMs) continue;
