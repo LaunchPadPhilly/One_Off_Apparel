@@ -16,7 +16,10 @@ import { ArtworkApprovalStatus, BlankOrderingStatus, CustomerApprovalStatus } fr
  */
 export const lineItemCandidateBaseSchema = z.object({
 	localId: z.string().min(1),
-	itemType: z.enum(['DECORATION', 'FINISHING']),
+	itemType: z.enum(['DECORATION', 'FINISHING', 'OTHER']),
+	// NEW (2026-09-28): OTHER rows only — the export's own name for a job type the system
+	// doesn't model yet (e.g. "Patch Install"). Kept so a reviewer can assign it.
+	otherJobType: z.string().min(1).nullish(),
 	design: z.string().min(1),
 	printLocation: z.enum(['FRONT', 'BACK', 'LEFT', 'RIGHT']).nullish(),
 	decorationType: z.enum(['SCREEN_PRINT', 'EMBROIDERY', 'DTF', 'DTG']).nullish(),
@@ -48,20 +51,20 @@ export const lineItemCandidateBaseSchema = z.object({
 });
 
 export const lineItemCandidateSchema = lineItemCandidateBaseSchema
-	.refine((item) => (item.itemType === 'DECORATION' ? item.decorationType != null : item.finishingStep != null), {
-		message: 'decorationType is required for DECORATION rows, finishingStep is required for FINISHING rows'
+	.refine((item) => (item.itemType === 'DECORATION' ? item.decorationType != null : item.itemType === 'FINISHING' ? item.finishingStep != null : item.otherJobType != null), {
+		message: 'decorationType is required for DECORATION rows, finishingStep for FINISHING rows, otherJobType for OTHER rows'
 	})
-	.refine((item) => item.itemType !== 'DECORATION' || item.finishingStep == null, {
-		message: 'finishingStep must be null on DECORATION rows'
+	.refine((item) => item.itemType === 'FINISHING' || item.finishingStep == null, {
+		message: 'finishingStep must be null on DECORATION and OTHER rows'
 	})
-	.refine((item) => item.itemType !== 'FINISHING' || item.decorationType == null, {
-		message: 'decorationType must be null on FINISHING rows'
+	.refine((item) => item.itemType === 'DECORATION' || item.decorationType == null, {
+		message: 'decorationType must be null on FINISHING and OTHER rows'
 	})
+	// No "FINISHING rows must set dependsOn" rule any more (2026-09-28): relabel / hang
+	// tags / wovens wait on nothing, and importHoopsExport.ts decides every finishing
+	// row's real dependency itself (finishingDependencies.ts), whatever is sent here.
 	.refine((item) => item.itemType !== 'DECORATION' || item.dependsOn == null, {
 		message: 'dependsOn is finishing-rows-only — see CLAUDE.md'
-	})
-	.refine((item) => item.itemType !== 'FINISHING' || (item.dependsOn != null && item.dependsOn.length > 0), {
-		message: 'FINISHING rows must set dependsOn (another localId, or "all_siblings") or they can never be unlocked'
 	});
 
 export type LineItemCandidate = z.infer<typeof lineItemCandidateSchema>;
@@ -69,10 +72,15 @@ export type LineItemCandidate = z.infer<typeof lineItemCandidateSchema>;
 export const orderCandidateSchema = z.object({
 	hoopsOrderId: z.string().min(1),
 	customerName: z.string().min(1),
-	externalShipDate: z.iso.date(),
-	internalDueDate: z.iso.date(),
+	// Null when the export has no Deadline (2026-09-28): the order still imports, and
+	// the order page asks for the ship date before it can be confirmed. Nothing about an
+	// incomplete export should stop it reaching Orders for review.
+	externalShipDate: z.iso.date().nullable(),
+	internalDueDate: z.iso.date().nullable(),
 	importedBy: z.string().min(1),
-	lineItems: z.array(lineItemCandidateSchema).min(1),
+	// May be empty (2026-09-28): an order whose rows all failed to parse still imports,
+	// with each dropped row listed in confidenceFlags for the reviewer.
+	lineItems: z.array(lineItemCandidateSchema),
 	// Free-text notes on anything Claude was unsure about reading this order — not a
 	// schema column, just carried through to the tool's returned confidence_flags[]
 	// (and into the audit log) for the human confirming the import to see.
@@ -125,7 +133,10 @@ export const lineItemCorrectionSchema = lineItemCandidateBaseSchema
 		// the artwork-approval gate, but per decoration line item rather than per order.
 		// Null on finishing rows (checked by the caller, not enforced here — same pattern
 		// updateLineItemFields already uses for every other field).
-		artworkApprovalStatus: z.enum(ArtworkApprovalStatus)
+		artworkApprovalStatus: z.enum(ArtworkApprovalStatus),
+		// NEW (2026-09-28): OTHER rows only — the station a reviewer says this job runs
+		// on. updateLineItemFields checks it's a real, active station.
+		assignedStationId: z.string().min(1)
 	})
 	.partial();
 

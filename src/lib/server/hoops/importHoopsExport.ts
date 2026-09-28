@@ -3,6 +3,7 @@ import { prisma } from '$lib/server/prisma';
 import { ArtworkApprovalStatus, LineItemStatus, LineItemType, OrderStatus } from '../../../../prisma/generated/prisma/enums';
 import type { LineItem, Order } from '../../../../prisma/generated/prisma/client';
 import { ALL_SIBLINGS, orderCandidateSchema, type OrderCandidate } from './types';
+import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 
 export interface ImportHoopsExportResult {
 	orderIds: string[];
@@ -10,21 +11,37 @@ export interface ImportHoopsExportResult {
 	confidenceFlags: string[];
 }
 
-function resolveDependsOn(dependsOn: string | null | undefined, localIdToRealId: ReadonlyMap<string, string>): string | null {
-	if (dependsOn == null) return null;
-	if (dependsOn === ALL_SIBLINGS) return ALL_SIBLINGS;
+/**
+ * A finishing row's real dependency and starting status, per finishingDependencies.ts
+ * (2026-09-28): matte waits on its decoration, fold & bag on everything, the rest on
+ * nothing. A matte row the extraction didn't wire to a decoration is linked to the
+ * order's only decoration when there's exactly one; otherwise it conservatively waits
+ * on everything (still "after the print") and says so in a confidence flag, rather
+ * than guessing which print it belongs to.
+ */
+function resolveFinishingDependency(
+	item: OrderCandidate['lineItems'][number],
+	itemCandidates: OrderCandidate['lineItems'],
+	localIdToRealId: ReadonlyMap<string, string>,
+	flags: string[]
+): { dependsOn: string | null; status: LineItemStatus } {
+	const rule = finishingDependencyRule(item.finishingStep);
+	if (rule === 'none') return { dependsOn: null, status: LineItemStatus.NEEDS_REVIEW };
+	if (rule === 'all_siblings') return { dependsOn: ALL_SIBLINGS, status: LineItemStatus.BLOCKED };
 
-	const resolved = localIdToRealId.get(dependsOn);
-	if (!resolved) {
-		throw new Error(`import_hoops_export: dependsOn references unknown localId "${dependsOn}" within this order's line items`);
-	}
-	return resolved;
+	const decorations = itemCandidates.filter((candidate) => candidate.itemType === LineItemType.DECORATION);
+	const target = decorations.find((candidate) => candidate.localId === item.dependsOn) ?? (decorations.length === 1 ? decorations[0] : undefined);
+	if (target) return { dependsOn: localIdToRealId.get(target.localId)!, status: LineItemStatus.BLOCKED };
+
+	flags.push(`Matte finish "${item.design}" isn't linked to a specific print, so it will wait until every other job on the order is done, rather than guessing which print it belongs to.`);
+	return { dependsOn: ALL_SIBLINGS, status: LineItemStatus.BLOCKED };
 }
 
 async function createLineItemsForOrder(
 	tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
 	orderId: string,
-	itemCandidates: OrderCandidate['lineItems']
+	itemCandidates: OrderCandidate['lineItems'],
+	flags: string[]
 ): Promise<LineItem[]> {
 	// Pre-generate real ids so a finishing row's dependsOn can point at a sibling
 	// decoration row created in this same batch, before either exists in the DB.
@@ -33,6 +50,9 @@ async function createLineItemsForOrder(
 
 	for (const itemCandidate of itemCandidates) {
 		const isFinishing = itemCandidate.itemType === LineItemType.FINISHING;
+		const dependency = isFinishing
+			? resolveFinishingDependency(itemCandidate, itemCandidates, localIdToRealId, flags)
+			: { dependsOn: null, status: LineItemStatus.NEEDS_REVIEW };
 		const row = await tx.lineItem.create({
 			data: {
 				id: localIdToRealId.get(itemCandidate.localId)!,
@@ -42,11 +62,14 @@ async function createLineItemsForOrder(
 				printLocation: itemCandidate.printLocation ?? null,
 				decorationType: itemCandidate.decorationType ?? null,
 				finishingStep: itemCandidate.finishingStep ?? null,
-				dependsOn: resolveDependsOn(itemCandidate.dependsOn, localIdToRealId),
-				// Finishing rows always start blocked, whatever they depend on —
-				// check_completion is the only thing that unlocks them.
-				status: isFinishing ? LineItemStatus.BLOCKED : LineItemStatus.NEEDS_REVIEW,
-				artworkApprovalStatus: isFinishing ? null : ArtworkApprovalStatus.NOT_SUBMITTED,
+				// Matte and fold & bag start blocked (check_completion unlocks them);
+				// relabel / hang tags / wovens wait on nothing (2026-09-28).
+				dependsOn: dependency.dependsOn,
+				status: dependency.status,
+				// Artwork is always considered approved (client decision, 2026-09-28); only
+				// decorations carry the field at all.
+				artworkApprovalStatus: itemCandidate.itemType === LineItemType.DECORATION ? ArtworkApprovalStatus.APPROVED : null,
+				otherJobType: itemCandidate.itemType === LineItemType.OTHER ? (itemCandidate.otherJobType ?? null) : null,
 				weightClass: itemCandidate.weightClass,
 				apparelColor: itemCandidate.apparelColor,
 				inkColorCount: itemCandidate.inkColorCount ?? null,
@@ -72,7 +95,7 @@ async function createLineItemsForOrder(
  * this doesn't parse a file itself). Creates `Order` rows at status needs_review and
  * `LineItem` rows at needs_review (decoration, and any finishing row with no unmet
  * dependency) or blocked (every other finishing row) — exactly per CLAUDE.md's schema
- * notes. Decoration rows get artworkApprovalStatus: NOT_SUBMITTED; finishing rows leave
+ * notes. Decoration rows get artworkApprovalStatus: APPROVED (always considered done); finishing rows leave
  * it null. Nothing here is schedulable yet: that gate is confirm_import + the
  * pre-production approval gates in the backlog query.
  *
@@ -100,8 +123,9 @@ export async function importHoopsExport(orders: readonly OrderCandidate[]): Prom
 				// externalShipDate/internalDueDate are z.iso.date() strings ("YYYY-MM-DD") —
 				// Prisma's runtime validation, unlike its TS types, rejects a date-only
 				// string and needs a real Date.
-				externalShipDate: new Date(orderCandidate.externalShipDate),
-				internalDueDate: new Date(orderCandidate.internalDueDate),
+				// Either may be null (no Deadline in the export) — the order page asks for it.
+				externalShipDate: orderCandidate.externalShipDate ? new Date(orderCandidate.externalShipDate) : null,
+				internalDueDate: orderCandidate.internalDueDate ? new Date(orderCandidate.internalDueDate) : null,
 				status: OrderStatus.NEEDS_REVIEW,
 				importedBy: orderCandidate.importedBy
 			};
@@ -121,7 +145,7 @@ export async function importHoopsExport(orders: readonly OrderCandidate[]): Prom
 			orderIds.push(order.id);
 			if (orderCandidate.confidenceFlags) confidenceFlags.push(...orderCandidate.confidenceFlags);
 
-			const createdLineItems = await createLineItemsForOrder(tx, order.id, orderCandidate.lineItems);
+			const createdLineItems = await createLineItemsForOrder(tx, order.id, orderCandidate.lineItems, confidenceFlags);
 			lineItems.push(...createdLineItems);
 
 			await tx.domainAuditLog.create({

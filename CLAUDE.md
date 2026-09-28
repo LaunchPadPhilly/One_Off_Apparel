@@ -225,7 +225,7 @@ One row per order.
 | `id` | |
 | `hoops_order_id` | back-reference to Hoops |
 | `customer_name` | |
-| `external_ship_date` | promised to the customer |
+| `external_ship_date` | promised to the customer. Nullable since 2026-09-28 — an export with no Deadline still imports; the order page asks for it, and the order can't be confirmed or scheduled until it's set |
 | `internal_due_date` | what production actually works toward — always computed as `external_ship_date` − 14 days, never an independent input (see Known open items) |
 | `status` | `needs_review`, `confirmed`, `scheduled`, `in_production`, `complete`, `cancelled` |
 | `imported_by` | who brought it in (usually "claude") |
@@ -234,10 +234,27 @@ One row per order.
 `orders.status` only flips to `complete` automatically, via `check_completion()` — see
 Engine section. Never set it to `complete` directly from application code.
 
+**Every export imports for review (client decision, 2026-09-28).** Nothing incomplete
+stops an order reaching Orders: the reviewer sees what's missing as questions instead.
+`extractOrderFromPdf.ts` / `importHoopsExport.ts`:
+- No Deadline → the order imports with no ship date; "What is the ship date?" is asked.
+- Real production work with no matching type (e.g. Patch Install) → an `OTHER` line item;
+  "What station is it assigned to?" then "How many hours does it need?" are asked
+  (`estimateHours.ts`' `estimateOtherHours`). Stations of kind `other` exist for this.
+- A row that still doesn't fit the schema is dropped *with a flag on the order*, and an
+  order with zero line items is allowed. Missing customer name → "Unknown customer" +
+  flag. Only a file with no Job number anywhere (PDF or file name) is refused, because
+  the order couldn't be identified or re-imported.
+- Admin fee and supply rows (digitizing fees, "75 units of patches") are still never line
+  items — they aren't production work.
+Every new question is a normal `computeOrderGaps` question, so confirming stays blocked
+until they're answered, by hand or via the notes box.
+
 **Confirming requires a fully valid order (2026-09-23).** `confirmImport.ts` refuses to
 confirm while `computeOrderGaps(...).blockingCount > 0` (`orderGaps.ts`) — every line
 item estimable (no missing formula input, DTF/DTG hours entered), blanks `RECEIVED`,
-customer `APPROVED`, and every decoration's artwork `APPROVED`. Enforced server-side
+customer `APPROVED`, and a ship date set. **Artwork is not a gate** (client decision 2026-09-28: it's
+always considered done — imported as `APPROVED`, never asked about). Enforced server-side
 inside the confirm transaction, so the order page's (disabled) button and the
 `confirm_import` MCP tool are gated identically. A **confirmed** order that stops being
 valid (or was confirmed before this gate) is not moved back to `needs_review`: it's
@@ -261,17 +278,17 @@ One row per **design/print job or finishing step** on an order.
 |---|---|
 | `id` | |
 | `order_id` | FK to `orders.id` |
-| `item_type` | `"decoration"` or `"finishing"` — governs how every field below behaves |
+| `item_type` | `"decoration"`, `"finishing"` or `"other"` — governs how every field below behaves. `other` (2026-09-28) is real production work the system has no type for yet (e.g. "Patch Install"): `other_job_type` holds the export's name for it, `assigned_station_id` the station a reviewer picks, and its time is `manual_estimated_hours`. The engine places it only on that exact station |
 | `design` | what the design is |
 | `print_location` | front, back, left, or right |
 | `decoration_type` | screen print / embroidery / DTF / DTG — **decoration rows only**, blank on finishing rows. Determines the primary `station_id` via lookup. |
 | `finishing_step` | matte / relabel / fold & bag / hang tag — **finishing rows only**, blank on decoration rows |
-| `depends_on` | **finishing rows only.** Either another `line_items.id` (this finish waits on one specific job — e.g. matte waits on the print it's finishing) or the literal string `"all_siblings"` (this finish waits on every other line item under the same order — this is how fold & bag / final packaging works: it can't start until every decoration *and* every other finish on that order is done) |
-| `status` | `needs_review`, `blocked`, `in_production`, `complete`. Finishing rows are created with `status: blocked`. Since 2026-09-23 a blocked finisher *is* schedulable (placed after the job it depends on — see propose_schedule), but it can't be **Started** on the floor until `check_completion()` unlocks it. |
+| `depends_on` | **finishing rows only, and only matte and fold & bag (2026-09-28).** Matte: the `line_items.id` of the print it finishes (or `"all_siblings"` when the import couldn't tell which print). Fold & bag: always the literal `"all_siblings"` — it waits on every other line item on the order. Relabel, hang tags and wovens: always null — they can be done any time, even before the print. The rule lives in `src/lib/server/engine/finishingDependencies.ts`; `importHoopsExport.ts` and `fetchBacklog()` apply it whatever the extraction model sent, and migration `finishing_dependency_rules` fixed existing rows |
+| `status` | `needs_review`, `blocked`, `in_production`, `complete`. Matte and fold & bag rows are created `blocked`; relabel / hang tags / wovens are created `needs_review` (nothing to wait for). A blocked finisher *is* schedulable (placed after the job it depends on — see propose_schedule), but it can't be **Started** on the floor until `check_completion()` unlocks it. |
 | `weight_class` | thin, poly, or bulky — meaningful for **flat** garments; null/ignored when `garment_style` is `cap` |
 | `garment_style` | `flat` or `cap` — **decoration rows only**, meaningful today for embroidery's formula (flat and cap use genuinely different rate tables, not a weight-class variant — see estimate_hours below) |
 | `cap_construction` | `structured` or `unstructured` — **only meaningful when `garment_style` is `cap`**, null otherwise |
-| `apparel_color` | text — the garment color (e.g. "Grey") |
+| `apparel_color` | text — the garment color (e.g. "Grey"). **Not shown anywhere in the app since 2026-09-28** — the client said users don't need to see it. Still stored and still filled by the Hoops import; not editable on the order page any more |
 | `ink_color_count` | int — number of colors in the decoration itself. Used for screen-print ink setup and embroidery thread-change time — but is the "X" variable in screen print's formula and the **"Y" variable in embroidery's** (the letter mapping isn't consistent across stations — see estimate_hours below). Do not confuse with `apparel_color` — they used to be conflated into one ambiguous `colors` field; they are not the same thing. |
 | `screens` | how many screens (screen print only) |
 | `stitch_count` | embroidery only — the "X" variable in embroidery's formula (not `ink_color_count`) |
@@ -524,7 +541,9 @@ function propose_schedule(backlog, capacity):
 
 **Finishers are scheduled after their prints (decision 2026-09-23, replacing the old "do
 not reintroduce dependency-checking" rule).** The shop wants the relabel/matte/fold & bag
-for an order planned up front, not only after the print is marked done. So:
+for an order planned up front, not only after the print is marked done. Since 2026-09-28
+only matte and fold & bag actually wait on anything — relabel, hang tags and
+wovens have no dependency and are placed like any other job. So:
 
 - `fetchBacklog()` includes BLOCKED finishing rows and resolves each one's `depends_on`
   into `dependsOnIds` ("all_siblings" = every other line item on the order).
@@ -637,13 +656,16 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     per hour as the team gets faster), industry-standard "rate table" style rather
     than free-form formulas. Already-approved assignments keep the hours they were
     approved with; only new plans use new numbers.
-  - **Finisher dependencies change.** Only **fold & bag** and **matte finish** must come
-    after the print; relabel, hang tags and wovens can happen any time (relabel is
-    sometimes done *before* print). Current code (`fetchBacklog()` / `dependsOn`) still
-    makes every finisher wait — change it in its own PR.
+  - **Finisher dependencies — done (2026-09-28).** Only matte (after its print)
+    and fold & bag (after everything) wait; see `depends_on` in the `line_items` table.
+  - **Weekly screen count — done (2026-09-28).** "Screens to prep" = the sum of
+    `screens` on screen-print jobs scheduled that week (`$lib/schedule/screenCount.ts`).
+    Shown per draft week on the draft board (live as jobs move) and per calendar week
+    (Mon–Sun) for the approved schedule on `/schedule`. Jobs with no `screens` value
+    count 0 and are called out, so the total is never silently low.
   - Order: (2) crew-based estimates + manual people assignment on the board,
     (3) engine auto-assigns people, (4) the Claude/MCP availability-and-changes tools.
-    Editable formula numbers and the finisher-dependency change fit between them.
+    Editable formula numbers fit between them.
 - **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
   the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
   covers the whole flow, not just Start/Stop: a date window (default 28 days from
@@ -680,7 +702,7 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   this in: the manual draft workspace's candidate-order list used to be every order not
   `COMPLETE` (including `NEEDS_REVIEW`, which hasn't passed the import-confirmation
   gate) — now `CONFIRMED` only. Deliberately NOT the full `fetchBacklog()` gate set
-  (blanks received, customer approval, artwork approval) for the *manual* path — a human
+  (blanks received, customer approval) for the *manual* path — a human
   planning ahead can still place a confirmed order before every pre-production gate is
   finalized; only the automatic engine path enforces every gate. Four follow-up fixes
   (2026-09-22): (1) the CONFIRMED-only rule is now enforced server-side in
@@ -815,7 +837,7 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   already-computed results in conversation, not an LLM call added to either page.
 - **"Needs attention" is now answerable in one note, not just field-by-field
   (2026-09-22).** `orderGaps.ts` (`computeOrderGaps`) splits an order's outstanding gaps
-  into `questions` (order approval gates, artwork approval, and per-line-item missing
+  into `questions` (order approval gates, the ship date, and per-line-item missing
   estimate data — each tagged with the exact field it maps to; `MissingLineItemDataError`
   now carries a `field` for this) and `infoNotes` (import-time flags, and estimate gaps
   with no backing field at all — a station with no formula yet — which no note can
@@ -836,8 +858,10 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   the decoration+finishing line-item grouping — but also surfaced five concrete gaps the
   schema doesn't cover yet, each needing a real answer, not a guess:
   - **"Patch Install" (Job 100113) matches no `decoration_type` or `finishing_step` value.**
-    Not screen print/embroidery/DTF/DTG, not matte/relabel/fold&bag/hang tag. No station,
-    no formula. Needs a decision from Jeff on what it is and where it runs.
+    Not screen print/embroidery/DTF/DTG, not matte/relabel/fold&bag/hang tag. **Partly
+    resolved (2026-09-28):** it's no longer dropped — it imports as an `OTHER` line item
+    (see "Every export imports for review" below) and the reviewer assigns its station and
+    hours. Still open: whether it deserves a real job type with its own formula.
   - **No `weight_class` signal for headwear** (Job 100128's caps) — **partially
     resolved (2026-09-21)**: `LineItem.garmentStyle` (`flat`/`cap`) and
     `capConstruction` (`structured`/`unstructured`, cap-only) now exist and embroidery's

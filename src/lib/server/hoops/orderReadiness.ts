@@ -14,12 +14,12 @@ export async function fetchOrderGaps(orderIds: readonly string[], db: Db = prism
 	if (orderIds.length === 0) return new Map();
 	const orders = await db.order.findMany({
 		where: { id: { in: [...orderIds] } },
-		select: { id: true, blankOrderingStatus: true, customerApprovalStatus: true, lineItems: true }
+		select: { id: true, externalShipDate: true, blankOrderingStatus: true, customerApprovalStatus: true, lineItems: true }
 	});
 	return new Map(
 		orders.map((order) => [
 			order.id,
-			computeOrderGaps({ blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] }, order.lineItems)
+			computeOrderGaps({ externalShipDate: order.externalShipDate, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] }, order.lineItems)
 		])
 	);
 }

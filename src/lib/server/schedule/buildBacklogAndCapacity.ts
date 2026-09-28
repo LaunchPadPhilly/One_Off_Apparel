@@ -1,6 +1,5 @@
 import { prisma } from '$lib/server/prisma';
 import {
-	ArtworkApprovalStatus,
 	BlankOrderingStatus,
 	CustomerApprovalStatus,
 	LineItemStatus,
@@ -9,6 +8,7 @@ import {
 } from '../../../../prisma/generated/prisma/enums';
 import { ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import type { DateRange } from './types';
 
 function startOfToday(): Date {
@@ -32,8 +32,8 @@ export interface SchedulingBacklog {
  *   2. Order.status is CONFIRMED (import confirmation gate passed)
  *   3. Order.blankOrderingStatus is RECEIVED (garments are in hand)
  *   4. Order.customerApprovalStatus is APPROVED (customer signed off)
- *   5. For DECORATION rows: artworkApprovalStatus is APPROVED
- *      For FINISHING rows: artworkApprovalStatus is null (no artwork to approve)
+ *   5. (Removed 2026-09-28: artwork approval is no longer a gate — the client always
+ *      considers artwork done.)
  *   6. Order.internalDueDate is today or later (2026-09-22 decision: an order whose due
  *      date has already passed is excluded from scheduling entirely — not placed with a
  *      "past due" flag, not even offered as a candidate — until its due date is
@@ -53,8 +53,11 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 	const lineItems = await prisma.lineItem.findMany({
 		where: {
 			OR: [
-				{ itemType: LineItemType.DECORATION, status: LineItemStatus.NEEDS_REVIEW, artworkApprovalStatus: ArtworkApprovalStatus.APPROVED },
-				{ itemType: LineItemType.FINISHING, status: { in: [LineItemStatus.NEEDS_REVIEW, LineItemStatus.BLOCKED] } }
+				{ itemType: LineItemType.DECORATION, status: LineItemStatus.NEEDS_REVIEW },
+				{ itemType: LineItemType.FINISHING, status: { in: [LineItemStatus.NEEDS_REVIEW, LineItemStatus.BLOCKED] } },
+				// A job type the system doesn't model (e.g. Patch Install) — schedulable once a
+				// reviewer has assigned it a station and hours (estimateHours flags it otherwise).
+				{ itemType: LineItemType.OTHER, status: LineItemStatus.NEEDS_REVIEW }
 			],
 			order: {
 				status: OrderStatus.CONFIRMED,
@@ -87,8 +90,14 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 
 	const backlog = lineItems.map((item) => {
 		let dependsOnIds: string[] = [];
-		if (item.itemType === LineItemType.FINISHING && item.dependsOn) {
-			dependsOnIds = item.dependsOn === ALL_SIBLINGS_DEPENDENCY ? (siblingIdsByOrder.get(item.orderId) ?? []).filter((id) => id !== item.id) : [item.dependsOn];
+		if (item.itemType === LineItemType.FINISHING) {
+			// The finishing rule (finishingDependencies.ts, 2026-09-28) wins over whatever
+			// an older row has stored: relabel / hang tags / wovens wait on nothing, fold &
+			// bag on everything, matte on its stored decoration.
+			const rule = finishingDependencyRule(item.finishingStep);
+			const allSiblings = rule === 'all_siblings' || (rule === 'decoration' && item.dependsOn === ALL_SIBLINGS_DEPENDENCY);
+			if (allSiblings) dependsOnIds = (siblingIdsByOrder.get(item.orderId) ?? []).filter((id) => id !== item.id);
+			else if (rule === 'decoration' && item.dependsOn) dependsOnIds = [item.dependsOn];
 		}
 		for (const id of dependsOnIds) {
 			if (!inBacklog.has(id)) externalDependencies.set(id, statusById.get(id) === LineItemStatus.COMPLETE ? 'complete' : 'not_schedulable');
@@ -108,7 +117,11 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			matteSurface: item.matteSurface,
 			foldBagGarment: item.foldBagGarment,
 			manualEstimatedHours: item.manualEstimatedHours,
-			dueDate: item.order.internalDueDate,
+			otherJobType: item.otherJobType,
+			assignedStationId: item.assignedStationId,
+			// Never null here: the `internalDueDate: { gte: … }` filter above excludes orders
+			// with no ship date yet (they can't be confirmed without one anyway).
+			dueDate: item.order.internalDueDate!,
 			dependsOnIds
 		};
 		return backlogItem;

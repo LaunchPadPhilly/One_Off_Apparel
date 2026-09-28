@@ -63,7 +63,8 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			id: order.id,
 			hoopsOrderId: order.hoopsOrderId,
 			customerName: order.customerName,
-			internalDueDate: order.internalDueDate.toISOString().slice(0, 10),
+			// Null until a ship date is entered (export had no Deadline, 2026-09-28).
+			internalDueDate: order.internalDueDate?.toISOString().slice(0, 10) ?? null,
 			status: order.status,
 			lineItemCount: order.lineItems.length,
 			estimate: summarizeOrderEstimate(order.lineItems),

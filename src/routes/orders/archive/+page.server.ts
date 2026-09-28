@@ -27,7 +27,8 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			id: order.id,
 			hoopsOrderId: order.hoopsOrderId,
 			customerName: order.customerName,
-			internalDueDate: order.internalDueDate.toISOString().slice(0, 10),
+			// Null until a ship date is entered (export had no Deadline, 2026-09-28).
+			internalDueDate: order.internalDueDate?.toISOString().slice(0, 10) ?? null,
 			// NEW (2026-09-21): now that this page shows two different statuses instead
 			// of just COMPLETE, we need to actually pass the status through so the page
 			// can show which one each order is.

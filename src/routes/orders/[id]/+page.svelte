@@ -20,9 +20,11 @@
 	let internalDueDate = $state(data.order.internalDueDate);
 
 	function onExternalShipDateChange(newValue: string) {
-		const wasDefault = internalDueDate === computeInternalDueDate(externalShipDate);
+		// Either date may be '' (an export with no Deadline, 2026-09-28) — computing from ''
+		// would throw "Invalid time value", so only compute from a real date.
+		const wasDefault = !internalDueDate || (externalShipDate !== '' && internalDueDate === computeInternalDueDate(externalShipDate));
 		externalShipDate = newValue;
-		if (wasDefault) internalDueDate = computeInternalDueDate(newValue);
+		if (wasDefault) internalDueDate = newValue ? computeInternalDueDate(newValue) : '';
 	}
 
 	// data.gaps (see orderGaps.ts, computed server-side and shared with the notes-box
@@ -47,7 +49,8 @@
 		capConstruction: 'Is it a structured or unstructured cap',
 		matteSurface: 'Is the matte finish on a flat or specialty surface',
 		foldBagGarment: 'Is the garment being folded & bagged a short-sleeve tee',
-		manualEstimatedHours: 'How many hours does it need (DTF/DTG has no formula)'
+		manualEstimatedHours: 'How many hours does it need (no formula for this job type)',
+		assignedStationId: 'What station is it assigned to'
 	};
 
 	const needsReReview = $derived(data.order.status === 'CONFIRMED' && data.gaps.blockingCount > 0);
@@ -61,17 +64,8 @@
 
 		const lineItemQuestions = data.gaps.questions.filter((q) => q.target.level === 'lineItem');
 
-		const artworkQs = lineItemQuestions.filter((q) => q.target.field === 'artworkApprovalStatus');
-		if (artworkQs.length > 0) {
-			items.push({
-				key: 'artwork-group',
-				text: artworkQs.length === 1 ? artworkQs[0].question : `Has artwork been approved for these ${artworkQs.length} line items?`
-			});
-		}
-
 		const byField = new Map<string, typeof lineItemQuestions>();
 		for (const q of lineItemQuestions) {
-			if (q.target.field === 'artworkApprovalStatus') continue;
 			const list = byField.get(q.target.field) ?? [];
 			list.push(q);
 			byField.set(q.target.field, list);
@@ -264,7 +258,7 @@
 		{#if data.canEdit && data.order.status === 'NEEDS_REVIEW'}
 			<!-- Only confirmable once fully valid (confirmImport.ts enforces the same
 			     rule server-side): every line item estimable, blanks received, customer
-			     approved, all artwork approved. -->
+			     approved, and a ship date set. (Artwork is always considered approved.) -->
 			<form method="POST" action="?/confirm" use:enhance class="confirm-row">
 				<button class="button" use:pressable type="submit" disabled={data.gaps.blockingCount > 0}>Confirm import</button>
 				{#if data.gaps.blockingCount > 0}
@@ -342,11 +336,6 @@
 					{#if item.reviewConfidence !== null && item.reviewConfidence < 0.6}
 						<span class="badge badge--warn">low confidence ({item.reviewConfidence})</span>
 					{/if}
-					{#if item.artworkApprovalStatus}
-						<span class="badge" class:badge--success={item.artworkApprovalStatus === 'APPROVED'} class:badge--warn={item.artworkApprovalStatus !== 'APPROVED'}>
-							artwork: {item.artworkApprovalStatus}
-						</span>
-					{/if}
 					<!-- NEW (2026-09-21): this job's own live estimate — a plain success-toned
 					     badge when we can compute it, or a warn-toned badge with the reason in
 					     a hover tooltip when we can't yet (missing formula vs missing job data;
@@ -360,7 +349,7 @@
 					{/if}
 				</div>
 				<p class="muted">
-					{item.decorationType ?? item.finishingStep} · {item.apparelColor} · {item.weightClass} ·
+					{item.decorationType ?? item.finishingStep ?? item.otherJobType ?? 'Unknown job type'} · {item.weightClass} ·
 					qty {item.quantity}
 					{#if item.printLocation}· {item.printLocation}{/if}
 					{#if item.inkColorCount}· {item.inkColorCount} color{item.inkColorCount === 1 ? '' : 's'}{/if}
@@ -373,7 +362,7 @@
 				{#if data.canEdit}
 					<!--
 						KEYED on the item's own editable fields: every line-item form on this
-						page reuses the same input `name`s ("design", "apparelColor", "quantity")
+						page reuses the same input `name`s ("design", "quantity", …)
 						since each form posts independently server-side — but that also makes
 						them look identical to the browser's own form-autofill/restore heuristics,
 						which key off name alone, not which <form> an input belongs to. That let
@@ -383,11 +372,10 @@
 						these exact DOM nodes whenever the item's own data changes, so there's
 						nothing stale left for the browser to "restore" into.
 					-->
-					{#key `${item.id}:${item.design}:${item.apparelColor}:${item.quantity}:${item.manualEstimatedHours}`}
+					{#key `${item.id}:${item.design}:${item.quantity}:${item.manualEstimatedHours}:${item.assignedStationId}`}
 						<form method="POST" action="?/updateLineItem" use:enhance class="fields">
 							<input type="hidden" name="lineItemId" value={item.id} />
 							<label>Design <input name="design" value={item.design} autocomplete="off" /></label>
-							<label>Color <input name="apparelColor" value={item.apparelColor} autocomplete="off" /></label>
 							<label>Qty <input name="quantity" type="number" value={item.quantity} autocomplete="off" /></label>
 						<!--
 							NEW (2026-09-21): these two dropdowns let someone set
@@ -398,6 +386,24 @@
 							existing value — the server only updates a field if you
 							pick something other than blank (see +page.server.ts).
 						-->
+						{#if item.itemType === 'OTHER'}
+							<!-- NEW (2026-09-28): a job type the system doesn't model yet (e.g.
+							     Patch Install). The reviewer says which station it runs on and
+							     how long it takes; the schedule places it only on that station. -->
+							<label>
+								Station
+								<select name="assignedStationId">
+									<option value="" selected={!item.assignedStationId}>— choose —</option>
+									{#each data.stations as station (station.id)}
+										<option value={station.id} selected={item.assignedStationId === station.id}>{station.label}</option>
+									{/each}
+								</select>
+							</label>
+							<label>
+								Hours needed
+								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
+							</label>
+						{/if}
 						{#if item.decorationType === 'DTF' || item.decorationType === 'DTG'}
 							<!-- NEW (2026-09-23): DTF/DTG have no formula (time depends on the
 							     artwork), so the reviewer enters the hours; that's the estimate. -->
@@ -421,19 +427,6 @@
 									<option value="" selected={!item.capConstruction}>—</option>
 									<option value="STRUCTURED" selected={item.capConstruction === 'STRUCTURED'}>Structured</option>
 									<option value="UNSTRUCTURED" selected={item.capConstruction === 'UNSTRUCTURED'}>Unstructured</option>
-								</select>
-							</label>
-							<!-- NEW: the artwork-approval gate fetchBacklog() requires before this
-							     row can be scheduled. Blank "—" means "don't change," same pattern
-							     as garmentStyle/capConstruction above. -->
-							<label>
-								Artwork approval
-								<select name="artworkApprovalStatus">
-									<option value="" selected={!item.artworkApprovalStatus}>—</option>
-									<option value="NOT_SUBMITTED" selected={item.artworkApprovalStatus === 'NOT_SUBMITTED'}>Not submitted</option>
-									<option value="PENDING_APPROVAL" selected={item.artworkApprovalStatus === 'PENDING_APPROVAL'}>Pending</option>
-									<option value="REVISION_REQUESTED" selected={item.artworkApprovalStatus === 'REVISION_REQUESTED'}>Revision requested</option>
-									<option value="APPROVED" selected={item.artworkApprovalStatus === 'APPROVED'}>Approved</option>
 								</select>
 							</label>
 						{/if}

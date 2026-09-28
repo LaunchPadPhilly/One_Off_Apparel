@@ -42,13 +42,13 @@ const extractionTool: Anthropic.Tool = {
 			externalShipDate: {
 				type: 'string',
 				description:
-					'ISO date YYYY-MM-DD. Use the "Deadline" date. Do not emit an internal due date — this system computes it deterministically as 14 days before this date; never guess or duplicate it yourself.'
+					'ISO date YYYY-MM-DD. Use the "Deadline" date. If the export has no Deadline, return an empty string — never substitute another date such as the job creation "Date". Do not emit an internal due date — this system computes it deterministically as 14 days before this date; never guess or duplicate it yourself.'
 			},
 			confidenceFlags: {
 				type: 'array',
 				items: { type: 'string' },
 				description:
-					'Free-text notes on anything uncertain or excluded: unmapped decoration/finishing types (e.g. "Patch Install" has no schema match), administrative fee rows excluded (e.g. digitizing fee, ink color change), missing weight_class signal, print_location that did not fit front/back/left/right.'
+					'Free-text notes on anything uncertain or excluded: OTHER rows (a job type with no schema match, e.g. "Patch Install"), a missing Deadline, administrative fee or supply rows excluded (e.g. digitizing fee, ink color change), missing weight_class signal, print_location that did not fit front/back/left/right.'
 			},
 			lineItems: {
 				type: 'array',
@@ -58,7 +58,8 @@ const extractionTool: Anthropic.Tool = {
 					type: 'object',
 					properties: {
 						localId: { type: 'string', description: 'Any unique string within this order, e.g. "1", "2" — used to wire dependsOn before real ids exist.' },
-						itemType: { type: 'string', enum: ['DECORATION', 'FINISHING'] },
+						itemType: { type: 'string', enum: ['DECORATION', 'FINISHING', 'OTHER'], description: 'OTHER for production work that matches no decorationType or finishingStep (e.g. "Patch Install").' },
+						otherJobType: { type: ['string', 'null'], description: 'OTHER rows only: the treatment name as written in the export, e.g. "Patch Install". Null otherwise.' },
 						design: { type: 'string', description: 'What the design is, including any design code shown (e.g. "HooDoo stacked script logo (AA2965)").' },
 						printLocation: {
 							type: ['string', 'null'],
@@ -80,7 +81,7 @@ const extractionTool: Anthropic.Tool = {
 						dependsOn: {
 							type: ['string', 'null'],
 							description:
-								'FINISHING rows only. Another line item\'s localId (the specific decoration this finish applies to), or the literal string "all_siblings" if it depends on every other line item on the order (e.g. final packaging). Null for DECORATION rows.'
+								'MATTE rows: the localId of the decoration this matte finishes. FOLD_BAG rows: the literal string "all_siblings". Null for RELABEL, HANG_TAG, WOVENS and DECORATION rows.'
 						},
 						weightClass: {
 							type: 'string',
@@ -111,9 +112,11 @@ const SYSTEM_PROMPT = `You extract structured order data from a "Job" PDF export
 
 - The "Job <number>" line is the order identifier.
 - The job details table is organized into repeating groups: one blank/garment block (Code, Name/Description, Vendor, Color, Size, Quantity rows — one row per size) followed by one or more decoration/finishing rows (Name/Description, Vendor, Position, Color(s), Size, Quantity). Each decoration or finishing row is its own line item, sharing the same order — NOT one line item per garment/size row.
-- A finishing row (relabel, matte, etc.) depends on the decoration it finishes within the same garment group — wire dependsOn to that decoration's localId.
+- A matte finishing row depends on the decoration it finishes within the same garment group — wire dependsOn to that decoration's localId. Fold & bag always waits on everything ("all_siblings"). Relabel, hang tags and wovens wait on nothing — leave their dependsOn null. (The system enforces these rules itself; this just keeps your output consistent with them.)
 - Never invent a value you cannot support from the text. When something doesn't fit the schema (an unmapped treatment type, a missing signal, an ambiguous position), say so in confidenceFlags rather than guessing silently. This system's whole design assumes a human reviews everything you extract before it becomes real — your job is to make what you're unsure about visible, not to be right about everything.
-- If a treatment has no matching decorationType or finishingStep at all (e.g. "Patch Install" — it's neither screen print/embroidery/DTF/DTG nor matte/relabel/fold&bag/hang tag/wovens), DO NOT put it in lineItems, not even with a null/guessed type. Leave it out of the array entirely and describe it in confidenceFlags instead — an item with no schema mapping is not a line item with missing fields, it's an excluded item.
+- If a treatment is real production work but has no matching decorationType or finishingStep (e.g. "Patch Install" — it's neither screen print/embroidery/DTF/DTG nor matte/relabel/fold&bag/hang tag/wovens), include it as itemType "OTHER" with otherJobType set to its name as written (e.g. "Patch Install"), decorationType and finishingStep null, and note it in confidenceFlags. Never force it into a type it isn't; a reviewer will assign its station and hours.
+- Rows that aren't production work on garments — administrative fees (digitizing fee, ink color change) and supply/material lines (e.g. "75 units of patches", leftover patches for the customer) — are never line items. Leave them out and mention them in confidenceFlags.
+- If there is no "Deadline", return an empty externalShipDate and say so in confidenceFlags. Never use another date instead.
 
 Call emit_extracted_order exactly once with everything you found.`;
 
@@ -181,11 +184,32 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 		}
 	}
 
+	// Nothing incomplete should stop an order reaching Orders for review (2026-09-28).
+	// Some exports have no "Deadline" (e.g. Job 100160 only has its creation "Date"):
+	// import with no ship date, and the order page asks for it. (Computing a due date
+	// from a non-ISO string used to crash the whole import with "Invalid time value".)
+	const rawShipDate = typeof raw.externalShipDate === 'string' ? raw.externalShipDate.trim() : '';
+	const shipDate = isIsoDate(rawShipDate) ? rawShipDate : null;
+	if (!shipDate) {
+		confidenceFlags.push(`No Deadline date could be read from the export${rawShipDate ? ` (read "${rawShipDate}")` : ''} — enter the ship date on the order page.`);
+	}
+
+	// Same idea for the two identifying fields: fall back rather than refuse. The job
+	// number is also in the file name ("Job 100157 - …"); only a file with neither is
+	// refused, since an order must be identifiable to be imported or re-imported.
+	const hoopsOrderId = (typeof raw.hoopsOrderId === 'string' && raw.hoopsOrderId.trim()) || /Job\s*(\d+)/i.exec(filename)?.[1] || '';
+	if (!hoopsOrderId) throw new PdfExtractionError(`"${filename}" has no Job number Claude could read, so it can't be matched to a Hoops job.`);
+	let customerName = typeof raw.customerName === 'string' ? raw.customerName.trim() : '';
+	if (!customerName) {
+		customerName = 'Unknown customer';
+		confidenceFlags.push('No customer name could be read from the export — fill it in on the order page.');
+	}
+
 	try {
 		// internalDueDate is never asked of the model (see extractionTool above) — it's
 		// always computed from externalShipDate, per CLAUDE.md's resolved lead-time policy.
-		const internalDueDate = typeof raw.externalShipDate === 'string' ? computeInternalDueDate(raw.externalShipDate) : raw.externalShipDate;
-		const validated = orderCandidateSchema.parse({ ...raw, internalDueDate, importedBy, lineItems });
+		const internalDueDate = shipDate ? computeInternalDueDate(shipDate) : null;
+		const validated = orderCandidateSchema.parse({ ...raw, hoopsOrderId, customerName, externalShipDate: shipDate, internalDueDate, importedBy, lineItems });
 		return { ...validated, confidenceFlags };
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
@@ -197,4 +221,11 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 			error
 		);
 	}
+}
+
+/** A real calendar date in "YYYY-MM-DD" form (rejects e.g. "2026-02-30" and "29 Sep. 2026"). */
+function isIsoDate(value: string): boolean {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+	const date = new Date(`${value}T00:00:00.000Z`);
+	return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }

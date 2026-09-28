@@ -6,6 +6,7 @@
 	import { computeInsertRank, insertAndRepack, repackOrdered } from '$lib/schedule/repackDay';
 	import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 	import { isFinishingKind } from '$lib/schedule/stationKinds';
+	import { countScreens } from '$lib/schedule/screenCount';
 	import { deserialize } from '$app/forms';
 	import type { PageProps } from './$types';
 
@@ -141,6 +142,24 @@
 		return `${first.date} – ${last.date}`;
 	});
 
+	// Weekly screen count: screens to prepare per week of this draft, from the
+	// live placements, so it updates as jobs are dragged between weeks. Weeks are the
+	// same 7-day chunks (from the draft's start date) the Week view pages through.
+	let weeklyScreens = $derived.by(() =>
+		Array.from({ length: totalWeeks }, (_, index) => {
+			const weekDays = data.capacity.slice(index * 7, index * 7 + 7);
+			const dates = new Set(weekDays.map((day) => day.date));
+			const items = placements
+				.filter((placement) => dates.has(placement.date))
+				.map((placement) => {
+					const lineItem = findLineItem(placement.lineItemId);
+					return { lineItemId: placement.lineItemId, date: placement.date, decorationType: lineItem?.decorationType, screens: lineItem?.screens };
+				});
+			const range = weekDays.length ? `${formatDayLabel(weekDays[0].date).date} – ${formatDayLabel(weekDays[weekDays.length - 1].date).date}` : '';
+			return { index, range, count: countScreens(items) };
+		})
+	);
+
 	function goPrevWeek() {
 		weekIndex = Math.max(0, weekIndex - 1);
 	}
@@ -182,7 +201,8 @@
 		return hours < 10 ? `${hours.toFixed(1)}h` : `${Math.round(hours)}h`;
 	}
 
-	function stepChip(item: { itemType: string; decorationType: string | null; finishingStep: string | null; printLocation: string | null }): string {
+	function stepChip(item: { itemType: string; decorationType: string | null; finishingStep: string | null; printLocation: string | null; otherJobType?: string | null }): string {
+		if (item.itemType === 'OTHER') return item.otherJobType ?? 'Other job';
 		if (item.itemType === 'FINISHING') return stationLabel(item.finishingStep ?? 'finishing');
 		const deco = item.decorationType ? stationLabel(item.decorationType) : 'Decoration';
 		const loc = item.printLocation ? stationLabel(item.printLocation) : '';
@@ -378,7 +398,7 @@
 		const done = depPlacement
 			? `, done ${formatDayLabel(depPlacement.date).weekday} ${formatClock(wallClockEnd(depPlacement.startMin, depPlacement.durationMin))}`
 			: ' (not placed yet)';
-		return `Waits on the ${dep.apparelColor} ${stepName(dep).toLowerCase()}${done}`;
+		return `Waits on the ${dep.design ? `"${dep.design}" ` : ''}${stepName(dep).toLowerCase()}${done}`;
 	}
 
 	function findOrder(orderId: string) {
@@ -1019,9 +1039,6 @@
 											{#if item.quantity}
 												<span class="chip chip--muted">×{item.quantity}</span>
 											{/if}
-											{#if item.apparelColor}
-												<span class="chip chip--muted">{item.apparelColor}</span>
-											{/if}
 											{#if stationName}
 												<span class="chip chip--station">{stationDisplayLabel(stationName)}</span>
 											{/if}
@@ -1088,6 +1105,25 @@
 						>›</button>
 					</div>
 				{/if}
+			</div>
+
+			<!-- Weekly screen count: how many screens to prep each week. -->
+			<div class="screen-counts" aria-label="Screens to prepare per week">
+				<span class="screen-counts__title">Screens to prep</span>
+				{#each weeklyScreens as week (week.index)}
+					{#if daysViewMode === 'scroll' || week.index === weekIndex}
+						<span
+							class="screen-counts__week"
+							title={week.count.missingCount > 0
+								? `${week.count.missingCount} screen-print job${week.count.missingCount === 1 ? ' has' : 's have'} no screen count set, so this may be low.`
+								: `${week.count.jobCount} screen-print job${week.count.jobCount === 1 ? '' : 's'}`}
+						>
+							<span class="muted">{daysViewMode === 'scroll' ? `Wk ${week.index + 1} · ${week.range}` : 'This week'}</span>
+							<strong>{week.count.screens}</strong>
+							{#if week.count.missingCount > 0}<span class="screen-counts__warn">+{week.count.missingCount} unknown</span>{/if}
+						</span>
+					{/if}
+				{/each}
 			</div>
 
 			<div class="days">
@@ -1169,7 +1205,7 @@
 														style="left: {pctFromShiftStart(seg.start)}%; width: {pctWidth(seg.end - seg.start)}%; --block-color: {bg};"
 													>
 														{#if isFirst}
-															<span class="placement__label">{lineItem?.apparelColor || title}</span>
+															<span class="placement__label">{lineItem?.design || title}</span>
 															<span class="placement__time">{formatMinutes(placement.durationMin)}</span>
 															<button
 																type="button"
@@ -1187,9 +1223,6 @@
 																			<span class="chip">{stepChip(lineItem)}</span>
 																			{#if lineItem.quantity}
 																				<span class="chip chip--muted">×{lineItem.quantity}</span>
-																			{/if}
-																			{#if lineItem.apparelColor}
-																				<span class="chip chip--muted">{lineItem.apparelColor}</span>
 																			{/if}
 																		{/if}
 																	</div>
@@ -1770,6 +1803,38 @@
 		justify-content: space-between;
 		gap: var(--space-3);
 		flex-wrap: wrap;
+	}
+
+	/* Weekly screen count. */
+	.screen-counts {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-2) var(--space-3);
+		margin-top: var(--space-2);
+		font-size: 0.875rem;
+	}
+
+	.screen-counts__title {
+		font-weight: 600;
+	}
+
+	.screen-counts__week {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 0.4rem;
+		padding: 0.2rem 0.6rem;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+	}
+
+	.screen-counts__week strong {
+		font-variant-numeric: tabular-nums;
+	}
+
+	.screen-counts__warn {
+		color: var(--ink-500);
+		font-size: 0.8rem;
 	}
 
 	/* Track is a darker tint with an edge; the selected option is a raised

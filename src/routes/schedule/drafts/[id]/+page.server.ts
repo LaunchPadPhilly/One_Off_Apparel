@@ -43,7 +43,17 @@ function findActiveStation(name: string) {
 // Same rule the board's drag-over guard applies: a job may only land on a station of
 // the kind its type maps to. `expectedStationFor` returns null for an as-yet-
 // uncategorized type; we don't restrict those.
-function kindMismatchMessage(expected: string | null, station: { label: string; kind: string }): string | null {
+// An OTHER job (a type the system doesn't model, e.g. Patch Install — 2026-09-28) may
+// only go on the one station a reviewer assigned it to.
+function stationMismatchMessage(
+	item: Parameters<typeof expectedStationFor>[0] & { assignedStationId: string | null },
+	station: { id: string; label: string; kind: string }
+): string | null {
+	if (item.itemType === 'OTHER') {
+		if (!item.assignedStationId) return 'Assign this job a station on its order page first.';
+		return item.assignedStationId === station.id ? null : `This job is assigned to a different station, not ${station.label}. Change it on the order page if that's wrong.`;
+	}
+	const expected = expectedStationFor(item);
 	if (!expected || expected === station.kind) return null;
 	return `This job belongs on a ${stationDisplayLabel(expected)} station, not ${station.label}.`;
 }
@@ -128,7 +138,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		// CONFIRMED only — a NEEDS_REVIEW order hasn't passed CLAUDE.md's first human
 		// approval gate (import confirmation) yet, so it has no business being placeable
 		// here even manually. This intentionally does NOT also require the stricter
-		// fetchBacklog() gates (blanks received, customer approval, artwork approval) —
+		// fetchBacklog() gates (blanks received, customer approval) —
 		// those are enforced for the *automatic* engine path (proposeIntoNewDraft.ts);
 		// a human manually planning ahead can still place a confirmed order before every
 		// pre-production gate is finalized. ALSO excludes an order whose due date has
@@ -207,13 +217,14 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			customerName: order.customerName,
 			displayTitle: order.displayTitle,
 			colorHex: order.colorHex,
-			internalDueDate: iso(order.internalDueDate),
-			externalShipDate: iso(order.externalShipDate),
+			// Never null: the candidate query's internalDueDate filter excludes orders with no date.
+			internalDueDate: iso(order.internalDueDate!),
+			externalShipDate: order.externalShipDate ? iso(order.externalShipDate) : '',
 			status: order.status,
 			// NEW (2026-09-23): open items (orderGaps.ts) — a confirmed order with any is
 			// flagged "Needs re-review" on its card, linking to the order page to fix it.
 			blockingCount: computeOrderGaps(
-				{ blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
+				{ externalShipDate: order.externalShipDate, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
 				order.lineItems
 			).blockingCount,
 			lineItems: order.lineItems.map((item) => ({
@@ -221,9 +232,12 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				design: item.design,
 				itemType: item.itemType,
 				decorationType: item.decorationType,
+				// For the weekly screen count.
+				screens: item.screens,
 				finishingStep: item.finishingStep,
 				printLocation: item.printLocation,
-				apparelColor: item.apparelColor,
+				// OTHER rows (2026-09-28): the export's name for the job, e.g. "Patch Install".
+				otherJobType: item.otherJobType,
 				inkColorCount: item.inkColorCount,
 				quantity: item.quantity,
 				status: item.status,
@@ -307,6 +321,7 @@ export const actions: Actions = {
 			where: { id: lineItemId },
 			select: {
 				itemType: true,
+				assignedStationId: true,
 				decorationType: true,
 				finishingStep: true,
 				order: { select: { status: true, internalDueDate: true } }
@@ -315,6 +330,9 @@ export const actions: Actions = {
 		if (!lineItem) return fail(404, { message: 'Line item not found' });
 		if (lineItem.order.status !== OrderStatus.CONFIRMED) {
 			return fail(400, { message: `This line item's order is ${lineItem.order.status}, not CONFIRMED — it can't be placed yet.` });
+		}
+		if (!lineItem.order.internalDueDate) {
+			return fail(400, { message: "This order has no ship date yet — set it on the order page before scheduling." });
 		}
 		if (lineItem.order.internalDueDate.getTime() < startOfToday().getTime()) {
 			return fail(400, { message: "This order's due date has already passed — it can't be scheduled until the due date is corrected." });
@@ -327,7 +345,7 @@ export const actions: Actions = {
 		// finishing step only on its own kind of finishing station, and so on. Same rule
 		// the draft-board sidebar and drag-over guard enforce, mirrored here so a stale
 		// browser tab or a hand-crafted POST can't slip past it.
-		const mismatch = kindMismatchMessage(expectedStationFor(lineItem), station);
+		const mismatch = stationMismatchMessage(lineItem, station);
 		if (mismatch) return fail(400, { message: mismatch });
 
 		// A finisher has to start after the job(s) it waits on end — refused, not snapped
@@ -386,7 +404,7 @@ export const actions: Actions = {
 				lineItemId: true,
 				estimatedHours: true,
 				lineItem: {
-					select: { itemType: true, decorationType: true, finishingStep: true }
+					select: { itemType: true, decorationType: true, finishingStep: true, assignedStationId: true }
 				}
 			}
 		});
@@ -399,7 +417,7 @@ export const actions: Actions = {
 		// Row restriction on move — same rule as placeAssignment above. Prevents a
 		// placed embroidery block from being dragged onto a finishing row (or vice
 		// versa) via a hand-crafted POST.
-		const mismatch = kindMismatchMessage(expectedStationFor(existing.lineItem), station);
+		const mismatch = stationMismatchMessage(existing.lineItem, station);
 		if (mismatch) return fail(400, { message: mismatch });
 
 		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, existing.lineItemId, date, Math.max(15, Math.round(existing.estimatedHours * 60)));

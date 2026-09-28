@@ -4,9 +4,31 @@
 	import { pressable } from '$lib/actions/pressable.svelte';
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig } from '$lib/appConfig';
+	import { screensByCalendarWeek } from '$lib/schedule/screenCount';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
+
+	// Weekly screen count: screens to prep per calendar week (Mon–Sun) for the
+	// approved / in-progress schedule.
+	const weeklyScreens = $derived(
+		screensByCalendarWeek(
+			data.assignments.map((assignment) => ({
+				lineItemId: assignment.lineItem.id,
+				date: assignment.date,
+				decorationType: assignment.lineItem.decorationType,
+				screens: assignment.lineItem.screens
+			}))
+		)
+	);
+
+	function weekLabel(weekStart: string): string {
+		const start = new Date(`${weekStart}T00:00:00Z`);
+		const end = new Date(start);
+		end.setUTCDate(end.getUTCDate() + 6);
+		const fmt = (d: Date) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+		return `${fmt(start)} – ${fmt(end)}`;
+	}
 
 	// Draft ids selected via the per-card checkboxes. Not persisted across reloads
 	// — this is one-off cleanup, not a saved view — so localStorage is deliberately
@@ -177,6 +199,35 @@
 					Deleted {form.deleted} draft{form.deleted === 1 ? '' : 's'}.
 				</p>
 			{/if}
+		{/if}
+	</section>
+
+	<section class="card">
+		<div class="card__title"><h2>Screens to prep</h2></div>
+		{#if weeklyScreens.length === 0}
+			<p class="muted">No screen-print jobs on the approved schedule yet.</p>
+		{:else}
+			<table>
+				<thead>
+					<tr><th>Week</th><th>Screens</th><th>Screen-print jobs</th></tr>
+				</thead>
+				<tbody>
+					{#each weeklyScreens as week (week.weekStart)}
+						<tr>
+							<td>{weekLabel(week.weekStart)}</td>
+							<td>
+								<strong>{week.count.screens}</strong>
+								{#if week.count.missingCount > 0}
+									<span class="muted" title="These jobs have no screen count set, so the total may be low.">
+										(+{week.count.missingCount} job{week.count.missingCount === 1 ? '' : 's'} with no screen count)
+									</span>
+								{/if}
+							</td>
+							<td>{week.count.jobCount}</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
 		{/if}
 	</section>
 

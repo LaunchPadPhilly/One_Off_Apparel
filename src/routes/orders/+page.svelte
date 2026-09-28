@@ -264,7 +264,7 @@
 								{/if}
 								<td class="job-cell">{order.hoopsOrderId}</td>
 								<td>{order.customerName}</td>
-								<td>{order.internalDueDate}</td>
+								<td>{order.internalDueDate ?? 'No ship date'}</td>
 								<td>
 									{#if order.status === 'CONFIRMED' && order.blockingCount > 0}
 										<!-- Confirmed but no longer valid: flagged, not moved back to review. -->

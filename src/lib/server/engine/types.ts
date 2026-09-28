@@ -41,6 +41,10 @@ export interface EstimateHoursInput {
 	foldBagGarment?: FoldBagGarment | null;
 	// NEW (2026-09-23): reviewer-entered hours for DTF/DTG (no formula exists).
 	manualEstimatedHours?: number | null;
+	// NEW (2026-09-28): OTHER rows only (a job type the system doesn't model, e.g.
+	// "Patch Install") — the export's name for it, and the station a reviewer assigned.
+	otherJobType?: string | null;
+	assignedStationId?: string | null;
 }
 
 export interface EstimateHoursResult {
@@ -48,6 +52,9 @@ export interface EstimateHoursResult {
 	// not a Station.id — which real station of that kind a job lands on is
 	// propose_schedule's choice (engine code stays DB-agnostic).
 	station: string;
+	// NEW (2026-09-28): set only for OTHER rows — the one exact station the reviewer
+	// assigned. When present, the job may only be placed on this station.
+	stationId?: string;
 	hours: number;
 }
 
