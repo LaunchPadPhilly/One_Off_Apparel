@@ -138,7 +138,10 @@ export const lineItemCorrectionSchema = lineItemCandidateBaseSchema
 		artworkApprovalStatus: z.enum(ArtworkApprovalStatus),
 		// NEW (2026-09-28): OTHER rows only — the station a reviewer says this job runs
 		// on. updateLineItemFields checks it's a real, active station.
-		assignedStationId: z.string().min(1)
+		assignedStationId: z.string().min(1),
+		// NEW (2026-09-28): a person's corrected estimate for this job (one-person hours);
+		// null clears it back to the formula.
+		estimatedHoursOverride: z.number().positive().max(200).nullable()
 	})
 	.partial();
 

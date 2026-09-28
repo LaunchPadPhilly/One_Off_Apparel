@@ -1,4 +1,5 @@
 import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface, type CapConstruction, type FoldBagGarment, type WeightClass } from '../../../../prisma/generated/prisma/enums';
+import { expectedStationFor } from '$lib/schedule/expectedStation';
 import type { EstimateHoursInput, EstimateHoursResult } from './types';
 
 /**
@@ -383,11 +384,46 @@ function roundToQuarterHour(hours: number): number {
  * divided by N; everything else stays fixed. Default 1 = the unchanged formula.
  */
 export function estimateHours(item: EstimateHoursInput, crewSize = 1): EstimateHoursResult {
-	const raw = estimateHoursRaw(item);
+	const raw = applyEstimateOverride(item);
 	const crew = Math.max(1, Math.floor(crewSize));
 	const divisible = raw.crewDivisibleHours ?? 0;
 	const hours = raw.hours - divisible + divisible / crew;
 	return { ...raw, hours: roundToQuarterHour(hours) };
+}
+
+/**
+ * A person's edited estimate (2026-09-28, the order page): when the formula's number is
+ * off, `estimatedHoursOverride` replaces it for this job (one-person hours). The station
+ * still comes from the job's type, and a bigger crew still shrinks the same share of it
+ * the formula would have (e.g. only screen print's run portion). If the formula can't
+ * run yet — a missing field, or no formula — the person's number stands in for it:
+ * decorations and finishing then treat all of it as crew-divisible (like DTF's entered
+ * hours), OTHER jobs none of it, and an OTHER job still needs its station assigned.
+ */
+function applyEstimateOverride(item: EstimateHoursInput): EstimateHoursResult {
+	const override = item.estimatedHoursOverride;
+	if (override == null || !(override > 0)) return estimateHoursRaw(item);
+
+	let formula: EstimateHoursResult | null = null;
+	try {
+		formula = estimateHoursRaw(item);
+	} catch (error) {
+		if (!(error instanceof EstimationError)) throw error;
+	}
+	if (formula) {
+		const divisibleShare = formula.hours > 0 ? (formula.crewDivisibleHours ?? 0) / formula.hours : 0;
+		return { ...formula, hours: override, crewDivisibleHours: override * divisibleShare, overridden: true, formulaHours: roundToQuarterHour(formula.hours) };
+	}
+
+	if (item.itemType === LineItemType.OTHER) {
+		if (!item.assignedStationId) {
+			throw new MissingLineItemDataError(`assigned station (which station does ${item.otherJobType ? `"${item.otherJobType}"` : 'this job'} run on?)`, 'assignedStationId');
+		}
+		return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours: override, crewDivisibleHours: 0, overridden: true, formulaHours: null };
+	}
+	const kind = expectedStationFor(item);
+	if (!kind) throw new MissingFormulaError(`a line item of type "${item.decorationType ?? item.finishingStep ?? item.itemType}"`);
+	return { station: kind, hours: override, crewDivisibleHours: override, overridden: true, formulaHours: null };
 }
 
 function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {

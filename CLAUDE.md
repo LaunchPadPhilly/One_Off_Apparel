@@ -298,6 +298,7 @@ One row per **design/print job or finishing step** on an order.
 | `quantity` | total units |
 | `size_breakdown` | units per size |
 | `estimated_hours` | jsonb — how long it should take, per station |
+| `estimated_hours_override` | float (2026-09-28) — a person's corrected **one-person** estimate for this job, set by clicking the estimate on the order page (`?/setEstimate`; "Use formula" clears it). When set it replaces the formula's (or the entered) hours; the station still comes from the job type, and a crew still shrinks the same share the formula would have. If the formula can't run yet (missing field / no formula) it stands in, all crew-divisible for decorations/finishing, none for OTHER (which still needs its station). Shown as "edited · formula says Xh". Already-approved schedule rows keep their hours; only new plans use it (`applyEstimateOverride` in `estimateHours.ts`) |
 | `review_confidence` | how sure Claude was when reading this in from the export |
 
 **Key rule to preserve:** a physical garment with a front print and a back embroidery is
