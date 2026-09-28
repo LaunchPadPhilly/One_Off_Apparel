@@ -290,6 +290,7 @@ One row per **design/print job or finishing step** on an order.
 | `cap_construction` | `structured` or `unstructured` — **only meaningful when `garment_style` is `cap`**, null otherwise |
 | `apparel_color` | text — the garment color (e.g. "Grey"). **Not shown anywhere in the app since 2026-09-28** — the client said users don't need to see it. Still stored and still filled by the Hoops import; not editable on the order page any more |
 | `ink_color_count` | int — number of colors in the decoration itself. Used for screen-print ink setup and embroidery thread-change time — but is the "X" variable in screen print's formula and the **"Y" variable in embroidery's** (the letter mapping isn't consistent across stations — see estimate_hours below). Do not confuse with `apparel_color` — they used to be conflated into one ambiguous `colors` field; they are not the same thing. |
+| `decoration_colors` | text (2026-09-28) — the colors going **on** the piece: ink / thread / patch colors from the export's "Color(s)" column, e.g. "109c Yellow, White". Display only — shown on the order page (editable, next to "# of colors") and on the schedule board's job cards and hover details. The formulas still use `ink_color_count`. Not the garment's color (`apparel_color`, hidden). Orders imported before this show only the count until re-imported |
 | `screens` | how many screens (screen print only) |
 | `stitch_count` | embroidery only — the "X" variable in embroidery's formula (not `ink_color_count`) |
 | `quantity` | total units |

@@ -73,6 +73,7 @@ async function createLineItemsForOrder(
 				weightClass: itemCandidate.weightClass,
 				apparelColor: itemCandidate.apparelColor,
 				inkColorCount: itemCandidate.inkColorCount ?? null,
+				decorationColors: itemCandidate.decorationColors || null,
 				screens: itemCandidate.screens ?? null,
 				stitchCount: itemCandidate.stitchCount ?? null,
 				garmentStyle: itemCandidate.garmentStyle ?? null,

@@ -239,6 +239,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				// OTHER rows (2026-09-28): the export's name for the job, e.g. "Patch Install".
 				otherJobType: item.otherJobType,
 				inkColorCount: item.inkColorCount,
+				// The colors going on the piece (2026-09-28) — shown on cards and hover details.
+				decorationColors: item.decorationColors,
 				quantity: item.quantity,
 				status: item.status,
 				// For the timeline's "waits on …" tooltip on finisher blocks.
