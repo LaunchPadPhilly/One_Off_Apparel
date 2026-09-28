@@ -23,7 +23,7 @@ export interface OrderGapQuestion {
 	key: string;
 	question: string;
 	target:
-		| { level: 'order'; field: 'blankOrderingStatus' | 'customerApprovalStatus' }
+		| { level: 'order'; field: 'externalShipDate' | 'blankOrderingStatus' | 'customerApprovalStatus' }
 		| { level: 'lineItem'; lineItemId: string; field: 'artworkApprovalStatus' | MissingLineItemField };
 }
 
@@ -48,7 +48,7 @@ export interface OrderGaps {
 export interface OrderGapLineItem extends EstimateHoursInput {
 	id: string;
 	design: string;
-	itemType: 'DECORATION' | 'FINISHING';
+	itemType: 'DECORATION' | 'FINISHING' | 'OTHER';
 	artworkApprovalStatus?: string | null;
 }
 
@@ -65,7 +65,9 @@ function isResolvedImportFlag(flag: string): boolean {
 }
 
 export function computeOrderGaps(
-	order: { blankOrderingStatus: string; customerApprovalStatus: string; importFlags: readonly string[] },
+	// externalShipDate is required (not optional) on purpose: an order with no ship date
+	// must always come back with that question, so no caller can forget to pass it.
+	order: { externalShipDate: Date | string | null; blankOrderingStatus: string; customerApprovalStatus: string; importFlags: readonly string[] },
 	lineItems: readonly OrderGapLineItem[]
 ): OrderGaps {
 	const questions: OrderGapQuestion[] = [];
@@ -73,6 +75,14 @@ export function computeOrderGaps(
 		.filter((flag) => !isResolvedImportFlag(flag))
 		.map((flag, i) => ({ key: `import-flag:${i}`, text: flag }));
 
+	// NEW (2026-09-28): an export with no Deadline imports with no ship date.
+	if (!order.externalShipDate) {
+		questions.push({
+			key: 'ship-date',
+			question: 'What is the ship date (deadline) for this order? The export didn’t have one.',
+			target: { level: 'order', field: 'externalShipDate' }
+		});
+	}
 	if (order.blankOrderingStatus !== 'RECEIVED') {
 		questions.push({
 			key: 'blanks',
@@ -95,21 +105,15 @@ export function computeOrderGaps(
 	const missingFormulaByReason = new Map<string, { count: number; firstDesign: string }>();
 
 	for (const item of lineItems) {
-		if (item.itemType === 'DECORATION' && item.artworkApprovalStatus !== 'APPROVED') {
-			questions.push({
-				key: `${item.id}:artwork`,
-				question: `Has artwork been approved for "${item.design}"?`,
-				target: { level: 'lineItem', lineItemId: item.id, field: 'artworkApprovalStatus' }
-			});
-		}
-
+		// No artwork-approval question (client decision, 2026-09-28): artwork is always
+		// considered done, so it never blocks confirming or scheduling.
 		const estimate = estimateForDisplay(item);
 		if (estimate.ok) continue;
 
 		if (estimate.category === 'missing_data') {
 			questions.push({
 				key: `${item.id}:${estimate.field}`,
-				question: fieldQuestion(estimate.field, item.design),
+				question: fieldQuestion(estimate.field, item),
 				target: { level: 'lineItem', lineItemId: item.id, field: estimate.field }
 			});
 		} else {
@@ -137,7 +141,8 @@ export function describeBlockers(blockingCount: number): string {
 	return `${blockingCount} open item${blockingCount === 1 ? '' : 's'} to resolve (see Needs attention)`;
 }
 
-function fieldQuestion(field: MissingLineItemField, design: string): string {
+function fieldQuestion(field: MissingLineItemField, item: OrderGapLineItem): string {
+	const design = item.design;
 	switch (field) {
 		case 'inkColorCount':
 			return `What is the ink/thread color count for "${design}"?`;
@@ -152,6 +157,10 @@ function fieldQuestion(field: MissingLineItemField, design: string): string {
 		case 'foldBagGarment':
 			return `Is "${design}" being folded & bagged a short-sleeve tee or another garment?`;
 		case 'manualEstimatedHours':
-			return `How many hours does "${design}" need? (DTF/DTG has no formula — time depends on the artwork.)`;
+			return item.itemType === 'OTHER'
+				? `How many hours does "${design}" need? (${item.otherJobType ?? 'This job type'} has no formula yet.)`
+				: `How many hours does "${design}" need? (DTF/DTG has no formula — time depends on the artwork.)`;
+		case 'assignedStationId':
+			return `What station is "${design}" assigned to? (${item.otherJobType ?? 'This job type'} isn't a job type the system knows yet.)`;
 	}
 }

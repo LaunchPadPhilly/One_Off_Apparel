@@ -47,16 +47,19 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// artwork approval, missing estimate data) and `infoNotes` (everything else — import
 	// flags, and estimate gaps with no backing field yet). Only `questions` are answerable
 	// via the notes box below; `infoNotes` are shown for awareness only. See orderGaps.ts.
-	const gaps = computeOrderGaps({ blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags }, order.lineItems);
+	const gaps = computeOrderGaps({ externalShipDate: order.externalShipDate, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags }, order.lineItems);
 
 	return {
 		canEdit: hasGrantedScope(locals.user, 'IMPORT_WRITE'),
+		// For "What station is this assigned to?" on OTHER rows (2026-09-28).
+		stations: await prisma.station.findMany({ where: { archivedAt: null }, orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }], select: { id: true, label: true } }),
 		order: {
 			id: order.id,
 			hoopsOrderId: order.hoopsOrderId,
 			customerName: order.customerName,
-			externalShipDate: order.externalShipDate.toISOString().slice(0, 10),
-			internalDueDate: order.internalDueDate.toISOString().slice(0, 10),
+			// '' when the export had no Deadline (2026-09-28) — the page asks for it.
+			externalShipDate: order.externalShipDate?.toISOString().slice(0, 10) ?? '',
+			internalDueDate: order.internalDueDate?.toISOString().slice(0, 10) ?? '',
 			status: order.status,
 			importedBy: order.importedBy,
 			notes: order.notes,
@@ -106,9 +109,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			matteSurface: item.matteSurface,
 			foldBagGarment: item.foldBagGarment,
 			manualEstimatedHours: item.manualEstimatedHours,
-			// NEW: the artwork-approval gate — decoration rows only, null on finishing
-			// rows. Same fetchBacklog() reasoning as Order.blankOrderingStatus above.
-			artworkApprovalStatus: item.artworkApprovalStatus,
+			// NEW (2026-09-28): OTHER rows — the export's name for the job, and its assigned station.
+			otherJobType: item.otherJobType,
+			assignedStationId: item.assignedStationId,
 			inkColorCount: item.inkColorCount,
 			screens: item.screens,
 			stitchCount: item.stitchCount,
@@ -175,7 +178,7 @@ export const actions: Actions = {
 		// up a field if the form actually sent a non-empty value for it, so leaving a
 		// dropdown on its blank "—" option just means "don't change this field," not
 		// "set it to empty."
-		for (const key of ['design', 'weightClass', 'garmentStyle', 'capConstruction', 'matteSurface', 'foldBagGarment', 'artworkApprovalStatus']) {
+		for (const key of ['design', 'weightClass', 'garmentStyle', 'capConstruction', 'matteSurface', 'foldBagGarment', 'assignedStationId']) {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = value.trim();
 		}

@@ -30,7 +30,15 @@ export class MissingFormulaError extends EstimationError {
 /** The exact LineItem field a MissingLineItemDataError is missing — lets a caller (the
  *  order page's "needs attention" gaps, the notes-based fill-in) target the real field
  *  precisely instead of parsing it back out of the human-readable message. */
-export type MissingLineItemField = 'inkColorCount' | 'stitchCount' | 'garmentStyle' | 'capConstruction' | 'matteSurface' | 'foldBagGarment' | 'manualEstimatedHours';
+export type MissingLineItemField =
+	| 'inkColorCount'
+	| 'stitchCount'
+	| 'garmentStyle'
+	| 'capConstruction'
+	| 'matteSurface'
+	| 'foldBagGarment'
+	| 'manualEstimatedHours'
+	| 'assignedStationId';
 
 /**
  * Thrown when a station's formula is real, but *this specific job* is missing a field
@@ -315,6 +323,26 @@ function estimateManualHours(item: EstimateHoursInput, station: string, label: s
 }
 
 /**
+ * OTHER rows (2026-09-28) — a job type the system doesn't model yet, e.g. "Patch
+ * Install". Kept at import instead of dropped so a person can review it; it needs a
+ * reviewer-assigned station and reviewer-entered hours, asked for in that order on the
+ * order page. Placed only on that exact station (the result's `stationId`).
+ */
+export const OTHER_STATION_KIND = 'other';
+
+function estimateOtherHours(item: EstimateHoursInput): EstimateHoursResult {
+	const name = item.otherJobType ? `"${item.otherJobType}"` : 'this job';
+	if (!item.assignedStationId) {
+		throw new MissingLineItemDataError(`assigned station (${name} isn't a job type the system knows — which station does it run on?)`, 'assignedStationId');
+	}
+	const hours = item.manualEstimatedHours;
+	if (hours == null || !(hours > 0)) {
+		throw new MissingLineItemDataError(`manual_estimated_hours (${name} has no formula — how many hours does this job need?)`, 'manualEstimatedHours');
+	}
+	return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours };
+}
+
+/**
  * Round to the nearest 15-minute increment, with a 15-minute floor so a very small
  * job never rounds to zero (which would give the scheduler a zero-duration slot).
  * Applied once here at the end of estimateHours so every consumer — Orders list,
@@ -346,7 +374,7 @@ function roundToQuarterHour(hours: number): number {
  */
 export function estimateHours(item: EstimateHoursInput): EstimateHoursResult {
 	const raw = estimateHoursRaw(item);
-	return { station: raw.station, hours: roundToQuarterHour(raw.hours) };
+	return { ...raw, hours: roundToQuarterHour(raw.hours) };
 }
 
 function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {
@@ -366,6 +394,8 @@ function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {
 				throw new MissingFormulaError(`a decoration line item with decorationType "${item.decorationType}"`);
 		}
 	}
+
+	if (item.itemType === LineItemType.OTHER) return estimateOtherHours(item);
 
 	return estimateFinishingHours(item);
 }

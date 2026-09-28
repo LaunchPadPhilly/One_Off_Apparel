@@ -66,7 +66,7 @@ export async function getReportData(range: { from: string; to: string }) {
 				orderBy: { completedAt: 'desc' },
 				select: { completedAt: true }
 			});
-			const onTime = !lastCompleted?.completedAt || lastCompleted.completedAt <= order.internalDueDate;
+			const onTime = !lastCompleted?.completedAt || !order.internalDueDate || lastCompleted.completedAt <= order.internalDueDate;
 			return {
 				orderId: order.id,
 				hoopsOrderId: order.hoopsOrderId,

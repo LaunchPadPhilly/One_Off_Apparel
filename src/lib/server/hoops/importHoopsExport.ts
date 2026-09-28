@@ -66,7 +66,10 @@ async function createLineItemsForOrder(
 				// relabel / hang tags / wovens wait on nothing (2026-09-28).
 				dependsOn: dependency.dependsOn,
 				status: dependency.status,
-				artworkApprovalStatus: isFinishing ? null : ArtworkApprovalStatus.NOT_SUBMITTED,
+				// Artwork is always considered approved (client decision, 2026-09-28); only
+				// decorations carry the field at all.
+				artworkApprovalStatus: itemCandidate.itemType === LineItemType.DECORATION ? ArtworkApprovalStatus.APPROVED : null,
+				otherJobType: itemCandidate.itemType === LineItemType.OTHER ? (itemCandidate.otherJobType ?? null) : null,
 				weightClass: itemCandidate.weightClass,
 				apparelColor: itemCandidate.apparelColor,
 				inkColorCount: itemCandidate.inkColorCount ?? null,
@@ -92,7 +95,7 @@ async function createLineItemsForOrder(
  * this doesn't parse a file itself). Creates `Order` rows at status needs_review and
  * `LineItem` rows at needs_review (decoration, and any finishing row with no unmet
  * dependency) or blocked (every other finishing row) — exactly per CLAUDE.md's schema
- * notes. Decoration rows get artworkApprovalStatus: NOT_SUBMITTED; finishing rows leave
+ * notes. Decoration rows get artworkApprovalStatus: APPROVED (always considered done); finishing rows leave
  * it null. Nothing here is schedulable yet: that gate is confirm_import + the
  * pre-production approval gates in the backlog query.
  *
@@ -120,8 +123,9 @@ export async function importHoopsExport(orders: readonly OrderCandidate[]): Prom
 				// externalShipDate/internalDueDate are z.iso.date() strings ("YYYY-MM-DD") —
 				// Prisma's runtime validation, unlike its TS types, rejects a date-only
 				// string and needs a real Date.
-				externalShipDate: new Date(orderCandidate.externalShipDate),
-				internalDueDate: new Date(orderCandidate.internalDueDate),
+				// Either may be null (no Deadline in the export) — the order page asks for it.
+				externalShipDate: orderCandidate.externalShipDate ? new Date(orderCandidate.externalShipDate) : null,
+				internalDueDate: orderCandidate.internalDueDate ? new Date(orderCandidate.internalDueDate) : null,
 				status: OrderStatus.NEEDS_REVIEW,
 				importedBy: orderCandidate.importedBy
 			};

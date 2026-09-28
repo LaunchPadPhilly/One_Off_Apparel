@@ -43,6 +43,17 @@ export async function updateLineItemFields(lineItemId: string, patch: LineItemCo
 	const validated = lineItemCorrectionSchema.parse(patch);
 
 	return prisma.$transaction(async (tx) => {
+		// A station assignment (2026-09-28) only means something on an OTHER row, and
+		// must name a real, active station — refused rather than stored otherwise.
+		if (validated.assignedStationId) {
+			const [lineItem, station] = await Promise.all([
+				tx.lineItem.findUnique({ where: { id: lineItemId }, select: { itemType: true } }),
+				tx.station.findFirst({ where: { id: validated.assignedStationId, archivedAt: null }, select: { id: true } })
+			]);
+			if (lineItem?.itemType !== 'OTHER') throw new Error('Only a job the system has no type for can be assigned a station by hand.');
+			if (!station) throw new Error('That station no longer exists — pick another one.');
+		}
+
 		const updated = await tx.lineItem.update({ where: { id: lineItemId }, data: validated });
 
 		await tx.domainAuditLog.create({

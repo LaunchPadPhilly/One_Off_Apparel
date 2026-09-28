@@ -102,7 +102,7 @@
 			<ul class="plain">
 				{#each data.onTime.late as order (order.orderId)}
 					<li>
-						<a href="/orders/{order.orderId}">{order.hoopsOrderId}</a> — due {order.dueDate.toISOString().slice(0, 10)}, completed {order.completedAt?.toISOString().slice(0, 10) ?? '—'}
+						<a href="/orders/{order.orderId}">{order.hoopsOrderId}</a> — due {order.dueDate?.toISOString().slice(0, 10) ?? '—'}, completed {order.completedAt?.toISOString().slice(0, 10) ?? '—'}
 						{#if order.notes}
 							<br /><span class="muted">"{order.notes}"</span>
 						{:else}

@@ -24,7 +24,11 @@ export const STATION_KINDS = [
 	{ key: 'fold_bag', label: 'Fold & bag', category: 'finishing' },
 	{ key: 'hang_tags', label: 'Hang tags', category: 'finishing' },
 	{ key: 'printed_relabel', label: 'Printed relabel', category: 'finishing' },
-	{ key: 'wovens', label: 'Wovens', category: 'finishing' }
+	{ key: 'wovens', label: 'Wovens', category: 'finishing' },
+	// 2026-09-28: for jobs the system doesn't model yet (e.g. a patch press). An OTHER
+	// line item is placed only on the station a reviewer assigned it to, with
+	// reviewer-entered hours — see estimateHours.ts's estimateOtherHours.
+	{ key: 'other', label: 'Other (hours entered per job)', category: 'production' }
 ] as const;
 
 export type StationKind = (typeof STATION_KINDS)[number]['key'];

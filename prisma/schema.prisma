@@ -266,8 +266,11 @@ model Order {
   id                     String                 @id @default(cuid())
   hoopsOrderId           String                 @unique
   customerName           String
-  externalShipDate       DateTime               @db.Date
-  internalDueDate        DateTime               @db.Date
+  // Nullable since 2026-09-28: every export imports, even one with no Deadline —
+  // the order page then asks for the ship date, and the order can't be confirmed
+  // (or scheduled) until it's set. internalDueDate is always derived from it.
+  externalShipDate       DateTime?              @db.Date
+  internalDueDate        DateTime?              @db.Date
   status                 OrderStatus            @default(NEEDS_REVIEW)
   blankOrderingStatus    BlankOrderingStatus    @default(NOT_ORDERED)
   customerApprovalStatus CustomerApprovalStatus @default(NOT_SENT)
@@ -328,6 +331,14 @@ model LineItem {
   // fixed table. estimateHours.ts uses it only for those types (never overrides a
   // real formula); until it's set, the order page asks "how many hours?".
   manualEstimatedHours  Float?
+  // NEW (2026-09-28): OTHER rows only — a job type this system doesn't model yet
+  // (e.g. "Patch Install"), kept instead of dropped at import so a person can review
+  // it. `otherJobType` is the name as written in the export; `assignedStationId` is
+  // the station a reviewer says it runs on (the order page asks), and its time is
+  // manualEstimatedHours. The engine only ever places it on that exact station.
+  otherJobType          String?
+  assignedStationId     String?
+  assignedStation       Station?               @relation(fields: [assignedStationId], references: [id], onDelete: SetNull)
   // Either another LineItem's id, or the literal string "all_siblings"
   // (waits on every other line item under the same order). This is
   // deliberately a plain string, not a Prisma relation: a real FK
@@ -375,6 +386,7 @@ model Station {
   scheduleAssignments ScheduleAssignment[]
   actuals             Actual[]
   certifications      WorkerCertification[]
+  assignedLineItems   LineItem[]
 
   @@index([kind])
 }
@@ -526,6 +538,8 @@ enum OrderStatus {
 enum LineItemType {
   DECORATION
   FINISHING
+  // A job type the system doesn't model yet (2026-09-28) — see LineItem.otherJobType.
+  OTHER
 }
 
 enum PrintLocation {

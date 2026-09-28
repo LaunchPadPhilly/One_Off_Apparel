@@ -201,7 +201,8 @@
 		return hours < 10 ? `${hours.toFixed(1)}h` : `${Math.round(hours)}h`;
 	}
 
-	function stepChip(item: { itemType: string; decorationType: string | null; finishingStep: string | null; printLocation: string | null }): string {
+	function stepChip(item: { itemType: string; decorationType: string | null; finishingStep: string | null; printLocation: string | null; otherJobType?: string | null }): string {
+		if (item.itemType === 'OTHER') return item.otherJobType ?? 'Other job';
 		if (item.itemType === 'FINISHING') return stationLabel(item.finishingStep ?? 'finishing');
 		const deco = item.decorationType ? stationLabel(item.decorationType) : 'Decoration';
 		const loc = item.printLocation ? stationLabel(item.printLocation) : '';

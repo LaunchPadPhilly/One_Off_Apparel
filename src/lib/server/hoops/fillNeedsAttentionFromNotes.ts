@@ -33,7 +33,7 @@ export class FillFromNotesError extends Error {
 	}
 }
 
-type FieldKind = readonly string[] | 'integer' | 'hours';
+type FieldKind = readonly string[] | 'integer' | 'hours' | 'date' | 'station';
 
 const ALLOWED_VALUES: Record<string, FieldKind> = {
 	blankOrderingStatus: ['NOT_ORDERED', 'ORDERED', 'ISSUE', 'RECEIVED'],
@@ -45,13 +45,25 @@ const ALLOWED_VALUES: Record<string, FieldKind> = {
 	foldBagGarment: ['SS_TEE', 'OTHER'],
 	inkColorCount: 'integer',
 	stitchCount: 'integer',
-	manualEstimatedHours: 'hours'
+	manualEstimatedHours: 'hours',
+	// NEW (2026-09-28): an order imported with no Deadline, and an OTHER job's station
+	// (answered by station name; mapped to its id below).
+	externalShipDate: 'date',
+	assignedStationId: 'station'
 };
 
-function describeAllowedValues(kind: FieldKind): string {
+function describeAllowedValues(kind: FieldKind, stationLabels: readonly string[]): string {
 	if (kind === 'integer') return 'a whole number';
 	if (kind === 'hours') return 'a number of hours greater than 0, decimals allowed (e.g. 1.5)';
+	if (kind === 'date') return 'a date as YYYY-MM-DD';
+	if (kind === 'station') return stationLabels.length ? `one of these station names exactly: ${stationLabels.join(', ')}` : 'no stations exist yet — leave this unanswered';
 	return kind.join(', ');
+}
+
+function isIsoDate(value: string): boolean {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+	const date = new Date(`${value}T00:00:00.000Z`);
+	return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
 const answersTool: Anthropic.Tool = {
@@ -105,9 +117,14 @@ export async function fillNeedsAttentionFromNotes(orderId: string, note: string,
 	const apiKey = env.ANTHROPIC_API_KEY;
 	if (!apiKey) throw new FillFromNotesError('ANTHROPIC_API_KEY is required to answer questions from notes.');
 
+	// Active stations, for "what station is this assigned to?" — answered by name.
+	const stations = await prisma.station.findMany({ where: { archivedAt: null }, select: { id: true, label: true } });
+	const stationIdByLabel = new Map(stations.map((station) => [station.label.toLowerCase(), station.id]));
+	const stationLabels = stations.map((station) => station.label);
+
 	const client = new Anthropic({ apiKey });
 	const questionList = questions
-		.map((q, i) => `${i + 1}. key="${q.key}" — ${q.question} Allowed values: ${describeAllowedValues(ALLOWED_VALUES[q.target.field])}.`)
+		.map((q, i) => `${i + 1}. key="${q.key}" — ${q.question} Allowed values: ${describeAllowedValues(ALLOWED_VALUES[q.target.field], stationLabels)}.`)
 		.join('\n');
 
 	let response;
@@ -149,16 +166,22 @@ export async function fillNeedsAttentionFromNotes(orderId: string, note: string,
 		if (!question) continue; // Claude named a key that wasn't in the list — ignore rather than guess what it meant.
 
 		const allowed = ALLOWED_VALUES[question.target.field];
+		const stationId = allowed === 'station' ? stationIdByLabel.get(answer.value.trim().toLowerCase()) : undefined;
 		const isValid =
 			allowed === 'integer'
 				? Number.isInteger(Number(answer.value))
 				: allowed === 'hours'
 					? Number.isFinite(Number(answer.value)) && Number(answer.value) > 0
-					: allowed.includes(answer.value);
+					: allowed === 'date'
+						? isIsoDate(answer.value)
+						: allowed === 'station'
+							? stationId !== undefined
+							: allowed.includes(answer.value);
 		if (!isValid) continue; // Not one of the field's real values — drop it rather than write something invalid.
 
 		unansweredCount -= 1;
-		const value: string | number = allowed === 'integer' || allowed === 'hours' ? Number(answer.value) : answer.value;
+		const value: string | number =
+			allowed === 'integer' || allowed === 'hours' ? Number(answer.value) : allowed === 'station' ? stationId! : answer.value;
 
 		if (question.target.level === 'order') {
 			(orderPatch as Record<string, string | number>)[question.target.field] = value;

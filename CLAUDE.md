@@ -225,7 +225,7 @@ One row per order.
 | `id` | |
 | `hoops_order_id` | back-reference to Hoops |
 | `customer_name` | |
-| `external_ship_date` | promised to the customer |
+| `external_ship_date` | promised to the customer. Nullable since 2026-09-28 — an export with no Deadline still imports; the order page asks for it, and the order can't be confirmed or scheduled until it's set |
 | `internal_due_date` | what production actually works toward — always computed as `external_ship_date` − 14 days, never an independent input (see Known open items) |
 | `status` | `needs_review`, `confirmed`, `scheduled`, `in_production`, `complete`, `cancelled` |
 | `imported_by` | who brought it in (usually "claude") |
@@ -234,10 +234,27 @@ One row per order.
 `orders.status` only flips to `complete` automatically, via `check_completion()` — see
 Engine section. Never set it to `complete` directly from application code.
 
+**Every export imports for review (client decision, 2026-09-28).** Nothing incomplete
+stops an order reaching Orders: the reviewer sees what's missing as questions instead.
+`extractOrderFromPdf.ts` / `importHoopsExport.ts`:
+- No Deadline → the order imports with no ship date; "What is the ship date?" is asked.
+- Real production work with no matching type (e.g. Patch Install) → an `OTHER` line item;
+  "What station is it assigned to?" then "How many hours does it need?" are asked
+  (`estimateHours.ts`' `estimateOtherHours`). Stations of kind `other` exist for this.
+- A row that still doesn't fit the schema is dropped *with a flag on the order*, and an
+  order with zero line items is allowed. Missing customer name → "Unknown customer" +
+  flag. Only a file with no Job number anywhere (PDF or file name) is refused, because
+  the order couldn't be identified or re-imported.
+- Admin fee and supply rows (digitizing fees, "75 units of patches") are still never line
+  items — they aren't production work.
+Every new question is a normal `computeOrderGaps` question, so confirming stays blocked
+until they're answered, by hand or via the notes box.
+
 **Confirming requires a fully valid order (2026-09-23).** `confirmImport.ts` refuses to
 confirm while `computeOrderGaps(...).blockingCount > 0` (`orderGaps.ts`) — every line
 item estimable (no missing formula input, DTF/DTG hours entered), blanks `RECEIVED`,
-customer `APPROVED`, and every decoration's artwork `APPROVED`. Enforced server-side
+customer `APPROVED`, and a ship date set. **Artwork is not a gate** (client decision 2026-09-28: it's
+always considered done — imported as `APPROVED`, never asked about). Enforced server-side
 inside the confirm transaction, so the order page's (disabled) button and the
 `confirm_import` MCP tool are gated identically. A **confirmed** order that stops being
 valid (or was confirmed before this gate) is not moved back to `needs_review`: it's
@@ -261,7 +278,7 @@ One row per **design/print job or finishing step** on an order.
 |---|---|
 | `id` | |
 | `order_id` | FK to `orders.id` |
-| `item_type` | `"decoration"` or `"finishing"` — governs how every field below behaves |
+| `item_type` | `"decoration"`, `"finishing"` or `"other"` — governs how every field below behaves. `other` (2026-09-28) is real production work the system has no type for yet (e.g. "Patch Install"): `other_job_type` holds the export's name for it, `assigned_station_id` the station a reviewer picks, and its time is `manual_estimated_hours`. The engine places it only on that exact station |
 | `design` | what the design is |
 | `print_location` | front, back, left, or right |
 | `decoration_type` | screen print / embroidery / DTF / DTG — **decoration rows only**, blank on finishing rows. Determines the primary `station_id` via lookup. |
@@ -685,7 +702,7 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   this in: the manual draft workspace's candidate-order list used to be every order not
   `COMPLETE` (including `NEEDS_REVIEW`, which hasn't passed the import-confirmation
   gate) — now `CONFIRMED` only. Deliberately NOT the full `fetchBacklog()` gate set
-  (blanks received, customer approval, artwork approval) for the *manual* path — a human
+  (blanks received, customer approval) for the *manual* path — a human
   planning ahead can still place a confirmed order before every pre-production gate is
   finalized; only the automatic engine path enforces every gate. Four follow-up fixes
   (2026-09-22): (1) the CONFIRMED-only rule is now enforced server-side in
@@ -820,7 +837,7 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   already-computed results in conversation, not an LLM call added to either page.
 - **"Needs attention" is now answerable in one note, not just field-by-field
   (2026-09-22).** `orderGaps.ts` (`computeOrderGaps`) splits an order's outstanding gaps
-  into `questions` (order approval gates, artwork approval, and per-line-item missing
+  into `questions` (order approval gates, the ship date, and per-line-item missing
   estimate data — each tagged with the exact field it maps to; `MissingLineItemDataError`
   now carries a `field` for this) and `infoNotes` (import-time flags, and estimate gaps
   with no backing field at all — a station with no formula yet — which no note can
@@ -841,8 +858,10 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   the decoration+finishing line-item grouping — but also surfaced five concrete gaps the
   schema doesn't cover yet, each needing a real answer, not a guess:
   - **"Patch Install" (Job 100113) matches no `decoration_type` or `finishing_step` value.**
-    Not screen print/embroidery/DTF/DTG, not matte/relabel/fold&bag/hang tag. No station,
-    no formula. Needs a decision from Jeff on what it is and where it runs.
+    Not screen print/embroidery/DTF/DTG, not matte/relabel/fold&bag/hang tag. **Partly
+    resolved (2026-09-28):** it's no longer dropped — it imports as an `OTHER` line item
+    (see "Every export imports for review" below) and the reviewer assigns its station and
+    hours. Still open: whether it deserves a real job type with its own formula.
   - **No `weight_class` signal for headwear** (Job 100128's caps) — **partially
     resolved (2026-09-21)**: `LineItem.garmentStyle` (`flat`/`cap`) and
     `capConstruction` (`structured`/`unstructured`, cap-only) now exist and embroidery's

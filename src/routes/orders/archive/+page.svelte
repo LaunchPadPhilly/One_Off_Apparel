@@ -53,7 +53,7 @@
 						<tr>
 							<td>{order.hoopsOrderId}</td>
 							<td>{order.customerName}</td>
-							<td>{order.internalDueDate}</td>
+							<td>{order.internalDueDate ?? 'No ship date'}</td>
 							<!-- Red "danger" badge styling only kicks in for CANCELLED orders,
 							     so COMPLETE orders keep the plain, neutral badge look. -->
 							<td><span class="badge" class:badge--danger={order.status === 'CANCELLED'}>{order.status}</span></td>
