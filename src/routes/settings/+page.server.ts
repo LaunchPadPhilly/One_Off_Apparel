@@ -50,9 +50,12 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		// Formula settings (Formulas tab, 2026-09-28) — admin-only editable per-station
 		// rates and factors. Both current (with any DB overrides applied) and pristine
 		// defaults are sent so the form can render each field with a "default: N" hint,
-		// so an admin sees where the baseline is before overriding it.
+		// so an admin sees where the baseline is before overriding it. `stationsByKind`
+		// lets the form show WHICH real stations each formula covers (and surfaces any
+		// station whose kind has no formula at all — DTF/DTG/OTHER — as needing hours
+		// entered per job rather than a rate table).
 		formulaConfig: isAdmin(locals.user)
-			? { current: currentFormulas(), defaults: DEFAULT_FORMULAS }
+			? { current: currentFormulas(), defaults: DEFAULT_FORMULAS, stationsByKind: await loadStationsByKind() }
 			: null
 	};
 };
@@ -60,6 +63,16 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 async function loadShopConfig() {
 	const [stations, workers] = await Promise.all([listStations(), listWorkers()]);
 	return { stationKindOptions, stations, workers };
+}
+
+async function loadStationsByKind(): Promise<Record<string, { id: string; label: string }[]>> {
+	const stations = await listStations();
+	const byKind: Record<string, { id: string; label: string }[]> = {};
+	for (const station of stations) {
+		if (station.archivedAt) continue;
+		(byKind[station.kind] ??= []).push({ id: station.id, label: station.label });
+	}
+	return byKind;
 }
 
 export const actions: Actions = {

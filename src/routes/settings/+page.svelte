@@ -162,6 +162,7 @@
 		<FormulasScreen
 			formulas={data.formulaConfig.current}
 			defaults={data.formulaConfig.defaults}
+			stationsByKind={data.formulaConfig.stationsByKind}
 			notice={form?.screen === 'formulas' && 'notice' in form ? (form.notice ?? null) : null}
 			message={form?.screen === 'formulas' && 'message' in form ? (form.message ?? null) : null}
 		/>
