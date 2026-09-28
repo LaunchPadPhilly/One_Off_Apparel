@@ -9,6 +9,7 @@ import {
 import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
+import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
 import type { DateRange } from './types';
 
 function startOfToday(): Date {
@@ -202,4 +203,37 @@ export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
 	}
 
 	return [...realSlots, ...defaultSlots];
+}
+
+/**
+ * Who's available to staff stations in a date range (2026-09-28): the active roster
+ * with its certifications on active stations, the days people are out, and people a
+ * human pinned to a station (both set through Claude). Feeds planStaffing.
+ */
+export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInputs> {
+	const from = new Date(range.from);
+	const to = new Date(range.to);
+	const [workers, unavailability, pins] = await Promise.all([
+		prisma.worker.findMany({
+			where: { archivedAt: null },
+			select: { id: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
+		}),
+		prisma.workerUnavailability.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true } }),
+		prisma.staffingPin.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true, stationId: true } })
+	]);
+	return {
+		workers: workers.map((worker) => ({ id: worker.id, stationIds: worker.certifications.map((cert) => cert.stationId) })),
+		unavailable: new Set(unavailability.map((row) => staffingKey(row.workerId, row.date))),
+		pins: new Map(pins.map((row) => [staffingKey(row.workerId, row.date), row.stationId]))
+	};
+}
+
+/**
+ * fetchCapacity() with each (station, day) staffed by planStaffing — the capacity every
+ * engine run should use (2026-09-28). Slots with nobody on them are dropped; with no
+ * roster at all it's the same as fetchCapacity().
+ */
+export async function fetchStaffedCapacity(range: DateRange, backlog: readonly BacklogItem[]): Promise<CapacitySlot[]> {
+	const [capacity, inputs] = await Promise.all([fetchCapacity(range), fetchStaffingInputs(range)]);
+	return planStaffing(backlog, capacity, inputs);
 }

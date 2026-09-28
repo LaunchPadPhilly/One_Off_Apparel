@@ -61,6 +61,9 @@ export interface EstimateHoursResult {
 	// assigned. When present, the job may only be placed on this station.
 	stationId?: string;
 	hours: number;
+	// NEW (2026-09-28): how much of the ONE-person time speeds up with a bigger crew
+	// (unrounded). estimateHours(item, crewSize) divides only this part by the crew.
+	crewDivisibleHours?: number;
 }
 
 /** One line item waiting to be placed, as propose_schedule needs it. */
@@ -91,6 +94,9 @@ export interface CapacitySlot {
 	stationKind: string;
 	date: Date;
 	availableHrs: number;
+	// NEW (2026-09-28): the people working this station that day (planStaffing.ts).
+	// Absent = no roster in use, so jobs are estimated for one person (the old behavior).
+	crewWorkerIds?: string[];
 }
 
 export interface ProposedAssignment {
@@ -105,6 +111,8 @@ export interface ProposedAssignment {
 	// print's wall-clock end, not just on the same-or-later day.
 	startMinuteOfDay: number;
 	estimatedHours: number;
+	// NEW (2026-09-28): the crew the hours were estimated for (empty = one unnamed person).
+	crewWorkerIds: string[];
 }
 
 export interface AtRiskFlag {

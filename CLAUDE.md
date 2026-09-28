@@ -134,7 +134,9 @@ contract).
   see Play 02 step 4 for the required decision). For OAuth tokens the *effective* scope is
   computed live as the intersection of the token's scopes and the user's active
   `McpUserScopeGrant`s, so revocation applies on the next request. Tools register
-  unconditionally; `guardedToolResult` is the gate.
+  unconditionally; `guardedToolResult` is the gate. A tool error becomes a generic
+  "unavailable" message unless it's an `McpUserError` (handler.ts), whose message was
+  written for the user and is passed through as-is.
 - Scopes are the `McpScope` enum plus one map in `src/lib/server/mcp/scopes.ts`. Adding a
   scope is those two edits (plus a migration); the admin UI and discovery follow.
 - `/settings` has `?screen=general|stations|people`. General is every user's own account
@@ -328,8 +330,9 @@ station. The migration `add_station_config_and_workers` seeds the nine original 
 The shop-floor roster (`/settings?screen=people`, `src/lib/server/config/workers.ts`): a name,
 optional notes, `archivedAt` ("delete"), and a many-to-many to `stations` — certified **per
 station**, not per kind, so someone can be cleared for the autos but not the manual press.
-Deliberately not linked to `User`: floor staff don't log in. Nothing reads certifications
-yet — see "Config settings roadmap" under Known open items.
+Deliberately not linked to `User`: floor staff don't log in. The daily staffing plan
+(`engine/planStaffing.ts`) only ever puts a person on a station they're certified on — see
+"Config settings roadmap" under Known open items.
 
 #### `capacity_calendar`
 How much time each station has open, per day.
@@ -582,6 +585,9 @@ wovens have no dependency and are placed like any other job. So:
 | `commit_schedule(assignment_ids[], approved_by)` | makes a proposed schedule official, writes to `schedule_assignments` + `audit_log` |
 | `simulate_change(change)` | checks "what if" (a rush order, a moved job) without actually changing anything |
 | `add_order_note(hoops_order_id, note)` | *(added 2026-09-18, not in the original design)* appends a dated, attributed note to an order — the way a note given in conversation reaches `Order.notes` (and from there the order's page and Reports) without the web form |
+| `get_staffing(from, to)` | *(2026-09-28)* the roster with certifications, who's out, who's pinned, and the crew per station/day on the approved schedule |
+| `set_worker_availability(worker_name, from, to, available, reason?)` | *(2026-09-28)* marks a person out/in for days; returns the approved jobs they were on those days. Changes no schedule by itself |
+| `set_worker_station(worker_name, date, station_name?)` | *(2026-09-28)* pins a person to a station for a day (must be certified, not out); omit the station to clear |
 
 Each of these is a real MCP tool registered the same way as any other tool in
 `src/lib/server/mcp/tools.ts`, gated by `guardedToolResult` and the scope system described
@@ -637,22 +643,34 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   scheduling, the confirm gate and completion — confirm the exact rule first.
 - **Config settings roadmap (decisions from the client, 2026-09-25).** Built in step 1
   (branch `feature/config-setting`): admin CRUD for stations and people (see the
-  `stations` / `workers` tables above). Decided but **not built yet**:
-  - **Crew size.** The client's formulas are the max rate for *one* person. More people
-    on a job divide only the **run** portion (setup — screens, ink, thread changes —
-    stays fixed): screen print's `run` term; embroidery's hooping/load-unload/cleanup
-    (the machine's sew time does not speed up with more people); every finishing formula
-    is all run. There is **no max crew per station** — the floor is organic (e.g.
-    shipping & receiving staff get pulled onto printing), so don't invent a cap.
-  - **Certification.** Only people certified on a station may be assigned to it.
-  - **Engine picks people.** The automatic schedule assigns whoever it needs to make
-    the schedule as efficient as possible; everyone is full time (the standard shift).
-    People can then change assignments by hand on the board.
-  - **Organic changes go through Claude.** Sick days, mid-day changes and rush orders:
-    Nate or Toby tell Claude in chat; Claude turns that into structured inputs
-    (person X unavailable today, a rush order, …) via MCP tools, the deterministic
-    engine re-plans, and Claude reports what changed. Per the non-negotiables, Claude
-    never computes the schedule itself and the re-plan is a proposal a human approves.
+  `stations` / `workers` tables above). **Daily staffing, part 1 — built (2026-09-28):**
+  - **Crew size.** The client's formulas are the rate for *one* person.
+    `estimateHours(item, crewSize)` divides only each result's `crewDivisibleHours`:
+    screen print's `run` term; embroidery's **setup & boxing only** (client, 2026-09-28 —
+    thread changes, hooping, load/unload, cleanup and sewing stay fixed); every finishing
+    formula entirely; DTF/DTG entered hours entirely. OTHER jobs' entered hours stay fixed
+    (not decided yet). There is **no max crew per station** — the floor is organic.
+  - **Engine picks people** — `engine/planStaffing.ts`, deterministic. One person works
+    one station for the whole day; only certified people, never someone marked out;
+    human pins kept; every station with work gets ≥1 person (scarcest station first,
+    least-flexible person first); everyone else goes where one more person saves the
+    most crew-divisible time. A station nobody is on that day has no capacity. No roster
+    at all = the old behavior (one unnamed person, every station open). Simplification:
+    workload is the whole backlog spread evenly over the window, not re-planned per day.
+    `fetchStaffedCapacity()` is what every engine run (automatic draft, propose_schedule,
+    simulate_change) now uses; each placed job stores its crew (`AssignmentCrew`).
+  - **Board** shows each station row's crew under its name and "Out: …" per day. A job
+    moved by hand to another station/day loses its planned crew; hand-placed jobs have none.
+  - **Claude tools** `get_staffing`, `set_worker_availability` (mark out/in for days —
+    stored in `WorkerUnavailability`), `set_worker_station` (pin for a day — `StaffingPin`;
+    must be certified and not out). Their errors are `McpUserError`s, so a message like
+    "Maria isn't certified on Embroidery" reaches Claude instead of the generic one.
+  Still **not built — part 2:** re-planning just the affected days after a change, and
+  approving that plan replacing the not-started approved jobs on those days only (client:
+  out one day changes that day; out for two weeks changes those weeks). Also still open
+  there: the engine doesn't yet subtract already-approved work from capacity, and
+  already-approved line items still appear in the backlog.
+  Decided but **not built yet**:
   - **Editable formulas.** Admins can edit the formula numbers in settings (e.g. rates
     per hour as the team gets faster), industry-standard "rate table" style rather
     than free-form formulas. Already-approved assignments keep the hours they were
@@ -664,9 +682,8 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     Shown per draft week on the draft board (live as jobs move) and per calendar week
     (Mon–Sun) for the approved schedule on `/schedule`. Jobs with no `screens` value
     count 0 and are called out, so the total is never silently low.
-  - Order: (2) crew-based estimates + manual people assignment on the board,
-    (3) engine auto-assigns people, (4) the Claude/MCP availability-and-changes tools.
-    Editable formula numbers fit between them.
+  - Remaining order: daily staffing part 2 (re-plan + replace on approval), then
+    editable formula numbers.
 - **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
   the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
   covers the whole flow, not just Start/Stop: a date window (default 28 days from

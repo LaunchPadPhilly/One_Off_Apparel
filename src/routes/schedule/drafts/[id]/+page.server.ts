@@ -18,6 +18,13 @@ function iso(d: Date): string {
 	return d.toISOString().slice(0, 10);
 }
 
+function groupNamesByDate(rows: readonly { date: Date; worker: { name: string } }[]): Record<string, string[]> {
+	const byDate: Record<string, string[]> = {};
+	for (const row of rows) (byDate[iso(row.date)] ??= []).push(row.worker.name);
+	for (const names of Object.values(byDate)) names.sort();
+	return byDate;
+}
+
 function addDays(iso: string, days: number): Date {
 	const d = new Date(`${iso}T00:00:00Z`);
 	d.setUTCDate(d.getUTCDate() + days);
@@ -162,11 +169,17 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			where: { scheduleDraftId: draft.id },
 			include: {
 				lineItem: { select: { id: true, orderId: true } },
-				station: { select: { id: true, name: true } }
+				station: { select: { id: true, name: true } },
+				// The day's crew on this job (planStaffing.ts, 2026-09-28).
+				crew: { select: { worker: { select: { name: true } } } }
 			},
 			orderBy: [{ date: 'asc' }, { startMinuteOfDay: 'asc' }, { sequenceOrder: 'asc' }]
 		})
 	]);
+	const unavailability = await prisma.workerUnavailability.findMany({
+		where: { date: { gte: draft.startDate, lte: endDate }, worker: { archivedAt: null } },
+		select: { date: true, worker: { select: { name: true } } }
+	});
 
 	// One entry per (station, day) in the window; falls back to the default day
 	// length when the capacity_calendar has no row for that pair. That keeps the
@@ -261,14 +274,17 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			date: iso(a.date),
 			startMinuteOfDay: a.startMinuteOfDay ?? 8 * 60,
 			estimatedHours: a.estimatedHours,
-			status: a.status
+			status: a.status,
+			crew: a.crew.map((member) => member.worker.name).sort()
 		})),
 		stationNames,
 		// name → display label / formula kind, for the board's row labels, the
 		// finishing-group split and the drop restriction.
 		stations: stations.map((station) => ({ name: station.name, label: station.label, kind: station.kind, autoSchedule: station.autoSchedule })),
 		capacity,
-		defaultStationDayHours: DEFAULT_STATION_DAY_HOURS
+		defaultStationDayHours: DEFAULT_STATION_DAY_HOURS,
+		// Who's out each day of the draft (set through Claude, 2026-09-28): date → names.
+		outByDate: groupNamesByDate(unavailability)
 	};
 };
 
@@ -445,6 +461,8 @@ export const actions: Actions = {
 			// a print later also re-settles its finishers (draftDependencies.ts).
 			const changedSlot =
 				existing.stationId !== station.id || iso(existing.date) !== iso(date);
+			// The planned crew was for the (station, day) it left (2026-09-28).
+			if (changedSlot) await tx.assignmentCrew.deleteMany({ where: { assignmentId: id } });
 			return repackDraftDays(tx, params.id, [
 				{ stationId: station.id, date },
 				...(changedSlot ? [{ stationId: existing.stationId, date: existing.date }] : [])
