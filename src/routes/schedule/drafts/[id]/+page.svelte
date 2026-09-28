@@ -3,7 +3,7 @@
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig, storageKeyPrefix } from '$lib/appConfig';
 	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments } from '$lib/schedule/shift';
-	import { computeInsertRank, insertAndRepack, repackOrdered } from '$lib/schedule/repackDay';
+	import { cascadeInsert, cascadeMove, cascadeRemove, type CascadeItem } from '$lib/schedule/repackDay';
 	import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 	import { isFinishingKind } from '$lib/schedule/stationKinds';
 	import { countScreens } from '$lib/schedule/screenCount';
@@ -522,20 +522,16 @@
 	}
 
 	/**
-	 * Repack a (date, station) day back-to-back from shift open, in the current
-	 * relative order. Called after any local edit (drop, move, remove) so the UI
-	 * reflects the auto-shift the server also performs — items sit adjacent, no
-	 * gaps, the way `packSequentialStarts` lays out the automatic engine's own
-	 * placements. `$lib/schedule/repackDay.ts` is the ONE source of truth for
-	 * this math; client and server import the same function.
+	 * Apply a cascade result (map of id → new startMin) to the local `placements`
+	 * array. Shared by all three mutation paths (move, insert, remove) so the local
+	 * update is consistent and the server's returned peer positions can override it
+	 * on any drift.
 	 */
-	function repackDayLocally(date: string, stationName: string) {
-		const dayPlacements = placementsForDay(date, stationName);
-		const packed = repackOrdered(dayPlacements);
-		const packedById = new Map(packed.map((p) => [p.id, p]));
+	function applyLocalStarts(newStarts: ReadonlyMap<string, number>) {
+		if (newStarts.size === 0) return;
 		placements = placements.map((p) => {
-			const next = packedById.get(p.id);
-			return next ? { ...p, startMin: next.startMin } : p;
+			const next = newStarts.get(p.id);
+			return next != null ? { ...p, startMin: next } : p;
 		});
 	}
 
@@ -710,36 +706,57 @@
 			const originStation = existing.stationName;
 			const stayedOnSameDay = originDate === date && originStation === stationName;
 
-			// Rank in the destination row, computed against peers EXCLUDING the
-			// moving item itself so a same-row nudge to the right gets a natural
-			// rank, not one biased by its own current position.
-			const destinationPeers = placementsForDay(date, stationName).filter(
-				(p) => p.id !== existing.id
-			);
-			const insertRank = computeInsertRank(dropMin, destinationPeers);
+			// The DROP point is now interpreted as a target wall-clock start (minutes
+			// from midnight), not a discrete rank — gap-preserving cascade (see
+			// $lib/schedule/repackDay.ts) needs an absolute time.
+			const targetStart = Math.round(dropMin);
 
-			// Optimistic: insert-and-repack the destination row with the moved item at
-			// its new rank. Explicit rank-based insertion is required for a same-row
-			// reorder — updating only (date, station) wouldn't change the item's own
-			// startMin, so a simple repack-in-place would leave it in its OLD queue
-			// slot regardless of where the user actually dropped it.
-			const movedItem: Placement = { ...existing, date, stationName };
-			const destPacked = insertAndRepack(destinationPeers, movedItem, insertRank);
-			const destPackedById = new Map(destPacked.map((p) => [p.id, p]));
-			placements = placements
-				.filter((p) => p.id !== existing.id)
-				.map((p) => {
-					const next = destPackedById.get(p.id);
-					return next ? { ...p, startMin: next.startMin } : p;
-				})
-				.concat({ ...movedItem, startMin: destPackedById.get(existing.id)!.startMin });
-			if (!stayedOnSameDay) repackDayLocally(originDate, originStation);
+			if (stayedOnSameDay) {
+				// Same-row move: cascade shifts every peer AFTER the moving item by
+				// the same delta, so any gaps between them are preserved. Refused if
+				// the new start would collide with the predecessor, or push a peer
+				// past the shift end.
+				const sameDayPeers = placementsForDay(date, stationName);
+				const cascade = cascadeMove<CascadeItem & Placement>(sameDayPeers, existing.id, targetStart);
+				if ('conflict' in cascade) {
+					boardNotice = { text: cascade.conflict, tone: 'warn' };
+					return;
+				}
+				const newStarts = new Map(cascade.placements.map((p) => [p.id, p.startMin]));
+				applyLocalStarts(newStarts);
+			} else {
+				// Cross-row / cross-day move: origin day pulls forward (as if the item
+				// were removed there), destination day inserts at the drop time.
+				const originDayPeers = placementsForDay(originDate, originStation);
+				const removeCascade = cascadeRemove<CascadeItem & Placement>(originDayPeers, existing.id);
+				if ('conflict' in removeCascade) {
+					boardNotice = { text: removeCascade.conflict, tone: 'warn' };
+					return;
+				}
+				const destinationPeers = placementsForDay(date, stationName);
+				const insertCascade = cascadeInsert<CascadeItem & Placement>(destinationPeers, { ...existing, date, stationName }, targetStart);
+				if ('conflict' in insertCascade) {
+					boardNotice = { text: insertCascade.conflict, tone: 'warn' };
+					return;
+				}
+				const newStarts = new Map<string, number>();
+				for (const p of removeCascade.placements) newStarts.set(p.id, p.startMin);
+				for (const p of insertCascade.placements) newStarts.set(p.id, p.startMin);
+				placements = placements.map((p) => {
+					if (p.id === existing.id) {
+						const next = insertCascade.placements.find((q) => q.id === existing.id)!;
+						return { ...p, date, stationName, startMin: next.startMin };
+					}
+					const next = newStarts.get(p.id);
+					return next != null ? { ...p, startMin: next } : p;
+				});
+			}
 
 			const body = new FormData();
 			body.set('id', existing.id);
 			body.set('stationName', stationName);
 			body.set('date', date);
-			body.set('insertRank', String(insertRank));
+			body.set('startMinuteOfDay', String(targetStart));
 			const outcome = await postAction('moveAssignment', body);
 			if (!outcome.ok) {
 				placements = priorSnapshot;
@@ -770,10 +787,10 @@
 			return;
 		}
 		const durationMin = Math.max(15, Math.round((payload.hours || 1) * 60));
+		const targetStart = Math.round(dropMin);
 
 		const priorSnapshot = placements;
 		const destinationPeers = placementsForDay(date, stationName);
-		const insertRank = computeInsertRank(dropMin, destinationPeers);
 
 		// Optimistic: give it a temp id so it can be dragged again immediately;
 		// swap the temp id for the server-assigned one once the POST resolves.
@@ -784,24 +801,28 @@
 			orderId: payload.orderId,
 			date,
 			stationName,
-			startMin: 0, // rewritten by repackOrdered below
+			startMin: targetStart,
 			durationMin
 		};
-		const packedDay = insertAndRepack(destinationPeers, incoming, insertRank);
-		const packedById = new Map(packedDay.map((p) => [p.id, p]));
+		const cascade = cascadeInsert<CascadeItem & Placement>(destinationPeers, incoming, targetStart);
+		if ('conflict' in cascade) {
+			boardNotice = { text: cascade.conflict, tone: 'warn' };
+			return;
+		}
+		const startsById = new Map(cascade.placements.map((p) => [p.id, p.startMin]));
 		placements = [
 			...placements.map((p) => {
-				const next = packedById.get(p.id);
-				return next ? { ...p, startMin: next.startMin } : p;
+				const next = startsById.get(p.id);
+				return next != null ? { ...p, startMin: next } : p;
 			}),
-			{ ...incoming, startMin: packedById.get(tempId)!.startMin }
+			{ ...incoming, startMin: cascade.incomingStart ?? targetStart }
 		];
 
 		const body = new FormData();
 		body.set('lineItemId', payload.lineItemId);
 		body.set('stationName', stationName);
 		body.set('date', date);
-		body.set('insertRank', String(insertRank));
+		body.set('startMinuteOfDay', String(cascade.incomingStart ?? targetStart));
 		body.set('hours', String(durationMin / 60));
 		const outcome = await postAction('placeAssignment', body);
 		if (!outcome.ok || !outcome.id) {
@@ -818,9 +839,19 @@
 		if (!target) return;
 		const priorSnapshot = placements;
 
-		// Optimistic: drop the row locally, then close the gap by repacking the day.
-		placements = placements.filter((p) => p.id !== id);
-		repackDayLocally(target.date, target.stationName);
+		// Optimistic: pull-forward peers on this day by the removed item's duration
+		// (the user chose "close the gap" — see $lib/schedule/repackDay.ts).
+		const dayPeers = placementsForDay(target.date, target.stationName);
+		const cascade = cascadeRemove<CascadeItem & Placement>(dayPeers, id);
+		if ('conflict' in cascade) {
+			boardNotice = { text: cascade.conflict, tone: 'warn' };
+			return;
+		}
+		const startsById = new Map(cascade.placements.map((p) => [p.id, p.startMin]));
+		placements = placements.filter((p) => p.id !== id).map((p) => {
+			const next = startsById.get(p.id);
+			return next != null ? { ...p, startMin: next } : p;
+		});
 
 		if (id.startsWith('tmp:')) return; // never persisted, nothing to remove server-side
 		const body = new FormData();
