@@ -95,7 +95,7 @@ export function proposeSchedule(
 	const unplaced = new Set<string>();
 
 	function flag(item: BacklogItem, requiredStation: string, reason: string) {
-		atRisk.push({ lineItemId: item.id, requiredStation, dueDate: item.dueDate, reason });
+		atRisk.push({ lineItemId: item.id, requiredStation, dueDate: item.dueDate, deadlineIsTight: item.deadlineIsTight, reason });
 		reasoning.push(`${item.id}: AT RISK — ${reason}`);
 		unplaced.add(item.id);
 	}

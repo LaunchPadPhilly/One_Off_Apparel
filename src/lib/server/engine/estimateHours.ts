@@ -1,4 +1,5 @@
 import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface, type CapConstruction, type FoldBagGarment, type WeightClass } from '../../../../prisma/generated/prisma/enums';
+import { expectedStationFor } from '$lib/schedule/expectedStation';
 import type { EstimateHoursInput, EstimateHoursResult } from './types';
 
 /**
@@ -319,7 +320,7 @@ function estimateManualHours(item: EstimateHoursInput, station: string, label: s
 	if (hours == null || !(hours > 0)) {
 		throw new MissingLineItemDataError(`manual_estimated_hours (${label} has no formula — how many hours does this job need?)`, 'manualEstimatedHours');
 	}
-	return { station, hours };
+	return { station, hours, fromManualOverride: true };
 }
 
 /**
@@ -339,7 +340,7 @@ function estimateOtherHours(item: EstimateHoursInput): EstimateHoursResult {
 	if (hours == null || !(hours > 0)) {
 		throw new MissingLineItemDataError(`manual_estimated_hours (${name} has no formula — how many hours does this job need?)`, 'manualEstimatedHours');
 	}
-	return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours };
+	return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours, fromManualOverride: true };
 }
 
 /**
@@ -368,6 +369,13 @@ function roundToQuarterHour(hours: number): number {
  * formula for a given kind of job yet, we throw an error instead of guessing — see
  * the MissingFormulaError/MissingLineItemDataError classes above for why.
  *
+ * MANUAL OVERRIDE (2026-09-28): if `manualEstimatedHours` is set to a positive number,
+ * it wins for every job type, not just the ones with no formula. This lets an admin
+ * say "the engine says 3h but I know this run will be 1h" without touching the
+ * formula code. `fromManualOverride: true` in the result tells the UI to show the
+ * engine's own estimate alongside via `engineEstimateFor`. DTF, DTG, and OTHER are
+ * unchanged: they still REQUIRE this field (no formula to fall back to).
+ *
  * The final hours are rounded to the nearest 15 minutes (see roundToQuarterHour
  * above) so estimates shown at import/order creation and slots produced by
  * propose_schedule share the same granularity.
@@ -377,7 +385,45 @@ export function estimateHours(item: EstimateHoursInput): EstimateHoursResult {
 	return { ...raw, hours: roundToQuarterHour(raw.hours) };
 }
 
+/**
+ * What the engine's formula would say for this line item, ignoring any manual
+ * override. Returns null when the line item has no engine formula at all (DTF, DTG,
+ * OTHER — for those the override IS the estimate, so there's nothing separate to
+ * show alongside). Never throws: swallows MissingFormulaError/MissingLineItemDataError
+ * and returns null, since this is display-only.
+ */
+export function engineEstimateFor(item: EstimateHoursInput): EstimateHoursResult | null {
+	if (item.itemType === LineItemType.OTHER) return null;
+	if (item.itemType === LineItemType.DECORATION && (item.decorationType === DecorationType.DTF || item.decorationType === DecorationType.DTG)) return null;
+	try {
+		const raw = estimateHoursRawFormulaOnly(item);
+		return { ...raw, hours: roundToQuarterHour(raw.hours) };
+	} catch (err) {
+		if (err instanceof EstimationError) return null;
+		throw err;
+	}
+}
+
 function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {
+	// Universal manual override: an admin-entered number wins over any formula, for
+	// every job type. DTF/DTG/OTHER still fall through to their own helpers, which
+	// require this field and error if missing — same behavior as before.
+	if (
+		item.manualEstimatedHours != null &&
+		item.manualEstimatedHours > 0 &&
+		item.itemType !== LineItemType.OTHER &&
+		!(item.itemType === LineItemType.DECORATION && (item.decorationType === DecorationType.DTF || item.decorationType === DecorationType.DTG))
+	) {
+		const station = expectedStationFor(item);
+		if (station) return { station, hours: item.manualEstimatedHours, fromManualOverride: true };
+		// No known station for this row's type (e.g. an unrecognized decoration type)
+		// — fall through to the router below, which will produce the same
+		// MissingFormulaError it would today. Don't guess a station.
+	}
+	return estimateHoursRawFormulaOnly(item);
+}
+
+function estimateHoursRawFormulaOnly(item: EstimateHoursInput): EstimateHoursResult {
 	if (item.itemType === LineItemType.DECORATION) {
 		switch (item.decorationType) {
 			case DecorationType.SCREEN_PRINT:

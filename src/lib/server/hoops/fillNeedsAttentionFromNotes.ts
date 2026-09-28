@@ -46,9 +46,9 @@ const ALLOWED_VALUES: Record<string, FieldKind> = {
 	inkColorCount: 'integer',
 	stitchCount: 'integer',
 	manualEstimatedHours: 'hours',
-	// NEW (2026-09-28): an order imported with no Deadline, and an OTHER job's station
-	// (answered by station name; mapped to its id below).
-	externalShipDate: 'date',
+	// An order imported with no Deadline, and an OTHER job's station (answered by
+	// station name; mapped to its id below).
+	deadline: 'date',
 	assignedStationId: 'station'
 };
 

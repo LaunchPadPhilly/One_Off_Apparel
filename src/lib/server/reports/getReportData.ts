@@ -56,7 +56,7 @@ export async function getReportData(range: { from: string; to: string }) {
 	}
 
 	const completedOrders = await prisma.order.findMany({
-		where: { status: OrderStatus.COMPLETE, internalDueDate: { gte: from, lte: to } },
+		where: { status: OrderStatus.COMPLETE, deadline: { gte: from, lte: to } },
 		include: { lineItems: { select: { id: true } } }
 	});
 	const onTimeResults = await Promise.all(
@@ -66,11 +66,12 @@ export async function getReportData(range: { from: string; to: string }) {
 				orderBy: { completedAt: 'desc' },
 				select: { completedAt: true }
 			});
-			const onTime = !lastCompleted?.completedAt || !order.internalDueDate || lastCompleted.completedAt <= order.internalDueDate;
+			const onTime = !lastCompleted?.completedAt || !order.deadline || lastCompleted.completedAt <= order.deadline;
 			return {
 				orderId: order.id,
 				hoopsOrderId: order.hoopsOrderId,
-				dueDate: order.internalDueDate,
+				dueDate: order.deadline,
+				deadlineIsTight: order.deadlineIsTight,
 				completedAt: lastCompleted?.completedAt ?? null,
 				onTime,
 				notes: order.notes

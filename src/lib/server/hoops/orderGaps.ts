@@ -23,7 +23,7 @@ export interface OrderGapQuestion {
 	key: string;
 	question: string;
 	target:
-		| { level: 'order'; field: 'externalShipDate' | 'blankOrderingStatus' | 'customerApprovalStatus' }
+		| { level: 'order'; field: 'deadline' | 'blankOrderingStatus' | 'customerApprovalStatus' }
 		| { level: 'lineItem'; lineItemId: string; field: 'artworkApprovalStatus' | MissingLineItemField };
 }
 
@@ -52,22 +52,22 @@ export interface OrderGapLineItem extends EstimateHoursInput {
 	artworkApprovalStatus?: string | null;
 }
 
-// A handful of import-time flags describe a concern this codebase has since resolved
-// structurally (internalDueDate used to be an independent, ambiguous field extracted
-// from the same single "Deadline" date — see internalDueDate.ts / CLAUDE.md's Known open
-// items). Orders imported before that fix still carry the old flag text in their audit
-// log; there's no way to tell "this note is now stale" from free text in general, but
-// this one specific, resolved concern is safe to filter by pattern rather than leaving it
-// permanently displayed as if it were still an open question.
+// Old import-time flags describe a concern this codebase has since resolved structurally
+// (internalDueDate used to be extracted independently from the same single "Deadline"
+// date, and later — briefly — computed from it deterministically; both are gone now,
+// see the 2026-09-28 deadline-tightness change). Orders imported before those fixes
+// still carry the old flag text in their audit log; there's no way to tell "this note is
+// now stale" from free text in general, but these one-off resolved concerns are safe to
+// filter by pattern rather than leaving them permanently displayed as open questions.
 function isResolvedImportFlag(flag: string): boolean {
 	const lower = flag.toLowerCase();
-	return lower.includes('internalduedate') && /\b(single|same) date\b/.test(lower);
+	return lower.includes('internalduedate') || lower.includes('internal due date');
 }
 
 export function computeOrderGaps(
-	// externalShipDate is required (not optional) on purpose: an order with no ship date
-	// must always come back with that question, so no caller can forget to pass it.
-	order: { externalShipDate: Date | string | null; blankOrderingStatus: string; customerApprovalStatus: string; importFlags: readonly string[] },
+	// deadline is required (not optional) on purpose: an order with no deadline must
+	// always come back with that question, so no caller can forget to pass it.
+	order: { deadline: Date | string | null; blankOrderingStatus: string; customerApprovalStatus: string; importFlags: readonly string[] },
 	lineItems: readonly OrderGapLineItem[]
 ): OrderGaps {
 	const questions: OrderGapQuestion[] = [];
@@ -75,12 +75,12 @@ export function computeOrderGaps(
 		.filter((flag) => !isResolvedImportFlag(flag))
 		.map((flag, i) => ({ key: `import-flag:${i}`, text: flag }));
 
-	// NEW (2026-09-28): an export with no Deadline imports with no ship date.
-	if (!order.externalShipDate) {
+	// An export with no Deadline imports with no deadline set.
+	if (!order.deadline) {
 		questions.push({
-			key: 'ship-date',
-			question: 'What is the ship date (deadline) for this order? The export didn’t have one.',
-			target: { level: 'order', field: 'externalShipDate' }
+			key: 'deadline',
+			question: 'What is the deadline for this order? The export didn’t have one.',
+			target: { level: 'order', field: 'deadline' }
 		});
 	}
 	if (order.blankOrderingStatus !== 'RECEIVED') {

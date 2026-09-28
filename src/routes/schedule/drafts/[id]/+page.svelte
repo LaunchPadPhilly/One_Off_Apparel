@@ -1014,7 +1014,7 @@
 									>
 										Edit
 									</button>
-									<span class="muted">Due {order.internalDueDate}</span>
+									<span class="muted">Due {order.deadline}{order.deadlineIsTight ? '' : ' (internal)'}</span>
 									<span class="hours-total">{formatHours(orderTotalHours(order))}</span>
 								</div>
 							</div>

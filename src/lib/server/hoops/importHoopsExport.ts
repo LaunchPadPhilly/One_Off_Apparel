@@ -121,12 +121,13 @@ export async function importHoopsExport(orders: readonly OrderCandidate[]): Prom
 
 			const orderData = {
 				customerName: orderCandidate.customerName,
-				// externalShipDate/internalDueDate are z.iso.date() strings ("YYYY-MM-DD") —
-				// Prisma's runtime validation, unlike its TS types, rejects a date-only
-				// string and needs a real Date.
-				// Either may be null (no Deadline in the export) — the order page asks for it.
-				externalShipDate: orderCandidate.externalShipDate ? new Date(orderCandidate.externalShipDate) : null,
-				internalDueDate: orderCandidate.internalDueDate ? new Date(orderCandidate.internalDueDate) : null,
+				// deadline is a z.iso.date() string ("YYYY-MM-DD") — Prisma's runtime
+				// validation, unlike its TS types, rejects a date-only string and needs a
+				// real Date. May be null (no Deadline in the export) — the order page asks
+				// for it. deadlineIsTight defaults true for imports (a Hoops Deadline is
+				// always a customer-promised date); flip on the order page for internal targets.
+				deadline: orderCandidate.deadline ? new Date(orderCandidate.deadline) : null,
+				deadlineIsTight: orderCandidate.deadlineIsTight,
 				status: OrderStatus.NEEDS_REVIEW,
 				importedBy: orderCandidate.importedBy
 			};

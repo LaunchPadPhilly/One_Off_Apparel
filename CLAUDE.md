@@ -26,7 +26,9 @@ Schedule/Production board (`src/routes/schedule/`), and a minimal Reports page
 schedulable:** `estimate_hours` now has real numbers for every station
 (`screen_print_auto`, `embroidery`, and all five finishing steps — matte, relabel,
 fold_bag, hang_tag, wovens, added 2026-09-23). DTF/DTG have no formula — a reviewer
-enters the hours per job (`LineItem.manualEstimatedHours`, 2026-09-23). Even with real
+enters the hours per job (`LineItem.manualEstimatedHours`, 2026-09-23 — and, as of
+2026-09-28, that same field is also a general per-line-item override on any job with a
+real formula). Even with real
 formulas, `propose_schedule` still needs `CapacityCalendar` rows that barely exist in
 the real database — nothing in the app can create a *real* one today (`Station` rows,
 by contrast, are admin-managed at `/settings?screen=stations` since 2026-09-25, along with
@@ -225,8 +227,8 @@ One row per order.
 | `id` | |
 | `hoops_order_id` | back-reference to Hoops |
 | `customer_name` | |
-| `external_ship_date` | promised to the customer. Nullable since 2026-09-28 — an export with no Deadline still imports; the order page asks for it, and the order can't be confirmed or scheduled until it's set |
-| `internal_due_date` | what production actually works toward — always computed as `external_ship_date` − 14 days, never an independent input (see Known open items) |
+| `deadline` | the one date this order works to. Nullable since 2026-09-28 — an export with no Deadline still imports; the order page asks for it, and the order can't be confirmed or scheduled until it's set. Replaces the older `external_ship_date` + auto-derived `internal_due_date` pair (see 2026-09-28 decision under Known open items) |
+| `deadline_is_tight` | boolean, defaults true. **True** = firm customer commitment (behaves as the old `external_ship_date` did — missing it means missing a customer promise). **False** = internal target the shop is aiming at but hasn't committed to. Placement math is identical either way; only the meaning of an at-risk flag against it softens. Editable on the order page, next to the deadline itself |
 | `status` | `needs_review`, `confirmed`, `scheduled`, `in_production`, `complete`, `cancelled` |
 | `imported_by` | who brought it in (usually "claude") |
 | `created_at` | |
@@ -476,10 +478,15 @@ Still open, per Known open items below: `screen_print_auto`'s "Manual" variant (
 client's own sheet marks it "never fully developed" — every cell blank, nothing to port),
 and the Wovens formula (see above). **DTF/DTG** have no formula by design — the client
 says their time depends on the artwork (2026-09-23) — so each DTF/DTG line item takes
-reviewer-entered hours (`LineItem.manualEstimatedHours`, only ever used for those two
-types, never to override a real formula) and gets its own `dtf`/`dtg` station. Until
-the hours are set, the order page asks "How many hours does this job need?" (a
-`MissingLineItemDataError`, answerable by hand or via the notes box).
+reviewer-entered hours (`LineItem.manualEstimatedHours`) and gets its own `dtf`/`dtg`
+station. Until the hours are set, the order page asks "How many hours does this job
+need?" (a `MissingLineItemDataError`, answerable by hand or via the notes box).
+**As of 2026-09-28** `manualEstimatedHours` is *also* a general override on any job type
+with a real formula: setting it (e.g. 1h on an embroidery line the engine says is 3h)
+tells the engine to use that number instead. `engineEstimateFor()` in `estimateHours.ts`
+returns what the formula would have said so the UI can show "Engine estimated ~X.Xh"
+alongside the override; leaving the input blank on the order page clears the override
+and the engine number takes over again.
 `MissingFormulaError` is now only for an unknown decoration type / finishing step. Separately,
 `MissingLineItemDataError` (not a station-level gap) fires when a station's formula is
 real but one specific job is missing a required field — e.g. an embroidery line item with
@@ -874,20 +881,20 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     caps therefore still hit `MissingLineItemDataError` (garment_style not set) until
     either extraction is taught to recognize headwear, or a person sets `garmentStyle`
     manually via the order's line-item edit form (now exposed there).
-  - **Only one date ("Deadline") appears per job, not two — resolved (2026-09-22).**
-    Confirmed with the client: `internal_due_date` is never an independent value: the shop
-    wants to be ready for an order two weeks before it's actually due, so
-    `internal_due_date` = `external_ship_date` − 14 days, always. Implemented as a pure,
-    deterministic computation (`computeInternalDueDate` in
-    `src/lib/server/hoops/internalDueDate.ts`), never left to the extraction model and
-    never a directly-editable field — Claude's extraction tool no longer asks for or emits
-    `internalDueDate` at all (`extractOrderFromPdf.ts` computes it from the extracted
-    `externalShipDate` after the model call returns); the order edit page shows it as a
-    disabled/read-only field; `updateOrderFields.ts` and `confirmImport.ts` recompute it
-    whenever `externalShipDate` changes and `orderCorrectionSchema` no longer accepts
-    `internalDueDate` as a correction at all. The cure/dry buffer (a gap between a print
-    and a downstream finishing step, decided as zero on 2026-09-23) is a separate
-    question — do not conflate the two.
+  - **Only one date ("Deadline") appears per job — resolved (2026-09-22, revised
+    2026-09-28).** The 2026-09-22 answer was `internal_due_date = external_ship_date − 14 days`
+    with the internal date auto-derived and non-editable; **superseded 2026-09-28** by a
+    single `deadline` field plus a `deadline_is_tight` boolean. Tight = firm customer
+    commitment (behaves as the old `external_ship_date` did); loose = internal target
+    (placement math unchanged; only the meaning of "at risk" against it softens). The
+    fixed 14-day lead-time rule is gone and `src/lib/internalDueDate.ts` deleted;
+    migration `deadline_tightness` collapses existing rows into the single date
+    (preferring `externalShipDate` when both were set, or reconstructing it as
+    `internalDueDate + 14 days` when only the internal was set) and defaults
+    `deadlineIsTight` to true for all legacy rows (they were treated as firm customer
+    dates). Reviewer flips tight/internal on the order page's Deadline field. The
+    cure/dry buffer (a gap between a print and a downstream finishing step, decided as
+    zero on 2026-09-23) is a separate question — do not conflate the two.
   - **Administrative fee rows** ("One-Time Digitizing Fee," "Ink Color Change") appear in
     the job details table but aren't production work — they must not become `LineItem`
     rows. Extraction must exclude them (and flag that they were excluded), not force them

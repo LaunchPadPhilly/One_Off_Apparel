@@ -48,7 +48,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 				}
 			}
 		},
-		orderBy: { internalDueDate: 'asc' }
+		orderBy: { deadline: 'asc' }
 	});
 	// NEW (2026-09-23): open-item count per order (orderGaps.ts) — drives the "N open"
 	// badge on orders still in review and the "Needs re-review" flag on confirmed ones.
@@ -63,8 +63,9 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			id: order.id,
 			hoopsOrderId: order.hoopsOrderId,
 			customerName: order.customerName,
-			// Null until a ship date is entered (export had no Deadline, 2026-09-28).
-			internalDueDate: order.internalDueDate?.toISOString().slice(0, 10) ?? null,
+			// Null until a deadline is entered (export had no Deadline).
+			deadline: order.deadline?.toISOString().slice(0, 10) ?? null,
+			deadlineIsTight: order.deadlineIsTight,
 			status: order.status,
 			lineItemCount: order.lineItems.length,
 			estimate: summarizeOrderEstimate(order.lineItems),

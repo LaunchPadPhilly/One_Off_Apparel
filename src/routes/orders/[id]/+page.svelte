@@ -5,27 +5,9 @@
 	import { pressable } from '$lib/actions/pressable.svelte';
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig } from '$lib/appConfig';
-	import { computeInternalDueDate } from '$lib/internalDueDate';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
-
-	// Internal due date defaults to 14 days before external ship date (see
-	// internalDueDate.ts) but stays a real, independently editable field — a human
-	// reviewing the order can set it to whatever they want. This only re-suggests the
-	// default when the ship date changes AND the due date still matches the default for
-	// the *previous* ship date — so editing the ship date after someone has already
-	// deliberately overridden the due date doesn't clobber their override.
-	let externalShipDate = $state(data.order.externalShipDate);
-	let internalDueDate = $state(data.order.internalDueDate);
-
-	function onExternalShipDateChange(newValue: string) {
-		// Either date may be '' (an export with no Deadline, 2026-09-28) — computing from ''
-		// would throw "Invalid time value", so only compute from a real date.
-		const wasDefault = !internalDueDate || (externalShipDate !== '' && internalDueDate === computeInternalDueDate(externalShipDate));
-		externalShipDate = newValue;
-		if (wasDefault) internalDueDate = newValue ? computeInternalDueDate(newValue) : '';
-	}
 
 	// data.gaps (see orderGaps.ts, computed server-side and shared with the notes-box
 	// fill-in action so both read the exact same outstanding-gap logic) splits into two
@@ -52,6 +34,17 @@
 		manualEstimatedHours: 'How many hours does it need (no formula for this job type)',
 		assignedStationId: 'What station is it assigned to'
 	};
+
+	// One-line summary of a line item's engine estimate — shown alongside a manual
+	// override so the reviewer sees what the engine would have said, and can decide
+	// whether to keep the override. Reads the same DisplayEstimate shape the badge above
+	// uses (see estimateForDisplay.ts): `engineHours` is only ever populated when the
+	// current estimate came from a manual override AND the engine also has a formula for
+	// the row.
+	function engineEstimateNote(estimate: { ok: true; hours: number; engineHours?: number } | { ok: false }) {
+		if (!estimate.ok || estimate.engineHours == null) return '';
+		return `Engine estimated ~${estimate.engineHours.toFixed(2)}h — clear the override to use it.`;
+	}
 
 	const needsReReview = $derived(data.order.status === 'CONFIRMED' && data.gaps.blockingCount > 0);
 
@@ -197,21 +190,26 @@
 			>
 				<label>Customer <input name="customerName" value={data.order.customerName} autocomplete="off" /></label>
 				<label>
-					External ship date
-					<input
-						name="externalShipDate"
-						type="date"
-						value={externalShipDate}
-						onchange={(e) => onExternalShipDateChange(e.currentTarget.value)}
-					/>
+					Deadline
+					<input name="deadline" type="date" value={data.order.deadline} />
 				</label>
-				<!-- Defaults to 14 days before external ship date (see internalDueDate.ts /
-				     onExternalShipDateChange above) but stays a real, editable field — a
-				     person reviewing the order can set it to whatever they want. -->
-				<label>
-					Internal due date
-					<input name="internalDueDate" type="date" bind:value={internalDueDate} title="Defaults to 14 days before external ship date; edit freely to override." />
-				</label>
+				<!-- Firmness of the deadline above. "Tight" is a firm customer commitment
+				     (behaves like a promised ship date — missing it means missing a customer
+				     promise). "Internal" is a target the shop is aiming at but hasn't
+				     committed to; the engine still schedules toward it, but an at-risk flag
+				     against it reads softer. Placement math is identical either way. -->
+				<fieldset class="deadline-firmness">
+					<legend>Deadline type</legend>
+					<label>
+						<input type="radio" name="deadlineIsTight" value="true" checked={data.order.deadlineIsTight} />
+						Tight — customer-committed
+					</label>
+					<label>
+						<input type="radio" name="deadlineIsTight" value="false" checked={!data.order.deadlineIsTight} />
+						Internal — loose target
+					</label>
+					<input type="hidden" name="deadlineIsTightSubmitted" value="1" />
+				</fieldset>
 				<label>
 					Blanks ordering
 					<select name="blankOrderingStatus">
@@ -245,8 +243,7 @@
 			</details>
 		{:else}
 			<dl>
-				<div><dt>Ship date</dt><dd>{data.order.externalShipDate}</dd></div>
-				<div><dt>Due date</dt><dd>{data.order.internalDueDate}</dd></div>
+				<div><dt>Deadline</dt><dd>{data.order.deadline || 'not set'} <span class="muted">({data.order.deadlineIsTight ? 'tight' : 'internal'})</span></dd></div>
 				<div><dt>Blanks</dt><dd>{data.order.blankOrderingStatus}</dd></div>
 				<div><dt>Customer approval</dt><dd>{data.order.customerApprovalStatus}</dd></div>
 			</dl>
@@ -388,8 +385,9 @@
 						-->
 						{#if item.itemType === 'OTHER'}
 							<!-- NEW (2026-09-28): a job type the system doesn't model yet (e.g.
-							     Patch Install). The reviewer says which station it runs on and
-							     how long it takes; the schedule places it only on that station. -->
+							     Patch Install). The reviewer says which station it runs on; the
+							     schedule places it only on that station. Hours are entered in the
+							     universal override field further down (mandatory for this type). -->
 							<label>
 								Station
 								<select name="assignedStationId">
@@ -398,18 +396,6 @@
 										<option value={station.id} selected={item.assignedStationId === station.id}>{station.label}</option>
 									{/each}
 								</select>
-							</label>
-							<label>
-								Hours needed
-								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
-							</label>
-						{/if}
-						{#if item.decorationType === 'DTF' || item.decorationType === 'DTG'}
-							<!-- NEW (2026-09-23): DTF/DTG have no formula (time depends on the
-							     artwork), so the reviewer enters the hours; that's the estimate. -->
-							<label>
-								Hours needed
-								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
 							</label>
 						{/if}
 						{#if item.itemType === 'DECORATION'}
@@ -475,8 +461,30 @@
 								</label>
 							{/if}
 						{/if}
+						<!-- Reviewer-entered hours. Required for DTF/DTG/OTHER (no formula
+						     exists); for every other job type it's an OVERRIDE — leave blank to
+						     use the engine's estimate, or enter a number when the engine is off
+						     for this particular job (2026-09-28 decision). Clearing the input
+						     removes an override on save (the hidden `…Submitted` marker below
+						     tells the server this input was on the form and might be
+						     intentionally blank). -->
+						{#if item.itemType === 'OTHER' || item.decorationType === 'DTF' || item.decorationType === 'DTG'}
+							<label>
+								Hours needed
+								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
+							</label>
+						{:else}
+							<label>
+								Override engine estimate (hours)
+								<input name="manualEstimatedHours" type="number" min="0" step="0.25" value={item.manualEstimatedHours ?? ''} placeholder="leave blank to use engine" autocomplete="off" />
+							</label>
+						{/if}
+						<input type="hidden" name="manualEstimatedHoursSubmitted" value="1" />
 						<button class="button button--secondary" use:pressable type="submit">Save</button>
 					</form>
+					{#if item.estimate.ok && item.estimate.engineHours != null}
+						<p class="muted engine-estimate-note">{engineEstimateNote(item.estimate)}</p>
+					{/if}
 					{/key}
 				{/if}
 			</div>
@@ -499,6 +507,36 @@
 		gap: 0.25rem;
 		font-size: 0.85rem;
 		color: var(--ink-500);
+	}
+
+	.deadline-firmness {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		margin: 0;
+		padding: 0.4rem 0.6rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		font-size: 0.85rem;
+		color: var(--ink-500);
+	}
+
+	.deadline-firmness legend {
+		padding: 0 0.3rem;
+		font-size: 0.8rem;
+	}
+
+	.deadline-firmness label {
+		display: inline-flex;
+		flex-direction: row;
+		align-items: center;
+		gap: 0.35rem;
+		color: var(--ink-900);
+	}
+
+	.engine-estimate-note {
+		margin: -0.2rem 0 0.75rem;
+		font-size: 0.82rem;
 	}
 
 	dl {

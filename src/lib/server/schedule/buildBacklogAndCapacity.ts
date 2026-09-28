@@ -34,11 +34,12 @@ export interface SchedulingBacklog {
  *   4. Order.customerApprovalStatus is APPROVED (customer signed off)
  *   5. (Removed 2026-09-28: artwork approval is no longer a gate — the client always
  *      considers artwork done.)
- *   6. Order.internalDueDate is today or later (2026-09-22 decision: an order whose due
- *      date has already passed is excluded from scheduling entirely — not placed with a
- *      "past due" flag, not even offered as a candidate — until its due date is
- *      corrected. See CLAUDE.md's engine section for why this replaced an earlier
- *      "place it anyway, flagged" attempt.)
+ *   6. Order.deadline is today or later (2026-09-22 decision, retained across the
+ *      2026-09-28 one-date rewrite: an order whose deadline has already passed is
+ *      excluded from scheduling entirely — not placed with a "past due" flag, not
+ *      even offered as a candidate — until its deadline is corrected. Loose internal
+ *      deadlines are gated the same way; the tightness flag changes how at-risk reads
+ *      to a human, not whether the order enters the backlog.)
  *
  * These gates limit scheduling, not estimates — estimateHours is a pure function that
  * runs independently of approval status (e.g. at import review time).
@@ -63,10 +64,10 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 				status: OrderStatus.CONFIRMED,
 				blankOrderingStatus: BlankOrderingStatus.RECEIVED,
 				customerApprovalStatus: CustomerApprovalStatus.APPROVED,
-				internalDueDate: { gte: startOfToday() }
+				deadline: { gte: startOfToday() }
 			}
 		},
-		include: { order: { select: { internalDueDate: true } } },
+		include: { order: { select: { deadline: true, deadlineIsTight: true } } },
 		distinct: ['id']
 	});
 
@@ -119,9 +120,10 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			manualEstimatedHours: item.manualEstimatedHours,
 			otherJobType: item.otherJobType,
 			assignedStationId: item.assignedStationId,
-			// Never null here: the `internalDueDate: { gte: … }` filter above excludes orders
-			// with no ship date yet (they can't be confirmed without one anyway).
-			dueDate: item.order.internalDueDate!,
+			// Never null here: the `deadline: { gte: … }` filter above excludes orders
+			// with no deadline yet (they can't be confirmed without one anyway).
+			dueDate: item.order.deadline!,
+			deadlineIsTight: item.order.deadlineIsTight,
 			dependsOnIds
 		};
 		return backlogItem;

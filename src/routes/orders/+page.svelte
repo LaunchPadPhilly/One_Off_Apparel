@@ -239,7 +239,7 @@
 							{/if}
 							<th>Job</th>
 							<th>Customer</th>
-							<th>Due</th>
+							<th>Deadline</th>
 							<th>Status</th>
 							<th>Line items</th>
 							<!-- NEW (2026-09-21): a live "how long will this take" figure, computed
@@ -264,7 +264,16 @@
 								{/if}
 								<td class="job-cell">{order.hoopsOrderId}</td>
 								<td>{order.customerName}</td>
-								<td>{order.internalDueDate ?? 'No ship date'}</td>
+								<td>
+									{#if order.deadline}
+										{order.deadline}
+										{#if !order.deadlineIsTight}
+											<span class="badge badge--off" title="Internal target — no firm customer commitment on this date.">internal</span>
+										{/if}
+									{:else}
+										No deadline
+									{/if}
+								</td>
 								<td>
 									{#if order.status === 'CONFIRMED' && order.blockingCount > 0}
 										<!-- Confirmed but no longer valid: flagged, not moved back to review. -->

@@ -1,5 +1,4 @@
 import { prisma } from '$lib/server/prisma';
-import { computeInternalDueDate } from '$lib/internalDueDate';
 import { orderCorrectionSchema, lineItemCorrectionSchema, type OrderCorrection, type LineItemCorrection } from './types';
 
 /**
@@ -18,16 +17,9 @@ export async function updateOrderFields(orderId: string, patch: OrderCorrection,
 			where: { id: orderId },
 			data: {
 				...validated,
-				...(validated.externalShipDate ? { externalShipDate: new Date(validated.externalShipDate) } : {}),
-				// A directly-given internalDueDate always wins (a human reviewing the order
-				// can set it to whatever they want). Only fall back to the 14-days-before
-				// default when externalShipDate changed but internalDueDate wasn't given
-				// alongside it.
-				...(validated.internalDueDate
-					? { internalDueDate: new Date(validated.internalDueDate) }
-					: validated.externalShipDate
-						? { internalDueDate: new Date(computeInternalDueDate(validated.externalShipDate)) }
-						: {})
+				// z.iso.date() gives back a "YYYY-MM-DD" string; Prisma's runtime validation
+				// needs a real Date at rest (see getSchedule.ts for the deeper reason).
+				...(validated.deadline ? { deadline: new Date(validated.deadline) } : {})
 			}
 		});
 

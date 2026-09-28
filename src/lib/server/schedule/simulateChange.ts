@@ -55,7 +55,10 @@ export async function simulateChange(input: SimulateChangeInput): Promise<Propos
 	if (input.type === 'rush_order') {
 		// dueDate arrives as an ISO date string (z.iso.date(), so the tool's advertised
 		// input schema stays representable in JSON Schema) — the engine needs a real Date.
-		const hypothetical = { ...input.lineItem, dueDate: new Date(input.lineItem.dueDate), id: `simulated-rush-${Date.now()}` };
+		// A hypothetical rush is always treated as a firm customer commitment
+		// (`deadlineIsTight: true`) — a "rush" that missed its date wouldn't be a
+		// simulation worth running against loose semantics.
+		const hypothetical = { ...input.lineItem, dueDate: new Date(input.lineItem.dueDate), deadlineIsTight: true, id: `simulated-rush-${Date.now()}` };
 		return proposeSchedule([...backlog, hypothetical], capacity, externalDependencies);
 	}
 

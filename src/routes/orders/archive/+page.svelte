@@ -39,7 +39,7 @@
 					<tr>
 						<th>Job</th>
 						<th>Customer</th>
-						<th>Due date</th>
+						<th>Deadline</th>
 						<!-- NEW (2026-09-21): this page used to only ever show COMPLETE orders,
 						     so a status column wasn't needed. Now it shows both COMPLETE and
 						     CANCELLED, so this column is needed to tell them apart. -->
@@ -53,7 +53,16 @@
 						<tr>
 							<td>{order.hoopsOrderId}</td>
 							<td>{order.customerName}</td>
-							<td>{order.internalDueDate ?? 'No ship date'}</td>
+							<td>
+								{#if order.deadline}
+									{order.deadline}
+									{#if !order.deadlineIsTight}
+										<span class="badge badge--off" title="Internal target — no firm customer commitment on this date.">internal</span>
+									{/if}
+								{:else}
+									No deadline
+								{/if}
+							</td>
 							<!-- Red "danger" badge styling only kicks in for CANCELLED orders,
 							     so COMPLETE orders keep the plain, neutral badge look. -->
 							<td><span class="badge" class:badge--danger={order.status === 'CANCELLED'}>{order.status}</span></td>

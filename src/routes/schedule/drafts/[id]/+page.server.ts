@@ -146,9 +146,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		// candidate here, not just left unplaced by the automatic engine; see
 		// placeAssignment below for the matching server-side write-path check.
 		prisma.order.findMany({
-			where: { status: OrderStatus.CONFIRMED, internalDueDate: { gte: startOfToday() } },
+			where: { status: OrderStatus.CONFIRMED, deadline: { gte: startOfToday() } },
 			include: { lineItems: { orderBy: { id: 'asc' } } },
-			orderBy: [{ internalDueDate: 'asc' }, { createdAt: 'desc' }]
+			orderBy: [{ deadline: 'asc' }, { createdAt: 'desc' }]
 		}),
 		prisma.station.findMany({
 			where: { archivedAt: null },
@@ -217,14 +217,14 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			customerName: order.customerName,
 			displayTitle: order.displayTitle,
 			colorHex: order.colorHex,
-			// Never null: the candidate query's internalDueDate filter excludes orders with no date.
-			internalDueDate: iso(order.internalDueDate!),
-			externalShipDate: order.externalShipDate ? iso(order.externalShipDate) : '',
+			// Never null: the candidate query's deadline filter excludes orders with no date.
+			deadline: iso(order.deadline!),
+			deadlineIsTight: order.deadlineIsTight,
 			status: order.status,
-			// NEW (2026-09-23): open items (orderGaps.ts) — a confirmed order with any is
-			// flagged "Needs re-review" on its card, linking to the order page to fix it.
+			// Open items (orderGaps.ts) — a confirmed order with any is flagged "Needs
+			// re-review" on its card, linking to the order page to fix it.
 			blockingCount: computeOrderGaps(
-				{ externalShipDate: order.externalShipDate, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
+				{ deadline: order.deadline, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
 				order.lineItems
 			).blockingCount,
 			lineItems: order.lineItems.map((item) => ({
@@ -326,18 +326,18 @@ export const actions: Actions = {
 				assignedStationId: true,
 				decorationType: true,
 				finishingStep: true,
-				order: { select: { status: true, internalDueDate: true } }
+				order: { select: { status: true, deadline: true } }
 			}
 		});
 		if (!lineItem) return fail(404, { message: 'Line item not found' });
 		if (lineItem.order.status !== OrderStatus.CONFIRMED) {
 			return fail(400, { message: `This line item's order is ${lineItem.order.status}, not CONFIRMED — it can't be placed yet.` });
 		}
-		if (!lineItem.order.internalDueDate) {
-			return fail(400, { message: "This order has no ship date yet — set it on the order page before scheduling." });
+		if (!lineItem.order.deadline) {
+			return fail(400, { message: "This order has no deadline yet — set it on the order page before scheduling." });
 		}
-		if (lineItem.order.internalDueDate.getTime() < startOfToday().getTime()) {
-			return fail(400, { message: "This order's due date has already passed — it can't be scheduled until the due date is corrected." });
+		if (lineItem.order.deadline.getTime() < startOfToday().getTime()) {
+			return fail(400, { message: "This order's deadline has already passed — it can't be scheduled until the deadline is corrected." });
 		}
 
 		const station = await findActiveStation(stationName);

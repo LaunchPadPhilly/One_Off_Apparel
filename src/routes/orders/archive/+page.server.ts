@@ -19,7 +19,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 	const orders = await prisma.order.findMany({
 		where: { status: { in: [OrderStatus.COMPLETE, OrderStatus.CANCELLED] } },
 		include: { lineItems: { select: { id: true } } },
-		orderBy: { internalDueDate: 'desc' }
+		orderBy: { deadline: 'desc' }
 	});
 
 	return {
@@ -27,8 +27,9 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			id: order.id,
 			hoopsOrderId: order.hoopsOrderId,
 			customerName: order.customerName,
-			// Null until a ship date is entered (export had no Deadline, 2026-09-28).
-			internalDueDate: order.internalDueDate?.toISOString().slice(0, 10) ?? null,
+			// Null until a deadline is entered (export had no Deadline).
+			deadline: order.deadline?.toISOString().slice(0, 10) ?? null,
+			deadlineIsTight: order.deadlineIsTight,
 			// NEW (2026-09-21): now that this page shows two different statuses instead
 			// of just COMPLETE, we need to actually pass the status through so the page
 			// can show which one each order is.
