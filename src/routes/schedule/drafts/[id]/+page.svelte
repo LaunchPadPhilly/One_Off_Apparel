@@ -209,6 +209,17 @@
 		return loc ? `${deco} · ${loc}` : deco;
 	}
 
+	// The colors going on the piece (2026-09-28) — the names when the import captured
+	// them ("2 colors: 109c Yellow, White"), else just the count. Never the shirt's own
+	// color, which the shop doesn't need to see.
+	function colorsLabel(item: { itemType: string; inkColorCount: number | null; decorationColors?: string | null }): string | null {
+		if (item.itemType !== 'DECORATION') return null;
+		const count = item.inkColorCount;
+		const countText = count ? `${count} color${count === 1 ? '' : 's'}` : '';
+		if (item.decorationColors) return countText ? `${countText}: ${item.decorationColors}` : item.decorationColors;
+		return countText || null;
+	}
+
 	let filteredOrders = $derived(
 		data.orders.filter((order) => {
 			if (!search) return true;
@@ -1039,6 +1050,9 @@
 											{#if item.quantity}
 												<span class="chip chip--muted">×{item.quantity}</span>
 											{/if}
+											{#if colorsLabel(item)}
+												<span class="chip chip--muted" title="Colors going on the piece">{colorsLabel(item)}</span>
+											{/if}
 											{#if stationName}
 												<span class="chip chip--station">{stationDisplayLabel(stationName)}</span>
 											{/if}
@@ -1223,6 +1237,9 @@
 																			<span class="chip">{stepChip(lineItem)}</span>
 																			{#if lineItem.quantity}
 																				<span class="chip chip--muted">×{lineItem.quantity}</span>
+																			{/if}
+																			{#if colorsLabel(lineItem)}
+																				<span class="chip chip--muted">{colorsLabel(lineItem)}</span>
 																			{/if}
 																		{/if}
 																	</div>

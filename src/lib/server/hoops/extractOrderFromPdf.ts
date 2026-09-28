@@ -91,6 +91,11 @@ const extractionTool: Anthropic.Tool = {
 						},
 						apparelColor: { type: 'string' },
 						inkColorCount: { type: ['integer', 'null'], description: 'From "N Color Screen Print" or similar. Null if not applicable.' },
+						decorationColors: {
+							type: ['string', 'null'],
+							description:
+								'The colors going ON the piece for this decoration — the ink, thread or patch colors from the decoration row "Color(s)" column, as written, comma-separated (e.g. "109c Yellow, White", "Blue Patch"). NOT the color of the garment itself (that is apparelColor). Null for finishing rows or when none are listed.'
+						},
 						screens: {
 							type: ['integer', 'null'],
 							description: 'Only if stated explicitly. If screen print but not stated, default to inkColorCount and add a confidenceFlags note that screens was assumed equal to ink color count.'

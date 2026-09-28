@@ -113,6 +113,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			otherJobType: item.otherJobType,
 			assignedStationId: item.assignedStationId,
 			inkColorCount: item.inkColorCount,
+			decorationColors: item.decorationColors,
 			screens: item.screens,
 			stitchCount: item.stitchCount,
 			quantity: item.quantity,
@@ -178,7 +179,7 @@ export const actions: Actions = {
 		// up a field if the form actually sent a non-empty value for it, so leaving a
 		// dropdown on its blank "—" option just means "don't change this field," not
 		// "set it to empty."
-		for (const key of ['design', 'weightClass', 'garmentStyle', 'capConstruction', 'matteSurface', 'foldBagGarment', 'assignedStationId']) {
+		for (const key of ['design', 'decorationColors', 'weightClass', 'garmentStyle', 'capConstruction', 'matteSurface', 'foldBagGarment', 'assignedStationId']) {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = value.trim();
 		}

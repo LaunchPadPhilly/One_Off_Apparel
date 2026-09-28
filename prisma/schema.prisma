@@ -302,6 +302,10 @@ model LineItem {
   printLocation         PrintLocation?
   decorationType        DecorationType?
   inkColorCount         Int?
+  // NEW (2026-09-28): the colors going ON the piece — ink / thread / patch colors as the
+  // export's "Color(s)" column lists them, e.g. "109c Yellow, White". Display only (the
+  // formulas use inkColorCount). Not the garment's own color — that's apparelColor.
+  decorationColors      String?
   screens               Int?
   stitchCount           Int?
   // Finishing-oriented fields: meaningful when itemType is FINISHING,

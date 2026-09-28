@@ -43,6 +43,8 @@ export const lineItemCandidateBaseSchema = z.object({
 	weightClass: z.enum(['THIN', 'POLY', 'BULKY']),
 	apparelColor: z.string().min(1),
 	inkColorCount: z.number().int().nonnegative().nullish(),
+	// NEW (2026-09-28): the colors going on the piece, as written (e.g. "109c Yellow, White").
+	decorationColors: z.string().trim().max(300).nullish(),
 	screens: z.number().int().nonnegative().nullish(),
 	stitchCount: z.number().int().nonnegative().nullish(),
 	quantity: z.number().int().positive(),

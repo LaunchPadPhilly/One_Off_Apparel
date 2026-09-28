@@ -352,7 +352,7 @@
 					{item.decorationType ?? item.finishingStep ?? item.otherJobType ?? 'Unknown job type'} · {item.weightClass} ·
 					qty {item.quantity}
 					{#if item.printLocation}· {item.printLocation}{/if}
-					{#if item.inkColorCount}· {item.inkColorCount} color{item.inkColorCount === 1 ? '' : 's'}{/if}
+					{#if item.inkColorCount}· {item.inkColorCount} color{item.inkColorCount === 1 ? '' : 's'}{#if item.decorationColors}: {item.decorationColors}{/if}{:else if item.decorationColors}· colors: {item.decorationColors}{/if}
 					{#if item.screens}· {item.screens} screen{item.screens === 1 ? '' : 's'}{/if}
 					{#if item.stitchCount}· {item.stitchCount} stitches{/if}
 					{#if item.garmentStyle}· {item.garmentStyle}{#if item.capConstruction} ({item.capConstruction}){/if}{/if}
@@ -372,7 +372,7 @@
 						these exact DOM nodes whenever the item's own data changes, so there's
 						nothing stale left for the browser to "restore" into.
 					-->
-					{#key `${item.id}:${item.design}:${item.quantity}:${item.manualEstimatedHours}:${item.assignedStationId}`}
+					{#key `${item.id}:${item.design}:${item.quantity}:${item.manualEstimatedHours}:${item.assignedStationId}:${item.decorationColors}:${item.inkColorCount}`}
 						<form method="POST" action="?/updateLineItem" use:enhance class="fields">
 							<input type="hidden" name="lineItemId" value={item.id} />
 							<label>Design <input name="design" value={item.design} autocomplete="off" /></label>
@@ -413,6 +413,17 @@
 							</label>
 						{/if}
 						{#if item.itemType === 'DECORATION'}
+							<!-- NEW (2026-09-28): the colors going ON the piece (ink / thread /
+							     patch), not the garment's own color. The count drives the time
+							     formulas; the names are for the shop to see. -->
+							<label>
+								Colors on the piece
+								<input name="decorationColors" value={item.decorationColors ?? ''} placeholder="e.g. 109c Yellow, White" autocomplete="off" />
+							</label>
+							<label>
+								# of colors
+								<input name="inkColorCount" type="number" min="0" step="1" value={item.inkColorCount ?? ''} autocomplete="off" />
+							</label>
 							<label>
 								Garment style
 								<select name="garmentStyle">
