@@ -403,6 +403,7 @@
 		const item = findLineItem(lineItemId);
 		if (!item || item.itemType !== 'FINISHING' || !item.dependsOn) return '';
 		if (item.dependsOn === 'all_siblings') return 'Waits on every other job on this order';
+		if (item.dependsOn === 'all_decorations') return 'Waits on every design on this order';
 		const dep = findLineItem(item.dependsOn);
 		if (!dep) return '';
 		const depPlacement = placements.find((p) => p.lineItemId === dep.id);

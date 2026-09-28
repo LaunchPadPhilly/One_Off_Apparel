@@ -6,7 +6,7 @@ import {
 	LineItemType,
 	OrderStatus
 } from '../../../../prisma/generated/prisma/enums';
-import { ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
+import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import type { DateRange } from './types';
@@ -75,13 +75,19 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 	const orderIds = [...new Set(lineItems.map((item) => item.orderId))];
 	const siblings = await prisma.lineItem.findMany({
 		where: { orderId: { in: orderIds } },
-		select: { id: true, orderId: true, status: true }
+		select: { id: true, orderId: true, status: true, itemType: true }
 	});
 	const siblingIdsByOrder = new Map<string, string[]>();
+	const decorationIdsByOrder = new Map<string, string[]>();
 	for (const sibling of siblings) {
 		const ids = siblingIdsByOrder.get(sibling.orderId) ?? [];
 		ids.push(sibling.id);
 		siblingIdsByOrder.set(sibling.orderId, ids);
+		if (sibling.itemType === LineItemType.DECORATION) {
+			const decorationIds = decorationIdsByOrder.get(sibling.orderId) ?? [];
+			decorationIds.push(sibling.id);
+			decorationIdsByOrder.set(sibling.orderId, decorationIds);
+		}
 	}
 	const statusById = new Map(siblings.map((sibling) => [sibling.id, sibling.status]));
 
@@ -93,10 +99,14 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 		if (item.itemType === LineItemType.FINISHING) {
 			// The finishing rule (finishingDependencies.ts, 2026-09-28) wins over whatever
 			// an older row has stored: relabel / hang tags / wovens wait on nothing, fold &
-			// bag on everything, matte on its stored decoration.
+			// bag on everything, matte on its linked decoration — or, when it isn't linked to
+			// one, on every design on the order. An unlinked matte stored as "all_siblings"
+			// (imports before this fix) is read the same way: waiting on everything would
+			// include fold & bag, which waits on everything too, a deadlock.
 			const rule = finishingDependencyRule(item.finishingStep);
-			const allSiblings = rule === 'all_siblings' || (rule === 'decoration' && item.dependsOn === ALL_SIBLINGS_DEPENDENCY);
-			if (allSiblings) dependsOnIds = (siblingIdsByOrder.get(item.orderId) ?? []).filter((id) => id !== item.id);
+			const unlinkedMatte = rule === 'decoration' && (item.dependsOn === ALL_DECORATIONS_DEPENDENCY || item.dependsOn === ALL_SIBLINGS_DEPENDENCY);
+			if (rule === 'all_siblings') dependsOnIds = (siblingIdsByOrder.get(item.orderId) ?? []).filter((id) => id !== item.id);
+			else if (unlinkedMatte) dependsOnIds = decorationIdsByOrder.get(item.orderId) ?? [];
 			else if (rule === 'decoration' && item.dependsOn) dependsOnIds = [item.dependsOn];
 		}
 		for (const id of dependsOnIds) {
