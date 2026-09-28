@@ -605,6 +605,8 @@
 			JSON.stringify({ lineItemId, orderId, hours: hours ?? 1, expectedStation })
 		);
 		activeExpectedStation = expectedStation;
+		activeDurationMin = Math.max(15, Math.round((hours ?? 1) * 60));
+		activeMovingId = null;
 	}
 
 	function handlePlacementDragStart(event: DragEvent, placementId: string) {
@@ -618,22 +620,60 @@
 		const placement = placements.find((p) => p.id === placementId);
 		const lineItem = placement ? findLineItem(placement.lineItemId) : undefined;
 		activeExpectedStation = lineItem ? expectedStationFor(lineItem) : null;
+		activeDurationMin = placement?.durationMin ?? 60;
+		activeMovingId = placementId;
 	}
 
 	function handleDragEnd() {
 		activeExpectedStation = null;
+		activeDurationMin = 0;
+		activeMovingId = null;
+		dragPreview = null;
 	}
 
 	// Which station the currently-dragging line item is allowed on. Set on dragstart
 	// (from the sidebar or an existing placement) and cleared on dragend. Rows whose
 	// station doesn't match dim during the drag; drops onto a wrong row are refused.
 	let activeExpectedStation = $state<string | null>(null);
+	// The working duration and (for a move) the id of the currently-dragging item,
+	// captured on dragstart so the drop-target preview can render at the correct
+	// width and snap-out-of-overlap can exclude the moving item.
+	let activeDurationMin = $state<number>(0);
+	let activeMovingId = $state<string | null>(null);
 
 	// The drop-target highlight now needs to identify a (date, station) row —
 	// station tabs are gone, so a day shows every station stacked, and the user
 	// needs to see WHICH row they're dropping into. Single string key so a $state
 	// equality check flips one highlight at a time without extra bookkeeping.
 	let dragOverKey = $state<string | null>(null);
+	// Live preview of where a drop would land: which (date, station) track it's over,
+	// the snapped target startMin (15-min grid, snapped out of any overlapping peer's
+	// span the same way cascadeInsert/cascadeMove would), and the item's duration.
+	// Rendered as a translucent placeholder bar on the track — see below.
+	let dragPreview = $state<{ trackKey: string; startMin: number; durationMin: number } | null>(null);
+
+	/** Grid snap: 15-minute increments. Matches the resolution the shop plans in. */
+	const SNAP_MIN = 15;
+	function snapToGrid(minute: number): number {
+		return Math.round(minute / SNAP_MIN) * SNAP_MIN;
+	}
+
+	/** Same LEFT-half / RIGHT-half snap-out-of-overlap the cascade helpers apply, so the
+	 *  preview lines up with the real drop position. Excludes the moving item itself
+	 *  during a move (a placement dragging over its own span shouldn't be pushed by
+	 *  itself). */
+	function snapOutOfPeers(target: number, peers: readonly { id: string; startMin: number; durationMin: number }[], excludeId: string | null): number {
+		for (const p of peers) {
+			if (excludeId != null && p.id === excludeId) continue;
+			const end = wallClockEnd(p.startMin, p.durationMin);
+			if (target >= p.startMin && target < end) {
+				const mid = p.startMin + (end - p.startMin) / 2;
+				return target < mid ? p.startMin : end;
+			}
+		}
+		return target;
+	}
+
 	function trackKey(date: string, stationName: string): string {
 		return `${date}::${stationName}`;
 	}
@@ -651,15 +691,28 @@
 		// know (e.g. an uncategorized "Patch Install") so we don't restrict.
 		if (activeExpectedStation && activeExpectedStation !== kindOf(stationName)) {
 			event.dataTransfer!.dropEffect = 'none';
+			dragPreview = null;
 			return;
 		}
 		event.preventDefault();
 		event.dataTransfer!.dropEffect = 'move';
 		dragOverKey = trackKey(date, stationName);
+
+		// Compute the predicted drop position: cursor → wall-clock minute → snap to
+		// 15-min grid → snap out of any peer's span (same as the real drop).
+		const track = event.currentTarget as HTMLElement;
+		const rect = track.getBoundingClientRect();
+		const relative = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+		const rawMin = SHIFT_START_MIN + (relative / rect.width) * SHIFT_LENGTH_MIN;
+		const peers = placementsForDay(date, stationName);
+		const snapped = snapOutOfPeers(snapToGrid(rawMin), peers, activeMovingId);
+		const clamped = Math.max(SHIFT_START_MIN, Math.min(SHIFT_END_MIN - SNAP_MIN, snapped));
+		dragPreview = { trackKey: trackKey(date, stationName), startMin: clamped, durationMin: activeDurationMin || 60 };
 	}
 
 	function handleTrackDragLeave() {
 		dragOverKey = null;
+		dragPreview = null;
 	}
 
 	// Every mutation below applies optimistically to the $state array first (so
@@ -670,11 +723,15 @@
 		event.preventDefault();
 		dragOverKey = null;
 		activeExpectedStation = null;
+		dragPreview = null;
+		activeMovingId = null;
 		if (!event.dataTransfer) return;
 		const track = event.currentTarget as HTMLElement;
 		const rect = track.getBoundingClientRect();
 		const relative = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-		const dropMin = SHIFT_START_MIN + (relative / rect.width) * SHIFT_LENGTH_MIN;
+		// 15-min grid snap so the persisted position lines up with the drag-preview
+		// and with how the shop actually plans days (quarter-hour granularity).
+		const dropMin = snapToGrid(SHIFT_START_MIN + (relative / rect.width) * SHIFT_LENGTH_MIN);
 
 		// Moving an existing placement wins over adding a new one — some browsers
 		// leave stale getData from a prior transfer, so check payloads by priority.
@@ -1221,6 +1278,18 @@
 													<span class="bar__break-label">{brk.label}</span>
 												</div>
 											{/each}
+											<!-- Drop-target ghost: shows where the current drag would land, at the item's
+											     real width, snapped to the 15-minute grid. Same snap-out-of-overlap the
+											     drop itself applies, so what you see IS where it will go. -->
+											{#if dragPreview && dragPreview.trackKey === trackKey(date, station)}
+												<div
+													class="drop-preview"
+													style="left: {pctFromShiftStart(dragPreview.startMin)}%; width: {pctWidth(Math.max(15, dragPreview.durationMin))}%;"
+													aria-hidden="true"
+												>
+													<span class="drop-preview__time">{formatClock(dragPreview.startMin)}</span>
+												</div>
+											{/if}
 											{#each rowPlacements as placement (placement.id)}
 												{@const parent = findOrder(placement.orderId)}
 												{@const bg = orderColor(placement.orderId)}
@@ -2158,6 +2227,33 @@
 	.bar__track--drag {
 		outline: 2px dashed var(--brand-500);
 		outline-offset: 2px;
+	}
+
+	.drop-preview {
+		position: absolute;
+		top: 3px;
+		bottom: 3px;
+		background: color-mix(in srgb, var(--brand-500) 25%, transparent);
+		border: 1px dashed var(--brand-500);
+		border-radius: 3px;
+		pointer-events: none;
+		z-index: 2;
+		display: flex;
+		align-items: center;
+		justify-content: flex-start;
+		padding: 0 4px;
+		box-sizing: border-box;
+		overflow: hidden;
+	}
+
+	.drop-preview__time {
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--brand-700, var(--ink-900));
+		background: color-mix(in srgb, var(--surface, #fff) 80%, transparent);
+		padding: 1px 4px;
+		border-radius: 2px;
+		white-space: nowrap;
 	}
 
 	.placement {
