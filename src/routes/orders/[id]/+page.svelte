@@ -198,18 +198,14 @@
 				     promise). "Internal" is a target the shop is aiming at but hasn't
 				     committed to; the engine still schedules toward it, but an at-risk flag
 				     against it reads softer. Placement math is identical either way. -->
-				<fieldset class="deadline-firmness">
-					<legend>Deadline type</legend>
-					<label>
-						<input type="radio" name="deadlineIsTight" value="true" checked={data.order.deadlineIsTight} />
-						Tight — customer-committed
-					</label>
-					<label>
-						<input type="radio" name="deadlineIsTight" value="false" checked={!data.order.deadlineIsTight} />
-						Internal — loose target
-					</label>
+				<label>
+					Deadline type
+					<select name="deadlineIsTight">
+						<option value="true" selected={data.order.deadlineIsTight}>Tight — customer-committed</option>
+						<option value="false" selected={!data.order.deadlineIsTight}>Internal — loose target</option>
+					</select>
 					<input type="hidden" name="deadlineIsTightSubmitted" value="1" />
-				</fieldset>
+				</label>
 				<label>
 					Blanks ordering
 					<select name="blankOrderingStatus">
@@ -507,31 +503,6 @@
 		gap: 0.25rem;
 		font-size: 0.85rem;
 		color: var(--ink-500);
-	}
-
-	.deadline-firmness {
-		display: flex;
-		flex-direction: column;
-		gap: 0.2rem;
-		margin: 0;
-		padding: 0.4rem 0.6rem;
-		border: 1px solid var(--border);
-		border-radius: var(--radius-sm);
-		font-size: 0.85rem;
-		color: var(--ink-500);
-	}
-
-	.deadline-firmness legend {
-		padding: 0 0.3rem;
-		font-size: 0.8rem;
-	}
-
-	.deadline-firmness label {
-		display: inline-flex;
-		flex-direction: row;
-		align-items: center;
-		gap: 0.35rem;
-		color: var(--ink-900);
 	}
 
 	.engine-estimate-note {
