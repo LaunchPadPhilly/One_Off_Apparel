@@ -266,12 +266,12 @@ One row per **design/print job or finishing step** on an order.
 | `print_location` | front, back, left, or right |
 | `decoration_type` | screen print / embroidery / DTF / DTG — **decoration rows only**, blank on finishing rows. Determines the primary `station_id` via lookup. |
 | `finishing_step` | matte / relabel / fold & bag / hang tag — **finishing rows only**, blank on decoration rows |
-| `depends_on` | **finishing rows only.** Either another `line_items.id` (this finish waits on one specific job — e.g. matte waits on the print it's finishing) or the literal string `"all_siblings"` (this finish waits on every other line item under the same order — this is how fold & bag / final packaging works: it can't start until every decoration *and* every other finish on that order is done) |
-| `status` | `needs_review`, `blocked`, `in_production`, `complete`. Finishing rows are created with `status: blocked`. Since 2026-09-23 a blocked finisher *is* schedulable (placed after the job it depends on — see propose_schedule), but it can't be **Started** on the floor until `check_completion()` unlocks it. |
+| `depends_on` | **finishing rows only, and only matte and fold & bag (2026-09-28).** Matte: the `line_items.id` of the print it finishes (or `"all_siblings"` when the import couldn't tell which print). Fold & bag: always the literal `"all_siblings"` — it waits on every other line item on the order. Relabel, hang tags and wovens: always null — they can be done any time, even before the print. The rule lives in `src/lib/server/engine/finishingDependencies.ts`; `importHoopsExport.ts` and `fetchBacklog()` apply it whatever the extraction model sent, and migration `finishing_dependency_rules` fixed existing rows |
+| `status` | `needs_review`, `blocked`, `in_production`, `complete`. Matte and fold & bag rows are created `blocked`; relabel / hang tags / wovens are created `needs_review` (nothing to wait for). A blocked finisher *is* schedulable (placed after the job it depends on — see propose_schedule), but it can't be **Started** on the floor until `check_completion()` unlocks it. |
 | `weight_class` | thin, poly, or bulky — meaningful for **flat** garments; null/ignored when `garment_style` is `cap` |
 | `garment_style` | `flat` or `cap` — **decoration rows only**, meaningful today for embroidery's formula (flat and cap use genuinely different rate tables, not a weight-class variant — see estimate_hours below) |
 | `cap_construction` | `structured` or `unstructured` — **only meaningful when `garment_style` is `cap`**, null otherwise |
-| `apparel_color` | text — the garment color (e.g. "Grey") |
+| `apparel_color` | text — the garment color (e.g. "Grey"). **Not shown anywhere in the app since 2026-09-28** — the client said users don't need to see it. Still stored and still filled by the Hoops import; not editable on the order page any more |
 | `ink_color_count` | int — number of colors in the decoration itself. Used for screen-print ink setup and embroidery thread-change time — but is the "X" variable in screen print's formula and the **"Y" variable in embroidery's** (the letter mapping isn't consistent across stations — see estimate_hours below). Do not confuse with `apparel_color` — they used to be conflated into one ambiguous `colors` field; they are not the same thing. |
 | `screens` | how many screens (screen print only) |
 | `stitch_count` | embroidery only — the "X" variable in embroidery's formula (not `ink_color_count`) |
@@ -524,7 +524,9 @@ function propose_schedule(backlog, capacity):
 
 **Finishers are scheduled after their prints (decision 2026-09-23, replacing the old "do
 not reintroduce dependency-checking" rule).** The shop wants the relabel/matte/fold & bag
-for an order planned up front, not only after the print is marked done. So:
+for an order planned up front, not only after the print is marked done. Since 2026-09-28
+only matte and fold & bag actually wait on anything — relabel, hang tags and
+wovens have no dependency and are placed like any other job. So:
 
 - `fetchBacklog()` includes BLOCKED finishing rows and resolves each one's `depends_on`
   into `dependsOnIds` ("all_siblings" = every other line item on the order).
@@ -637,13 +639,16 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     per hour as the team gets faster), industry-standard "rate table" style rather
     than free-form formulas. Already-approved assignments keep the hours they were
     approved with; only new plans use new numbers.
-  - **Finisher dependencies change.** Only **fold & bag** and **matte finish** must come
-    after the print; relabel, hang tags and wovens can happen any time (relabel is
-    sometimes done *before* print). Current code (`fetchBacklog()` / `dependsOn`) still
-    makes every finisher wait — change it in its own PR.
+  - **Finisher dependencies — done (2026-09-28).** Only matte (after its print)
+    and fold & bag (after everything) wait; see `depends_on` in the `line_items` table.
+  - **Weekly screen count — done (2026-09-28).** "Screens to prep" = the sum of
+    `screens` on screen-print jobs scheduled that week (`$lib/schedule/screenCount.ts`).
+    Shown per draft week on the draft board (live as jobs move) and per calendar week
+    (Mon–Sun) for the approved schedule on `/schedule`. Jobs with no `screens` value
+    count 0 and are called out, so the total is never silently low.
   - Order: (2) crew-based estimates + manual people assignment on the board,
     (3) engine auto-assigns people, (4) the Claude/MCP availability-and-changes tools.
-    Editable formula numbers and the finisher-dependency change fit between them.
+    Editable formula numbers fit between them.
 - **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
   the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
   covers the whole flow, not just Start/Stop: a date window (default 28 days from

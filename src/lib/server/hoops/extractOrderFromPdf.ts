@@ -80,7 +80,7 @@ const extractionTool: Anthropic.Tool = {
 						dependsOn: {
 							type: ['string', 'null'],
 							description:
-								'FINISHING rows only. Another line item\'s localId (the specific decoration this finish applies to), or the literal string "all_siblings" if it depends on every other line item on the order (e.g. final packaging). Null for DECORATION rows.'
+								'MATTE rows: the localId of the decoration this matte finishes. FOLD_BAG rows: the literal string "all_siblings". Null for RELABEL, HANG_TAG, WOVENS and DECORATION rows.'
 						},
 						weightClass: {
 							type: 'string',
@@ -111,7 +111,7 @@ const SYSTEM_PROMPT = `You extract structured order data from a "Job" PDF export
 
 - The "Job <number>" line is the order identifier.
 - The job details table is organized into repeating groups: one blank/garment block (Code, Name/Description, Vendor, Color, Size, Quantity rows — one row per size) followed by one or more decoration/finishing rows (Name/Description, Vendor, Position, Color(s), Size, Quantity). Each decoration or finishing row is its own line item, sharing the same order — NOT one line item per garment/size row.
-- A finishing row (relabel, matte, etc.) depends on the decoration it finishes within the same garment group — wire dependsOn to that decoration's localId.
+- A matte finishing row depends on the decoration it finishes within the same garment group — wire dependsOn to that decoration's localId. Fold & bag always waits on everything ("all_siblings"). Relabel, hang tags and wovens wait on nothing — leave their dependsOn null. (The system enforces these rules itself; this just keeps your output consistent with them.)
 - Never invent a value you cannot support from the text. When something doesn't fit the schema (an unmapped treatment type, a missing signal, an ambiguous position), say so in confidenceFlags rather than guessing silently. This system's whole design assumes a human reviews everything you extract before it becomes real — your job is to make what you're unsure about visible, not to be right about everything.
 - If a treatment has no matching decorationType or finishingStep at all (e.g. "Patch Install" — it's neither screen print/embroidery/DTF/DTG nor matte/relabel/fold&bag/hang tag/wovens), DO NOT put it in lineItems, not even with a null/guessed type. Leave it out of the array entirely and describe it in confidenceFlags instead — an item with no schema mapping is not a line item with missing fields, it's an excluded item.
 

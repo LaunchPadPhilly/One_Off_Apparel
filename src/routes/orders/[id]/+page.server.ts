@@ -109,7 +109,6 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			// NEW: the artwork-approval gate — decoration rows only, null on finishing
 			// rows. Same fetchBacklog() reasoning as Order.blankOrderingStatus above.
 			artworkApprovalStatus: item.artworkApprovalStatus,
-			apparelColor: item.apparelColor,
 			inkColorCount: item.inkColorCount,
 			screens: item.screens,
 			stitchCount: item.stitchCount,
@@ -176,7 +175,7 @@ export const actions: Actions = {
 		// up a field if the form actually sent a non-empty value for it, so leaving a
 		// dropdown on its blank "—" option just means "don't change this field," not
 		// "set it to empty."
-		for (const key of ['design', 'apparelColor', 'weightClass', 'garmentStyle', 'capConstruction', 'matteSurface', 'foldBagGarment', 'artworkApprovalStatus']) {
+		for (const key of ['design', 'weightClass', 'garmentStyle', 'capConstruction', 'matteSurface', 'foldBagGarment', 'artworkApprovalStatus']) {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = value.trim();
 		}

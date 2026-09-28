@@ -57,11 +57,11 @@ export const lineItemCandidateSchema = lineItemCandidateBaseSchema
 	.refine((item) => item.itemType !== 'FINISHING' || item.decorationType == null, {
 		message: 'decorationType must be null on FINISHING rows'
 	})
+	// No "FINISHING rows must set dependsOn" rule any more (2026-09-28): relabel / hang
+	// tags / wovens wait on nothing, and importHoopsExport.ts decides every finishing
+	// row's real dependency itself (finishingDependencies.ts), whatever is sent here.
 	.refine((item) => item.itemType !== 'DECORATION' || item.dependsOn == null, {
 		message: 'dependsOn is finishing-rows-only — see CLAUDE.md'
-	})
-	.refine((item) => item.itemType !== 'FINISHING' || (item.dependsOn != null && item.dependsOn.length > 0), {
-		message: 'FINISHING rows must set dependsOn (another localId, or "all_siblings") or they can never be unlocked'
 	});
 
 export type LineItemCandidate = z.infer<typeof lineItemCandidateSchema>;

@@ -9,6 +9,7 @@ import {
 } from '../../../../prisma/generated/prisma/enums';
 import { ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import type { DateRange } from './types';
 
 function startOfToday(): Date {
@@ -87,8 +88,14 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 
 	const backlog = lineItems.map((item) => {
 		let dependsOnIds: string[] = [];
-		if (item.itemType === LineItemType.FINISHING && item.dependsOn) {
-			dependsOnIds = item.dependsOn === ALL_SIBLINGS_DEPENDENCY ? (siblingIdsByOrder.get(item.orderId) ?? []).filter((id) => id !== item.id) : [item.dependsOn];
+		if (item.itemType === LineItemType.FINISHING) {
+			// The finishing rule (finishingDependencies.ts, 2026-09-28) wins over whatever
+			// an older row has stored: relabel / hang tags / wovens wait on nothing, fold &
+			// bag on everything, matte on its stored decoration.
+			const rule = finishingDependencyRule(item.finishingStep);
+			const allSiblings = rule === 'all_siblings' || (rule === 'decoration' && item.dependsOn === ALL_SIBLINGS_DEPENDENCY);
+			if (allSiblings) dependsOnIds = (siblingIdsByOrder.get(item.orderId) ?? []).filter((id) => id !== item.id);
+			else if (rule === 'decoration' && item.dependsOn) dependsOnIds = [item.dependsOn];
 		}
 		for (const id of dependsOnIds) {
 			if (!inBacklog.has(id)) externalDependencies.set(id, statusById.get(id) === LineItemStatus.COMPLETE ? 'complete' : 'not_schedulable');

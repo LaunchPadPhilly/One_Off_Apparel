@@ -221,9 +221,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				design: item.design,
 				itemType: item.itemType,
 				decorationType: item.decorationType,
+				// For the weekly screen count.
+				screens: item.screens,
 				finishingStep: item.finishingStep,
 				printLocation: item.printLocation,
-				apparelColor: item.apparelColor,
 				inkColorCount: item.inkColorCount,
 				quantity: item.quantity,
 				status: item.status,

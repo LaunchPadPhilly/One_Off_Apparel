@@ -360,7 +360,7 @@
 					{/if}
 				</div>
 				<p class="muted">
-					{item.decorationType ?? item.finishingStep} · {item.apparelColor} · {item.weightClass} ·
+					{item.decorationType ?? item.finishingStep} · {item.weightClass} ·
 					qty {item.quantity}
 					{#if item.printLocation}· {item.printLocation}{/if}
 					{#if item.inkColorCount}· {item.inkColorCount} color{item.inkColorCount === 1 ? '' : 's'}{/if}
@@ -373,7 +373,7 @@
 				{#if data.canEdit}
 					<!--
 						KEYED on the item's own editable fields: every line-item form on this
-						page reuses the same input `name`s ("design", "apparelColor", "quantity")
+						page reuses the same input `name`s ("design", "quantity", …)
 						since each form posts independently server-side — but that also makes
 						them look identical to the browser's own form-autofill/restore heuristics,
 						which key off name alone, not which <form> an input belongs to. That let
@@ -383,11 +383,10 @@
 						these exact DOM nodes whenever the item's own data changes, so there's
 						nothing stale left for the browser to "restore" into.
 					-->
-					{#key `${item.id}:${item.design}:${item.apparelColor}:${item.quantity}:${item.manualEstimatedHours}`}
+					{#key `${item.id}:${item.design}:${item.quantity}:${item.manualEstimatedHours}`}
 						<form method="POST" action="?/updateLineItem" use:enhance class="fields">
 							<input type="hidden" name="lineItemId" value={item.id} />
 							<label>Design <input name="design" value={item.design} autocomplete="off" /></label>
-							<label>Color <input name="apparelColor" value={item.apparelColor} autocomplete="off" /></label>
 							<label>Qty <input name="quantity" type="number" value={item.quantity} autocomplete="off" /></label>
 						<!--
 							NEW (2026-09-21): these two dropdowns let someone set
