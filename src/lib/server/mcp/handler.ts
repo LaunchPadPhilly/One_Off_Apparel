@@ -151,11 +151,22 @@ async function guardedToolResult(principal: Principal, requiredScope: McpScope, 
 	return toolResult(operation);
 }
 
+/**
+ * An error whose message was written for the person using the tool (e.g. "Maria isn't
+ * certified on Embroidery") and is safe to pass back as-is. Domain code opts in by
+ * throwing a subclass; any other error still becomes the generic message below, so an
+ * unexpected failure never leaks internals.
+ */
+export class McpUserError extends Error {}
+
 async function toolResult(operation: () => Promise<unknown>) {
 	try {
 		const result = await operation();
 		return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-	} catch {
+	} catch (error) {
+		if (error instanceof McpUserError) {
+			return { isError: true, content: [{ type: 'text' as const, text: error.message }] };
+		}
 		return {
 			isError: true,
 			content: [{ type: 'text' as const, text: 'The requested data is unavailable.' }]

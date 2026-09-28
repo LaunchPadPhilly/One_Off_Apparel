@@ -391,6 +391,7 @@ model Station {
   actuals             Actual[]
   certifications      WorkerCertification[]
   assignedLineItems   LineItem[]
+  staffingPins        StaffingPin[]
 
   @@index([kind])
 }
@@ -398,13 +399,16 @@ model Station {
 // A person on the shop floor (2026-09-25). A roster of names, deliberately NOT
 // linked to User — floor staff don't log in. `archivedAt` is "delete".
 model Worker {
-  id             String                @id @default(cuid())
+  id             String                 @id @default(cuid())
   name           String
   notes          String?
   archivedAt     DateTime?
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
   certifications WorkerCertification[]
+  unavailability WorkerUnavailability[]
+  staffingPins   StaffingPin[]
+  crewSlots      AssignmentCrew[]
 }
 
 // Which stations a worker is certified to run. Per station rather than per kind,
@@ -418,6 +422,47 @@ model WorkerCertification {
 
   @@id([workerId, stationId])
   @@index([stationId])
+}
+
+// A person who is out on a given day (2026-09-28) — set by telling Claude in chat
+// (set_worker_availability). The staffing plan never puts them on a station that day.
+model WorkerUnavailability {
+  workerId  String
+  date      DateTime @db.Date
+  reason    String?
+  createdBy String
+  createdAt DateTime @default(now())
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@id([workerId, date])
+  @@index([date])
+}
+
+// A person a human pinned to one station for one day (2026-09-28, via Claude:
+// set_worker_station). The staffing plan keeps it and only places everyone else.
+model StaffingPin {
+  workerId  String
+  date      DateTime @db.Date
+  stationId String
+  createdBy String
+  createdAt DateTime @default(now())
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  station   Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
+
+  @@id([workerId, date])
+  @@index([date])
+}
+
+// The crew on one scheduled job (2026-09-28). One person works one station for the
+// whole day, so every job on a (station, day) in a plan shares the same crew.
+model AssignmentCrew {
+  assignmentId String
+  workerId     String
+  assignment   ScheduleAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  worker       Worker             @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@id([assignmentId, workerId])
+  @@index([workerId])
 }
 
 model CapacityCalendar {
@@ -456,6 +501,9 @@ model ScheduleAssignment {
   scheduleDraftId  String?
   scheduleDraft    ScheduleDraft?           @relation(fields: [scheduleDraftId], references: [id], onDelete: SetNull)
   lineItem         LineItem                 @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
+  // Who works this job (2026-09-28): the day's crew on this station, picked by the
+  // engine (planStaffing.ts). Empty for hand-placed jobs and plans made with no roster.
+  crew             AssignmentCrew[]
   station          Station                  @relation(fields: [stationId], references: [id], onDelete: Restrict)
 
   @@index([lineItemId])

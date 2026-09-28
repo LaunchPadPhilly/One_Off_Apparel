@@ -479,6 +479,9 @@
 		stationName: string;
 		startMin: number;
 		durationMin: number;
+		// The day's crew on this job, by name (planStaffing.ts, 2026-09-28). Empty for
+		// hand-placed or hand-moved jobs.
+		crew: string[];
 	};
 	// Hydrate from server: each ScheduleAssignment tied to this draft becomes a
 	// placement. estimatedHours * 60 is the working duration; startMinuteOfDay
@@ -491,7 +494,8 @@
 			date: a.date,
 			stationName: a.stationName,
 			startMin: a.startMinuteOfDay,
-			durationMin: Math.max(15, Math.round(a.estimatedHours * 60))
+			durationMin: Math.max(15, Math.round(a.estimatedHours * 60)),
+			crew: a.crew
 		}))
 	);
 
@@ -724,7 +728,9 @@
 			// reorder — updating only (date, station) wouldn't change the item's own
 			// startMin, so a simple repack-in-place would leave it in its OLD queue
 			// slot regardless of where the user actually dropped it.
-			const movedItem: Placement = { ...existing, date, stationName };
+			// A job moved to another station or day loses its planned crew (the server
+			// clears it too) — that crew was picked for the slot it left.
+			const movedItem: Placement = { ...existing, date, stationName, crew: stayedOnSameDay ? existing.crew : [] };
 			const destPacked = insertAndRepack(destinationPeers, movedItem, insertRank);
 			const destPackedById = new Map(destPacked.map((p) => [p.id, p]));
 			placements = placements
@@ -786,7 +792,8 @@
 			date,
 			stationName,
 			startMin: 0, // rewritten by repackOrdered below
-			durationMin
+			durationMin,
+			crew: []
 		};
 		const packedDay = insertAndRepack(destinationPeers, incoming, insertRank);
 		const packedById = new Map(packedDay.map((p) => [p.id, p]));
@@ -1158,10 +1165,15 @@
 							<span class="day__capacity muted">
 								{formatHours(WORKING_HOURS)} per station · 8a–4:30p
 							</span>
+							<!-- Who's out that day (set through Claude, 2026-09-28). -->
+							{#if data.outByDate[day.date]?.length}
+								<span class="day__out">Out: {data.outByDate[day.date].join(', ')}</span>
+							{/if}
 						</header>
 						<div class="station-rows">
 							{#snippet stationRow(date: string, station: string)}
 								{@const rowPlacements = placementsForDay(date, station)}
+								{@const rowCrew = [...new Set(rowPlacements.flatMap((p) => p.crew))].sort()}
 								{@const isDragTarget = dragOverKey === trackKey(date, station)}
 								{@const isBlocked = activeExpectedStation !== null && activeExpectedStation !== kindOf(station)}
 								<div
@@ -1169,8 +1181,12 @@
 									class:station-row--empty={rowPlacements.length === 0}
 									class:station-row--blocked={isBlocked}
 								>
-									<div class="station-row__label" title={rowLabel(station)}>
+									<div class="station-row__label" title={rowCrew.length ? `${rowLabel(station)} — ${rowCrew.join(', ')}` : rowLabel(station)}>
 										{rowLabel(station)}
+										<!-- The day's crew on this station (planStaffing.ts, 2026-09-28). -->
+										{#if rowCrew.length}
+											<span class="station-row__crew">{rowCrew.join(', ')}</span>
+										{/if}
 									</div>
 									<div class="station-row__bar" aria-label="{rowLabel(station)} on {date}">
 										<div
@@ -1978,6 +1994,22 @@
 
 	.day__capacity {
 		font-size: var(--fs-xs);
+	}
+
+	/* Daily staffing (2026-09-28): who's out that day. */
+	.day__out {
+		font-size: var(--fs-xs);
+		font-weight: 600;
+		color: var(--ink-700);
+	}
+
+	/* The day's crew under the station name. */
+	.station-row__crew {
+		display: block;
+		font-weight: 450;
+		color: var(--ink-500);
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	/* One stacked row per station within a day card. The label column is a fixed

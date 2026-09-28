@@ -142,7 +142,8 @@ function estimateScreenPrintAutoHours(item: EstimateHoursInput): EstimateHoursRe
 
 	// Add setup + run together, then divide by 60 to convert minutes into hours (since
 	// that's the unit the rest of the scheduling engine works in).
-	return { station: 'screen_print_auto', hours: (setupMinutes + runMinutes) / 60 };
+	// Crew (2026-09-28): only the run time speeds up with more people; setup is fixed.
+	return { station: 'screen_print_auto', hours: (setupMinutes + runMinutes) / 60, crewDivisibleHours: runMinutes / 60 };
 }
 
 // Direct port of the embroidery tab (confirmed with the client, 2026-09-21). Flat and
@@ -242,7 +243,9 @@ function estimateEmbroideryHours(item: EstimateHoursInput): EstimateHoursResult 
 	// Add every step together, then convert from minutes to hours (÷ 60) since that's
 	// the unit the rest of the scheduling engine expects back.
 	const totalMinutes = setupBoxingMinutes + threadChangeMinutes + hoopingMinutes + loadUnloadMinutes + cleanupMinutes + sewMinutes;
-	return { station: 'embroidery', hours: totalMinutes / 60 };
+	// Crew (client, 2026-09-28): only setup & boxing speeds up with more people — thread
+	// changes, hooping, load/unload, cleanup and the machine's sew time don't.
+	return { station: 'embroidery', hours: totalMinutes / 60, crewDivisibleHours: setupBoxingMinutes / 60 };
 }
 
 // ─── Finishing steps (client's finishing flowcharts, 2026-09-23) ─────────────────────
@@ -319,7 +322,8 @@ function estimateManualHours(item: EstimateHoursInput, station: string, label: s
 	if (hours == null || !(hours > 0)) {
 		throw new MissingLineItemDataError(`manual_estimated_hours (${label} has no formula — how many hours does this job need?)`, 'manualEstimatedHours');
 	}
-	return { station, hours };
+	// Crew (client, 2026-09-28): the entered hours are for one person; more people divide them.
+	return { station, hours, crewDivisibleHours: hours };
 }
 
 /**
@@ -339,7 +343,8 @@ function estimateOtherHours(item: EstimateHoursInput): EstimateHoursResult {
 	if (hours == null || !(hours > 0)) {
 		throw new MissingLineItemDataError(`manual_estimated_hours (${name} has no formula — how many hours does this job need?)`, 'manualEstimatedHours');
 	}
-	return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours };
+	// Crew: not decided for OTHER jobs yet, so the entered hours stay fixed.
+	return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours, crewDivisibleHours: 0 };
 }
 
 /**
@@ -371,10 +376,18 @@ function roundToQuarterHour(hours: number): number {
  * The final hours are rounded to the nearest 15 minutes (see roundToQuarterHour
  * above) so estimates shown at import/order creation and slots produced by
  * propose_schedule share the same granularity.
+ *
+ * `crewSize` (2026-09-28): the client's formulas are the rate for ONE person. With N
+ * people on the job, only its crew-divisible part (`crewDivisibleHours` — screen print
+ * run time, embroidery setup & boxing, all finishing time, DTF/DTG entered hours) is
+ * divided by N; everything else stays fixed. Default 1 = the unchanged formula.
  */
-export function estimateHours(item: EstimateHoursInput): EstimateHoursResult {
+export function estimateHours(item: EstimateHoursInput, crewSize = 1): EstimateHoursResult {
 	const raw = estimateHoursRaw(item);
-	return { ...raw, hours: roundToQuarterHour(raw.hours) };
+	const crew = Math.max(1, Math.floor(crewSize));
+	const divisible = raw.crewDivisibleHours ?? 0;
+	const hours = raw.hours - divisible + divisible / crew;
+	return { ...raw, hours: roundToQuarterHour(hours) };
 }
 
 function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {
@@ -397,5 +410,7 @@ function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {
 
 	if (item.itemType === LineItemType.OTHER) return estimateOtherHours(item);
 
-	return estimateFinishingHours(item);
+	// Every finishing formula is pure per-garment time, so all of it speeds up with crew.
+	const finishing = estimateFinishingHours(item);
+	return { ...finishing, crewDivisibleHours: finishing.hours };
 }
