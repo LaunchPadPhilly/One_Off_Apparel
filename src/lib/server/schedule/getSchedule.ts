@@ -22,8 +22,8 @@ export async function getSchedule(range: DateRange, stationId?: string) {
 			status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS, ScheduleAssignmentStatus.COMPLETE] }
 		},
 		include: {
-			lineItem: { select: { id: true, design: true, itemType: true, decorationType: true, finishingStep: true, orderId: true } },
-			station: { select: { id: true, name: true, type: true } }
+			lineItem: { select: { id: true, design: true, itemType: true, decorationType: true, finishingStep: true, orderId: true, status: true } },
+			station: { select: { id: true, name: true, label: true, kind: true } }
 		},
 		orderBy: [{ date: 'asc' }, { stationId: 'asc' }, { sequenceOrder: 'asc' }]
 	});

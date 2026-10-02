@@ -42,18 +42,40 @@
 </section>
 
 <style>
+	/* A thin accent line along the top: Ocean blue by default, amber for "needs
+	   attention", red for "down" — the same status colors badges use. */
 	.stat {
 		display: flex;
 		flex-direction: column;
 		gap: 0.15rem;
 		margin-bottom: 0;
+		position: relative;
+		overflow: hidden;
+	}
+
+	.stat::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 3px;
+		background: var(--stat-accent, var(--brand-500));
+	}
+
+	.stat:has(.stat__value--warn) {
+		--stat-accent: var(--warning-fg);
+	}
+
+	.stat:has(.stat__value--down) {
+		--stat-accent: var(--danger-fg);
 	}
 
 	.stat__value {
 		font-size: 2rem;
-		font-weight: 650;
+		font-weight: 700;
+		letter-spacing: -0.02em;
 		line-height: 1.1;
-		color: var(--warm-600);
+		color: var(--ink-900);
+		font-variant-numeric: tabular-nums;
 	}
 
 	.stat__value--down {
@@ -61,6 +83,6 @@
 	}
 
 	.stat__value--warn {
-		color: var(--warm-700);
+		color: var(--warning-fg);
 	}
 </style>

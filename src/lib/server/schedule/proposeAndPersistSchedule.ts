@@ -1,7 +1,7 @@
 import { prisma } from '$lib/server/prisma';
 import { proposeSchedule } from '$lib/server/engine/proposeSchedule';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
-import { fetchBacklog, fetchCapacity } from './buildBacklogAndCapacity';
+import { fetchBacklog, fetchStaffedCapacity } from './buildBacklogAndCapacity';
 import type { DateRange } from './types';
 
 export interface ProposeAndPersistResult {
@@ -33,9 +33,12 @@ async function persistProposal(
 					stationId: assignment.stationId,
 					date: assignment.date,
 					sequenceOrder: assignment.sequenceOrder,
+					startMinuteOfDay: assignment.startMinuteOfDay,
 					estimatedHours: assignment.estimatedHours,
 					status: ScheduleAssignmentStatus.PROPOSED,
-					proposedBy
+					proposedBy,
+					// The day's crew on this station (planStaffing.ts, 2026-09-28).
+					crew: { create: assignment.crewWorkerIds.map((workerId) => ({ workerId })) }
 				}
 			});
 			created.push(row);
@@ -64,8 +67,9 @@ async function persistProposal(
  * the Production Board wouldn't either.
  */
 export async function proposeAndPersistSchedule(range: DateRange, proposedBy: string): Promise<ProposeAndPersistResult> {
-	const [backlog, capacity] = await Promise.all([fetchBacklog(), fetchCapacity(range)]);
-	const result = proposeSchedule(backlog, capacity);
+	const { backlog, externalDependencies } = await fetchBacklog();
+	const capacity = await fetchStaffedCapacity(range, backlog);
+	const result = proposeSchedule(backlog, capacity, externalDependencies);
 
 	const touchedLineItemIds = [...result.assignments.map((a) => a.lineItemId), ...result.atRisk.map((a) => a.lineItemId)];
 	const assignments = await persistProposal(result.assignments, touchedLineItemIds, proposedBy);

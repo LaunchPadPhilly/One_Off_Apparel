@@ -49,17 +49,17 @@
 		border-radius: var(--radius-md);
 		text-decoration: none;
 		white-space: nowrap;
-		color: var(--ink-500);
-		font-weight: 550;
+		color: var(--nav-fg);
+		font-weight: 600;
 		transition: color var(--motion-fast) var(--ease-standard);
 	}
 
 	.nav-link:hover {
-		color: var(--ink-900);
+		color: var(--nav-fg-active);
 	}
 
 	.nav-link--current {
-		color: var(--ink-900);
-		font-weight: 650;
+		color: var(--nav-fg-active);
+		font-weight: 700;
 	}
 </style>

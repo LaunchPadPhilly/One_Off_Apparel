@@ -2,6 +2,7 @@
 	import { appConfig } from '$lib/appConfig';
 	import { page } from '$app/state';
 
+	let { data } = $props();
 	const status = $derived(page.url.searchParams.get('status'));
 </script>
 
@@ -29,5 +30,10 @@
 		{/if}
 
 		<a class="button" href="/api/auth/google/login">Sign in with Google</a>
+
+		{#if data.devLoginEnabled}
+			<hr style="margin: 1rem 0; border-color: var(--color-border, #ccc);" />
+			<a class="button button--secondary" href="/api/auth/dev-login">Dev Login (skip OAuth)</a>
+		{/if}
 	</div>
 </div>
