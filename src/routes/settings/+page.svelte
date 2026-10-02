@@ -1,5 +1,9 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { replaceState } from '$app/navigation';
+	import StationsScreen from '$lib/components/settings/StationsScreen.svelte';
+	import PeopleScreen from '$lib/components/settings/PeopleScreen.svelte';
+	import FormulasScreen from '$lib/components/settings/FormulasScreen.svelte';
 	import { fly, fade } from 'svelte/transition';
 	import TabBar from '$lib/components/ui/TabBar.svelte';
 	import { pressable } from '$lib/actions/pressable.svelte';
@@ -7,7 +11,34 @@
 	import { appConfig, storageKeyPrefix } from '$lib/appConfig';
 	import type { PageProps } from './$types';
 
-	let { data }: PageProps = $props();
+	let { data, form }: PageProps = $props();
+
+	// General is everyone's; Stations and People (shop config, 2026-09-25) are
+	// admin-only — the tabs only render for admins, and every load/action behind them
+	// re-checks admin server-side (+page.server.ts).
+	const SCREENS = [
+		{ key: 'general', label: 'General' },
+		{ key: 'stations', label: 'Stations' },
+		{ key: 'people', label: 'People' },
+		{ key: 'formulas', label: 'Formulas' }
+	] as const;
+	type Screen = (typeof SCREENS)[number]['key'];
+
+	function initialScreen(): Screen {
+		const requested = page.url.searchParams.get('screen');
+		if (data.shopConfig && (requested === 'stations' || requested === 'people')) return requested;
+		if (data.formulaConfig && requested === 'formulas') return 'formulas';
+		return 'general';
+	}
+	let activeScreen = $state<Screen>(initialScreen());
+
+	function setScreen(next: string) {
+		activeScreen = next as Screen;
+		const url = new URL(page.url);
+		if (next === 'general') url.searchParams.delete('screen');
+		else url.searchParams.set('screen', next);
+		replaceState(url, page.state);
+	}
 
 	type Theme = 'system' | 'light' | 'dark' | 'slate';
 	const THEME_KEY = `${storageKeyPrefix}theme`;
@@ -101,8 +132,41 @@
 <div class="page" in:fly={screenEnter} out:fade={screenExit}>
 	<span class="eyebrow">Settings</span>
 	<h1>Settings</h1>
-	<p class="muted">Your account details, access, and display preferences.</p>
+	<p class="muted">
+		Your account details, access, and display preferences{#if data.shopConfig}, plus the shop's stations,
+			people, and formulas{/if}.
+	</p>
 
+	{#if data.shopConfig || data.formulaConfig}
+		<TabBar screens={SCREENS} active={activeScreen} onchange={setScreen} />
+	{/if}
+
+	{#key activeScreen}
+	<div class="screen" in:fly={screenEnter} out:fade={screenExit}>
+	{#if activeScreen === 'stations' && data.shopConfig}
+		<StationsScreen
+			stations={data.shopConfig.stations}
+			kindOptions={data.shopConfig.stationKindOptions}
+			notice={form?.screen === 'stations' && 'notice' in form ? (form.notice ?? null) : null}
+			message={form?.screen === 'stations' && 'message' in form ? (form.message ?? null) : null}
+		/>
+	{:else if activeScreen === 'people' && data.shopConfig}
+		<PeopleScreen
+			workers={data.shopConfig.workers}
+			stations={data.shopConfig.stations}
+			kindOptions={data.shopConfig.stationKindOptions}
+			notice={form?.screen === 'people' && 'notice' in form ? (form.notice ?? null) : null}
+			message={form?.screen === 'people' && 'message' in form ? (form.message ?? null) : null}
+		/>
+	{:else if activeScreen === 'formulas' && data.formulaConfig}
+		<FormulasScreen
+			formulas={data.formulaConfig.current}
+			defaults={data.formulaConfig.defaults}
+			stationsByKind={data.formulaConfig.stationsByKind}
+			notice={form?.screen === 'formulas' && 'notice' in form ? (form.notice ?? null) : null}
+			message={form?.screen === 'formulas' && 'message' in form ? (form.message ?? null) : null}
+		/>
+	{:else}
 	<section class="card">
 		<div class="card__title"><h2>Profile</h2></div>
 		<dl>
@@ -237,9 +301,16 @@
 			<button class="button button--secondary" use:pressable type="submit">Sign out</button>
 		</form>
 	</section>
+	{/if}
+	</div>
+	{/key}
 </div>
 
 <style>
+	.screen {
+		margin-top: 1.5rem;
+	}
+
 	.section {
 		margin-bottom: 1.25rem;
 	}

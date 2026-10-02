@@ -20,6 +20,10 @@
 
 		return [
 			{ href: '/admin', label: 'Admin', show: user.isAdmin },
+			// Provisional routes/labels — see CLAUDE.md's "Production board (provisional)" open item.
+			{ href: '/orders', label: 'Orders', show: user.scopes.includes('ORDERS_READ') },
+			{ href: '/schedule', label: 'Schedule', show: user.scopes.includes('SCHEDULE_READ') },
+			{ href: '/reports', label: 'Reports', show: user.scopes.includes('REPORTS_READ') },
 			{ href: '/settings', label: 'Settings', show: true }
 		].filter((link) => link.show);
 	});
@@ -96,8 +100,10 @@
 		top: 0;
 		bottom: 0;
 		left: 0;
-		background: var(--warm-100);
-		border-radius: var(--radius-md);
+		/* The selected-state pill (Soft blue / Deep blue). */
+		background: var(--nav-indicator);
+		border: 1px solid var(--nav-indicator-border);
+		border-radius: var(--radius-sm);
 		pointer-events: none;
 		z-index: 0;
 	}

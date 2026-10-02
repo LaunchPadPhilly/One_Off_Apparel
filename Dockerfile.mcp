@@ -71,6 +71,9 @@ COPY src/lib/server/prisma.ts ./src/lib/server/prisma.ts
 COPY src/lib/server/engine ./src/lib/server/engine
 COPY src/lib/server/hoops ./src/lib/server/hoops
 COPY src/lib/server/schedule ./src/lib/server/schedule
+# Shared (client + server) scheduling helpers the engine imports: shift.ts,
+# defaultCapacity.ts, stationKinds.ts, repackDay.ts, expectedStation.ts.
+COPY src/lib/schedule ./src/lib/schedule
 
 RUN chown -R mcpserver:nodejs /app
 
