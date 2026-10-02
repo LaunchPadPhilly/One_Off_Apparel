@@ -35,7 +35,8 @@ export const lineItemCandidateBaseSchema = z.object({
 	// foldBagGarment to pick their formula. See prisma/schema.prisma.
 	matteSurface: z.enum(['FLAT', 'SPECIALTY']).nullish(),
 	foldBagGarment: z.enum(['SS_TEE', 'OTHER']).nullish(),
-	// NEW (2026-09-23): reviewer-entered hours for DTF/DTG, which have no formula.
+	// Reviewer-entered hours. Required for DTF/DTG/OTHER (no formula), or an override
+	// on any other job type. See LineItem.manualEstimatedHours in prisma/schema.prisma.
 	manualEstimatedHours: z.number().positive().max(200).nullish(),
 	// Another line item's `localId` in this same order candidate, or the literal
 	// "all_siblings" sentinel — never a real LineItem.id (none exist yet at import time).
@@ -75,10 +76,12 @@ export const orderCandidateSchema = z.object({
 	hoopsOrderId: z.string().min(1),
 	customerName: z.string().min(1),
 	// Null when the export has no Deadline (2026-09-28): the order still imports, and
-	// the order page asks for the ship date before it can be confirmed. Nothing about an
+	// the order page asks for the deadline before it can be confirmed. Nothing about an
 	// incomplete export should stop it reaching Orders for review.
-	externalShipDate: z.iso.date().nullable(),
-	internalDueDate: z.iso.date().nullable(),
+	deadline: z.iso.date().nullable(),
+	// Imported Hoops "Deadline" dates are firm customer commitments, so imports default
+	// tight. A reviewer can flip it to internal on the order page. See Order.deadlineIsTight.
+	deadlineIsTight: z.boolean().default(true),
 	importedBy: z.string().min(1),
 	// May be empty (2026-09-28): an order whose rows all failed to parse still imports,
 	// with each dropped row listed in confidenceFlags for the reviewer.
@@ -101,13 +104,13 @@ export const ALL_SIBLINGS = ALL_SIBLINGS_DEPENDENCY;
 export const orderCorrectionSchema = z
 	.object({
 		customerName: z.string().min(1),
-		// internalDueDate defaults to 14 days before externalShipDate (see
-		// internalDueDate.ts) whenever externalShipDate changes without an explicit
-		// internalDueDate alongside it — but a human reviewing the order can still
-		// override it directly; the default is a starting point, not a lock. See
-		// updateOrderFields.ts / confirmImport.ts for exactly how the two interact.
-		externalShipDate: z.iso.date(),
-		internalDueDate: z.iso.date(),
+		// The one date this order works to, plus whether it's a firm customer
+		// commitment (tight) or an internal target (loose). Neither can be null through
+		// a correction — the ship date isn't set at all in that case, which is a fresh
+		// field-set path, not a correction to an existing value. See
+		// updateOrderFields.ts for the shape it comes in as.
+		deadline: z.iso.date(),
+		deadlineIsTight: z.boolean(),
 		// Free-text, human-entered only — e.g. why a job ran late. See CLAUDE.md.
 		notes: z.string(),
 		// NEW: the pre-production approval gates buildBacklogAndCapacity.ts's

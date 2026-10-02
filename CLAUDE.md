@@ -26,7 +26,9 @@ Schedule/Production board (`src/routes/schedule/`), and a minimal Reports page
 schedulable:** `estimate_hours` now has real numbers for every station
 (`screen_print_auto`, `embroidery`, and all five finishing steps — matte, relabel,
 fold_bag, hang_tag, wovens, added 2026-09-23). DTF/DTG have no formula — a reviewer
-enters the hours per job (`LineItem.manualEstimatedHours`, 2026-09-23). Even with real
+enters the hours per job (`LineItem.manualEstimatedHours`, 2026-09-23 — and, as of
+2026-09-28, that same field is also a general per-line-item override on any job with a
+real formula). Even with real
 formulas, `propose_schedule` still needs `CapacityCalendar` rows that barely exist in
 the real database — nothing in the app can create a *real* one today (`Station` rows,
 by contrast, are admin-managed at `/settings?screen=stations` since 2026-09-25, along with
@@ -227,8 +229,8 @@ One row per order.
 | `id` | |
 | `hoops_order_id` | back-reference to Hoops |
 | `customer_name` | |
-| `external_ship_date` | promised to the customer. Nullable since 2026-09-28 — an export with no Deadline still imports; the order page asks for it, and the order can't be confirmed or scheduled until it's set |
-| `internal_due_date` | what production actually works toward — always computed as `external_ship_date` − 14 days, never an independent input (see Known open items) |
+| `deadline` | the one date this order works to. Nullable since 2026-09-28 — an export with no Deadline still imports; the order page asks for it, and the order can't be confirmed or scheduled until it's set. Replaces the older `external_ship_date` + auto-derived `internal_due_date` pair (see 2026-09-28 decision under Known open items) |
+| `deadline_is_tight` | boolean, defaults true. **True** = firm customer commitment (behaves as the old `external_ship_date` did — missing it means missing a customer promise). **False** = internal target the shop is aiming at but hasn't committed to. Placement math is identical either way; only the meaning of an at-risk flag against it softens. Editable on the order page, next to the deadline itself |
 | `status` | `needs_review`, `confirmed`, `scheduled`, `in_production`, `complete`, `cancelled` |
 | `imported_by` | who brought it in (usually "claude") |
 | `created_at` | |
@@ -480,10 +482,15 @@ Still open, per Known open items below: `screen_print_auto`'s "Manual" variant (
 client's own sheet marks it "never fully developed" — every cell blank, nothing to port),
 and the Wovens formula (see above). **DTF/DTG** have no formula by design — the client
 says their time depends on the artwork (2026-09-23) — so each DTF/DTG line item takes
-reviewer-entered hours (`LineItem.manualEstimatedHours`, only ever used for those two
-types, never to override a real formula) and gets its own `dtf`/`dtg` station. Until
-the hours are set, the order page asks "How many hours does this job need?" (a
-`MissingLineItemDataError`, answerable by hand or via the notes box).
+reviewer-entered hours (`LineItem.manualEstimatedHours`) and gets its own `dtf`/`dtg`
+station. Until the hours are set, the order page asks "How many hours does this job
+need?" (a `MissingLineItemDataError`, answerable by hand or via the notes box).
+**As of 2026-09-28** `manualEstimatedHours` is *also* a general override on any job type
+with a real formula: setting it (e.g. 1h on an embroidery line the engine says is 3h)
+tells the engine to use that number instead. `engineEstimateFor()` in `estimateHours.ts`
+returns what the formula would have said so the UI can show "Engine estimated ~X.Xh"
+alongside the override; leaving the input blank on the order page clears the override
+and the engine number takes over again.
 `MissingFormulaError` is now only for an unknown decoration type / finishing step. Separately,
 `MissingLineItemDataError` (not a station-level gap) fires when a station's formula is
 real but one specific job is missing a required field — e.g. an embroidery line item with
@@ -557,17 +564,18 @@ wovens have no dependency and are placed like any other job. So:
   dependency can't be placed, the dependent is flagged at risk ("waits on…"), never
   placed early. The engine now returns `startMinuteOfDay` itself because of this
   (`proposeIntoNewDraft.ts` used to pack start times afterward).
-- In a draft (`draftDependencies.ts`, layered on the packed-queue model below): each
-  (station, day) still packs back-to-back from 8:00, but a finisher is **held** until the
-  job(s) it depends on end (`packSequentialStarts`' `notBefore`) — the only way a gap
-  appears in a packed day. Dropping a finisher on a day before its print's day, or on
-  the print's day when it can't fit after the print, is **refused** with a message;
-  dropping it earlier within the right day's queue just holds it. Moving a print later
-  re-settles its finishers only if they'd now start too early (held same day if they
-  fit, else moved to the front of the next day's queue), cascading to anything waiting
-  on them; moving a print earlier doesn't pull them along. The server returns every
-  moved position (`peers`, with `date`) plus `pushedCount`, and the board says "Moved N
-  finishing steps later…".
+- In a draft (`draftDependencies.ts`, layered on the gap-preserving cascade below): a
+  finisher's `notBeforeMin` = its print's wall-clock end. The client and server both
+  enforce it in `cascadeMove` / `cascadeInsert`: any placement whose start would be
+  earlier than its notBefore is refused. Dropping a finisher on a day before its print's
+  day, or on the print's day when it can't fit after the print, is **refused** with a
+  message; dropping it earlier within the right day's queue is refused too (there's no
+  automatic "hold" anymore — the drop point IS the start time). Moving a print later
+  re-settles its finishers via the server's post-mutation settler pass: cascades them
+  forward to the print's new end (held same day if they still fit, else moved to the
+  front of the next day's queue), cascading to anything waiting on them; moving a print
+  earlier doesn't pull them along. The server returns every moved position (`peers`,
+  with `date`) plus `pushedCount`, and the board says "Moved N finishing steps later…".
 - On the floor nothing changed: `startAssignment` refuses to Start a BLOCKED line item,
   so a scheduled finisher stays locked until its print is Stopped and `check_completion`
   unlocks it. The Production Board shows "Waiting on print" instead of Start.
@@ -671,11 +679,25 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   out one day changes that day; out for two weeks changes those weeks). Also still open
   there: the engine doesn't yet subtract already-approved work from capacity, and
   already-approved line items still appear in the backlog.
-  Decided but **not built yet**:
-  - **Editable formulas.** Admins can edit the formula numbers in settings (e.g. rates
-    per hour as the team gets faster), industry-standard "rate table" style rather
-    than free-form formulas. Already-approved assignments keep the hours they were
-    approved with; only new plans use new numbers.
+
+  - **Editable formulas — done (2026-09-28).** `/settings?screen=formulas` (admin
+    only) exposes every per-station rate and factor as a plain number input —
+    screen-print initial units and rate tables (< 5 vs 5+ screens, all three weight
+    classes) plus setup terms, embroidery thread-change minutes and both flat and
+    cap plans (five factors each), and every finishing step's units-per-hour /
+    matte numerator / etc. Storage is one singleton `FormulaSettings` row holding a
+    JSON blob of overrides; every field missing from the row falls back to
+    `DEFAULT_FORMULAS` in `$lib/server/engine/formulaSettings.ts`, so a fresh install
+    with no row still works. `estimateHours.ts` reads live values via
+    `currentFormulas()` (module-level cache, refreshed at server startup by
+    hooks.server.ts and on every save; TTL-refreshed lazily on estimate calls so
+    multi-container ECS staleness is bounded to ~30s). Already-approved
+    assignments keep the hours they were approved with (that's structural —
+    `ScheduleAssignment.estimatedHours` is stored at placement time and never
+    recomputed); every live-computed estimate (Orders page, drafts board,
+    `proposeSchedule`) uses the current formulas. DTF / DTG / OTHER aren't in the
+    settings page because they have no formula — hours are entered per line item
+    on the order page instead.
   - **Finisher dependencies — done (2026-09-28).** Only matte (after its print)
     and fold & bag (after everything) wait; see `depends_on` in the `line_items` table.
   - **Weekly screen count — done (2026-09-28).** "Screens to prep" = the sum of
@@ -683,8 +705,7 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     Shown per draft week on the draft board (live as jobs move) and per calendar week
     (Mon–Sun) for the approved schedule on `/schedule`. Jobs with no `screens` value
     count 0 and are called out, so the total is never silently low.
-  - Remaining order: daily staffing part 2 (re-plan + replace on approval), then
-    editable formula numbers.
+  - Remaining order: daily staffing part 2 (re-plan + replace on approval).
 - **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
   the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
   covers the whole flow, not just Start/Stop: a date window (default 28 days from
@@ -807,41 +828,49 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   row. Do not reintroduce the tabs — the whole point was to stop the
   "everything looks empty" surprise on a station tab that just wasn't the one
   this order used.
-- **Draft board auto-shifts neighbors on any edit (2026-09-23).** The old drop
-  behavior was push-right (`findNonOverlappingStart`): a new/moved item snapped
-  forward past whatever it would overlap, and a removed item left a gap in the
-  bar. Now every place/move/remove triggers a repack of the affected (draft,
-  station, date), so items sit back-to-back from shift open in their current
-  relative order — dropping between two peers pushes the later ones back to make
-  room, removing or dragging away closes the gap. `$lib/schedule/repackDay.ts`
-  is the ONE source of truth for this layout math (`computeInsertRank`,
-  `insertAndRepack`, `repackOrdered`); both the client (`drafts/[id]/+page.svelte`)
-  and the server actions (`drafts/[id]/+page.server.ts`'s `placeAssignment` /
-  `moveAssignment` / `removeAssignment`) call it, and both delegate through to
-  the same `packSequentialStarts` helper the automatic engine
-  (`proposeIntoNewDraft.ts`) already uses — so a manual edit lands at the exact
-  wall-clock positions a fresh engine run would produce for the same queue.
-  Insertion rank is midpoint-based: dropping in the LEFT half of a peer's span
-  slots BEFORE that peer, dropping in the RIGHT half slots AFTER — the client
-  computes it, the server accepts an `insertRank` field on placeAssignment and
-  moveAssignment (replacing the old `startMinuteOfDay`, which no longer comes
-  from the client), makes room by bumping peers at rank >= insertRank in a
-  transaction, then normalizes sequenceOrder = 0..N-1 + rewrites
-  startMinuteOfDay via `packSequentialStarts`. Server actions return the peers'
-  new positions so the client can reconcile any drift after the optimistic
-  local repack. Deliberately NOT preserved: user-created gaps at the start of a
-  day (e.g. dragging the first job to 10:30 to hold the morning empty) — every
-  day always packs from 8:00 now. If that turns out to be a real workflow need,
-  the fix is a per-day "start offset" the packer honors, not a return to the
-  old push-right model — do not reintroduce `findNonOverlappingStart` (removed
-  from `shift.ts` in the 2026-09-23 merge). The one sanctioned exception to "no
-  gaps" is the finisher hold above: the packer honors a per-item `notBeforeMin`
-  (its print's end time) — the same mechanism a per-day start offset would use.
-  The server side of the repack now lives in `draftDependencies.ts`
-  (`repackDraftDays`), still built on `repackOrdered`/`packSequentialStarts`.
-  Client requests go through one `postAction` that uses SvelteKit's
-  `deserialize` (replacing the hand-rolled devalue walkers), so a server refusal's
-  message reaches the board.
+- **Draft board gap-preserving cascade (2026-09-28, replacing the 2026-09-23
+  "always pack back-to-back from shift open" model).** Every placement has an
+  authoritative `startMinuteOfDay`, and the drop position is interpreted as an
+  ABSOLUTE target wall-clock time, not a discrete rank. Rules:
+  - **MOVE** an item to a new time → its followers (peers with a strictly-later
+    original startMin) shift by the same delta, preserving every gap between
+    them. A 30-minute push later slides every peer after it 30 minutes later,
+    keeping their inter-item spacing identical.
+  - **DROP a NEW item** at time T → any peer that would overlap is pushed later
+    just enough to clear it, and every peer behind that one shifts by the same
+    delta (preserving THEIR gaps). Peers strictly before the drop time stay put.
+    User-created gaps at the start of a day are now allowed — dropping the
+    first job at 10:30 holds the morning empty, no forced pack-to-8:00.
+  - **REMOVE** an item → peers strictly after it slide earlier by exactly the
+    removed item's working duration (closing the gap the removed item spanned;
+    the gap that was BEFORE the removed item survives, absorbed into the space
+    between the last pre-remove peer and the first post-remove peer).
+  Refused: predecessor collision (dragging earlier into another item's span),
+  push past `SHIFT_END_MIN`, violation of a finisher's `notBeforeMin` (its
+  print's end time). Errors surface as `boardNotice` on the board.
+
+  `$lib/schedule/repackDay.ts` is the ONE source of truth: `cascadeMove`,
+  `cascadeInsert`, `cascadeRemove` (plus `packFromShiftStart`, retained only
+  for the engine's blank-slate `proposeSchedule` output). Client
+  (`drafts/[id]/+page.svelte`) applies the cascade optimistically for instant
+  feedback; server (`draftDependencies.ts`'s `repackDraftDays`) re-runs the
+  SAME helpers inside the transaction as defense-in-depth against a stale
+  client or a hand-crafted POST, then layers finisher-hold settling on top:
+  if a print moved later, its finishers cascade forward to its new end (or
+  push to the next day's front if they no longer fit that day). The client
+  sends `startMinuteOfDay` (the target absolute minute) on
+  `placeAssignment` / `moveAssignment`; `insertRank` and `makeRoomAtRank` are
+  gone. `removeAssignment` passes the removed row's start+duration to the
+  cascade so peers pull forward by exactly that duration. Server returns
+  every changed peer's position so the client reconciles any drift after
+  the optimistic local mutation.
+
+  Do NOT re-introduce the 2026-09-23 "always pack from 8:00" behavior; the
+  removed helpers (`insertAndRepack`, `repackOrdered`, `computeInsertRank`,
+  `packSequentialStarts` as public API) are gone precisely because they made
+  user-set gaps impossible. The engine's own initial layout still packs
+  back-to-back via `packFromShiftStart` — that's fine because it's building
+  from a blank slate, and manual edits after can re-space it freely.
 - **Per-line-item and per-order hour estimates, shown before scheduling
   (2026-09-21).** `estimateForDisplay.ts` wraps the same `estimateHours()` the engine
   uses and turns its result (or `MissingFormulaError`/`MissingLineItemDataError`) into
@@ -892,20 +921,20 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     caps therefore still hit `MissingLineItemDataError` (garment_style not set) until
     either extraction is taught to recognize headwear, or a person sets `garmentStyle`
     manually via the order's line-item edit form (now exposed there).
-  - **Only one date ("Deadline") appears per job, not two — resolved (2026-09-22).**
-    Confirmed with the client: `internal_due_date` is never an independent value: the shop
-    wants to be ready for an order two weeks before it's actually due, so
-    `internal_due_date` = `external_ship_date` − 14 days, always. Implemented as a pure,
-    deterministic computation (`computeInternalDueDate` in
-    `src/lib/server/hoops/internalDueDate.ts`), never left to the extraction model and
-    never a directly-editable field — Claude's extraction tool no longer asks for or emits
-    `internalDueDate` at all (`extractOrderFromPdf.ts` computes it from the extracted
-    `externalShipDate` after the model call returns); the order edit page shows it as a
-    disabled/read-only field; `updateOrderFields.ts` and `confirmImport.ts` recompute it
-    whenever `externalShipDate` changes and `orderCorrectionSchema` no longer accepts
-    `internalDueDate` as a correction at all. The cure/dry buffer (a gap between a print
-    and a downstream finishing step, decided as zero on 2026-09-23) is a separate
-    question — do not conflate the two.
+  - **Only one date ("Deadline") appears per job — resolved (2026-09-22, revised
+    2026-09-28).** The 2026-09-22 answer was `internal_due_date = external_ship_date − 14 days`
+    with the internal date auto-derived and non-editable; **superseded 2026-09-28** by a
+    single `deadline` field plus a `deadline_is_tight` boolean. Tight = firm customer
+    commitment (behaves as the old `external_ship_date` did); loose = internal target
+    (placement math unchanged; only the meaning of "at risk" against it softens). The
+    fixed 14-day lead-time rule is gone and `src/lib/internalDueDate.ts` deleted;
+    migration `deadline_tightness` collapses existing rows into the single date
+    (preferring `externalShipDate` when both were set, or reconstructing it as
+    `internalDueDate + 14 days` when only the internal was set) and defaults
+    `deadlineIsTight` to true for all legacy rows (they were treated as firm customer
+    dates). Reviewer flips tight/internal on the order page's Deadline field. The
+    cure/dry buffer (a gap between a print and a downstream finishing step, decided as
+    zero on 2026-09-23) is a separate question — do not conflate the two.
   - **Administrative fee rows** ("One-Time Digitizing Fee," "Ink Color Change") appear in
     the job details table but aren't production work — they must not become `LineItem`
     rows. Extraction must exclude them (and flag that they were excluded), not force them

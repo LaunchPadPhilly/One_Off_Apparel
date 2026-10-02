@@ -266,11 +266,18 @@ model Order {
   id                     String                 @id @default(cuid())
   hoopsOrderId           String                 @unique
   customerName           String
-  // Nullable since 2026-09-28: every export imports, even one with no Deadline —
-  // the order page then asks for the ship date, and the order can't be confirmed
-  // (or scheduled) until it's set. internalDueDate is always derived from it.
-  externalShipDate       DateTime?              @db.Date
-  internalDueDate        DateTime?              @db.Date
+  // The one date this order works to. Nullable — an export with no Deadline still
+  // imports; the order page asks for it, and the order can't be confirmed (or
+  // scheduled) until it's set. Replaces the earlier externalShipDate + auto-derived
+  // internalDueDate pair (2026-09-28 decision): the two-dates model with the fixed
+  // 14-day lead is gone.
+  deadline               DateTime?              @db.Date
+  // true = a firm customer commitment (behaves as the old externalShipDate did — a job
+  // that can't hit it is at risk against a real promise); false = a loose internal
+  // target the shop is aiming at but hasn't committed to. Placement is identical
+  // either way; only the meaning of "at risk" softens. Default true so an imported
+  // Hoops Deadline (always a customer date) and any legacy row read as firm.
+  deadlineIsTight        Boolean                @default(true)
   status                 OrderStatus            @default(NEEDS_REVIEW)
   blankOrderingStatus    BlankOrderingStatus    @default(NOT_ORDERED)
   customerApprovalStatus CustomerApprovalStatus @default(NOT_SENT)
@@ -330,14 +337,16 @@ model LineItem {
   // garment being folded a short-sleeve tee (SS_TEE) or anything else (OTHER)? The
   // client's Fold & Bag tab is keyed on this, not on weight class. Null elsewhere.
   foldBagGarment         FoldBagGarment?
-  // NEW (2026-09-23): hours a reviewer entered by hand for a job type that has no
-  // formula — DTF and DTG today, whose time varies by artwork so the client has no
-  // fixed table. estimateHours.ts uses it only for those types (never overrides a
-  // real formula); until it's set, the order page asks "how many hours?".
+  // Hours a reviewer entered by hand for a job type that has no formula — DTF, DTG
+  // and OTHER today, whose time varies by artwork so the client has no fixed table.
+  // estimateHours.ts uses it only for those types (never overrides a real formula);
+  // until it's set, the order page asks "how many hours?".
   manualEstimatedHours   Float?
   // NEW (2026-09-28): hours a person set on the order page because the estimate was off
-  // (one-person time). Replaces the formula's (or the entered) hours for this job;
-  // null = use the formula. Already-approved schedule rows keep the hours they had.
+  // (one-person time). Replaces the formula's hours for this job on a job type that
+  // DOES have a formula; null = use the formula. Already-approved schedule rows keep
+  // the hours they had. Distinct from manualEstimatedHours (above), which is for job
+  // types with no formula at all.
   estimatedHoursOverride Float?
   // NEW (2026-09-28): OTHER rows only — a job type this system doesn't model yet
   // (e.g. "Patch Install"), kept instead of dropped at import so a person can review
@@ -554,6 +563,25 @@ model ScheduleDraft {
 
   @@index([status])
   @@index([startDate])
+}
+
+// Editable estimate_hours formula constants (2026-09-28). A single row (id fixed to
+// "current") holds a JSON blob of every rate/factor an admin can tune in Settings →
+// Formulas — e.g. the screen-print run rate per hour, embroidery hooping factor, or a
+// finishing step's units-per-hour rate. Any field not overridden falls back to the
+// built-in default in $lib/server/engine/formulaSettings.ts's DEFAULT_FORMULAS, so an
+// empty row (or no row at all) means "use every default" — no seeding required.
+//
+// Contract from CLAUDE.md's config-settings roadmap: "already-approved assignments
+// keep the hours they were approved with; only new plans use new numbers." That's why
+// ScheduleAssignment.estimatedHours is a stored value (frozen at placement time),
+// while every live-computed estimate — orderGaps, estimateForDisplay, proposeSchedule —
+// reads the current formulas each time.
+model FormulaSettings {
+  id        String   @id @default("current")
+  formulas  Json
+  updatedAt DateTime @updatedAt
+  updatedBy String?
 }
 
 // Domain-specific audit trail for order/line-item/schedule changes. Distinct

@@ -1,7 +1,6 @@
 import { env } from '$env/dynamic/private';
 import Anthropic from '@anthropic-ai/sdk';
 import { orderCandidateSchema, lineItemCandidateSchema, type OrderCandidate } from './types';
-import { computeInternalDueDate } from '$lib/internalDueDate';
 
 /**
  * There is no deterministic Hoops export parser — CLAUDE.md's Known open items are
@@ -39,10 +38,10 @@ const extractionTool: Anthropic.Tool = {
 		properties: {
 			hoopsOrderId: { type: 'string', description: 'The "Job <number>" identifier, e.g. "100127".' },
 			customerName: { type: 'string' },
-			externalShipDate: {
+			deadline: {
 				type: 'string',
 				description:
-					'ISO date YYYY-MM-DD. Use the "Deadline" date. If the export has no Deadline, return an empty string — never substitute another date such as the job creation "Date". Do not emit an internal due date — this system computes it deterministically as 14 days before this date; never guess or duplicate it yourself.'
+					'ISO date YYYY-MM-DD. Use the "Deadline" date. If the export has no Deadline, return an empty string — never substitute another date such as the job creation "Date". This system stores exactly one date per order; there is no separate "internal" or "external" date any more.'
 			},
 			confidenceFlags: {
 				type: 'array',
@@ -109,7 +108,7 @@ const extractionTool: Anthropic.Tool = {
 				}
 			}
 		},
-		required: ['hoopsOrderId', 'customerName', 'externalShipDate', 'lineItems']
+		required: ['hoopsOrderId', 'customerName', 'deadline', 'lineItems']
 	}
 };
 
@@ -121,7 +120,7 @@ const SYSTEM_PROMPT = `You extract structured order data from a "Job" PDF export
 - Never invent a value you cannot support from the text. When something doesn't fit the schema (an unmapped treatment type, a missing signal, an ambiguous position), say so in confidenceFlags rather than guessing silently. This system's whole design assumes a human reviews everything you extract before it becomes real — your job is to make what you're unsure about visible, not to be right about everything.
 - If a treatment is real production work but has no matching decorationType or finishingStep (e.g. "Patch Install" — it's neither screen print/embroidery/DTF/DTG nor matte/relabel/fold&bag/hang tag/wovens), include it as itemType "OTHER" with otherJobType set to its name as written (e.g. "Patch Install"), decorationType and finishingStep null, and note it in confidenceFlags. Never force it into a type it isn't; a reviewer will assign its station and hours.
 - Rows that aren't production work on garments — administrative fees (digitizing fee, ink color change) and supply/material lines (e.g. "75 units of patches", leftover patches for the customer) — are never line items. Leave them out and mention them in confidenceFlags.
-- If there is no "Deadline", return an empty externalShipDate and say so in confidenceFlags. Never use another date instead.
+- If there is no "Deadline", return an empty deadline and say so in confidenceFlags. Never use another date instead.
 
 Call emit_extracted_order exactly once with everything you found.`;
 
@@ -191,12 +190,12 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 
 	// Nothing incomplete should stop an order reaching Orders for review (2026-09-28).
 	// Some exports have no "Deadline" (e.g. Job 100160 only has its creation "Date"):
-	// import with no ship date, and the order page asks for it. (Computing a due date
+	// import with no deadline, and the order page asks for it. (Computing a due date
 	// from a non-ISO string used to crash the whole import with "Invalid time value".)
-	const rawShipDate = typeof raw.externalShipDate === 'string' ? raw.externalShipDate.trim() : '';
-	const shipDate = isIsoDate(rawShipDate) ? rawShipDate : null;
-	if (!shipDate) {
-		confidenceFlags.push(`No Deadline date could be read from the export${rawShipDate ? ` (read "${rawShipDate}")` : ''} — enter the ship date on the order page.`);
+	const rawDeadline = typeof raw.deadline === 'string' ? raw.deadline.trim() : '';
+	const deadline = isIsoDate(rawDeadline) ? rawDeadline : null;
+	if (!deadline) {
+		confidenceFlags.push(`No Deadline date could be read from the export${rawDeadline ? ` (read "${rawDeadline}")` : ''} — enter the deadline on the order page.`);
 	}
 
 	// Same idea for the two identifying fields: fall back rather than refuse. The job
@@ -211,10 +210,9 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 	}
 
 	try {
-		// internalDueDate is never asked of the model (see extractionTool above) — it's
-		// always computed from externalShipDate, per CLAUDE.md's resolved lead-time policy.
-		const internalDueDate = shipDate ? computeInternalDueDate(shipDate) : null;
-		const validated = orderCandidateSchema.parse({ ...raw, hoopsOrderId, customerName, externalShipDate: shipDate, internalDueDate, importedBy, lineItems });
+		// Imported Hoops "Deadline" dates are firm customer commitments, so imports
+		// default deadlineIsTight = true. A reviewer flips to loose on the order page.
+		const validated = orderCandidateSchema.parse({ ...raw, hoopsOrderId, customerName, deadline, deadlineIsTight: true, importedBy, lineItems });
 		return { ...validated, confidenceFlags };
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);

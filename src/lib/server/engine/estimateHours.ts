@@ -1,5 +1,6 @@
 import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface, type CapConstruction, type FoldBagGarment, type WeightClass } from '../../../../prisma/generated/prisma/enums';
 import { expectedStationFor } from '$lib/schedule/expectedStation';
+import { currentFormulas, maybeRefreshFormulas } from './formulaSettings';
 import type { EstimateHoursInput, EstimateHoursResult } from './types';
 
 /**
@@ -69,28 +70,10 @@ function screenPrintRegime(screens: number): ScreenPrintRegime {
 	return screens < 5 ? 'SCREENS_LT_5' : 'SCREENS_GT_4';
 }
 
-// "initial_units" = how many garments the machine can print before it starts counting
-// toward the slower "run time" phase — think of it like a free/already-included batch
-// size, and it's different depending on how heavy/thick the garment fabric is (THIN vs
-// POLY vs BULKY). Direct port of the screen_print_auto tab (CLAUDE.md's estimate_hours
-// section, numbers confirmed with the client) — initial_units does NOT change based on
-// how many screens the job uses, only rate_per_hr does (that's why the two tables below
-// have different shapes: this one only keyed by weight class, the next one keyed by
-// both weight class AND the < 5 / > 4 screens regime).
-const SCREEN_PRINT_INITIAL_UNITS: Partial<Record<WeightClass, number>> = {
-	THIN: 100,
-	POLY: 80,
-	BULKY: 50
-};
-
-// "rate_per_hr" = how many garments per hour the machine can print once it's past the
-// initial_units free batch. Faster for thin garments, slower for bulky ones, and slower
-// again once you're using 5+ screens (more screens = more physical setup/changeover on
-// the machine, so it can't move through garments as quickly).
-const SCREEN_PRINT_RATE_PER_HOUR: Partial<Record<ScreenPrintRegime, Partial<Record<WeightClass, number>>>> = {
-	SCREENS_LT_5: { THIN: 360, POLY: 288, BULKY: 180 },
-	SCREENS_GT_4: { THIN: 180, POLY: 144, BULKY: 90 }
-};
+// Screen-print rate tables (initial_units and rate_per_hr) are read live from
+// currentFormulas() (see formulaSettings.ts), so an admin edit in Settings → Formulas
+// shows up immediately without a code change. The default values still trace back to
+// the client's screen_print_auto tab — see DEFAULT_FORMULAS.
 
 /**
  * Works out how long ONE screen-print job takes, in hours. Direct port of the
@@ -105,31 +88,28 @@ function estimateScreenPrintAutoHours(item: EstimateHoursInput): EstimateHoursRe
 	// a safe fallback so the math below doesn't crash on incomplete data.
 	// CAUTION: unlike embroidery below (which throws MissingLineItemDataError for a
 	// missing field), a screen-print job with no screens/ink count set still gets a
-	// number here — just a too-low one (setup shrinks to the fixed 60 minutes). It
+	// number here — just a too-low one (setup shrinks to the fixed setup total). It
 	// won't show as "pending" on the Orders page. Open question whether this should
 	// throw MissingLineItemDataError instead, like embroidery does.
 	const screens = item.screens ?? 0;
 	const inkColorCount = item.inkColorCount ?? 0;
+	const sp = currentFormulas().screenPrint;
 
-	// Setup time in minutes: 5 minutes per screen used, plus 15 minutes per ink color,
-	// plus two fixed 30-minute chunks. (The spreadsheet lists them as two separate
-	// +30 terms; what each one represents hasn't been confirmed with the client.)
-	const setupMinutes = screens * 5 + inkColorCount * 15 + 30 + 30;
+	// Setup time in minutes: per-screen + per-ink-color + a fixed baseline. All three
+	// numbers are admin-editable in Settings → Formulas.
+	const setupMinutes = screens * sp.setupMinutesPerScreen + inkColorCount * sp.setupMinutesPerInkColor + sp.setupFixedMinutes;
 
 	// Look up how many garments are included "for free" before run time starts
 	// counting, based on this job's weight class (THIN/POLY/BULKY).
-	const initialUnits = SCREEN_PRINT_INITIAL_UNITS[item.weightClass];
+	const initialUnits = sp.initialUnits[item.weightClass];
 	if (initialUnits === undefined) {
-		// This should never actually happen (every WeightClass has an entry above), but
-		// it's here as a safety net in case a new weight class ever gets added to the
-		// database without also updating this table.
 		throw new MissingFormulaError(`the screen_print_auto initial_units table has no entry for weight class "${item.weightClass}"`);
 	}
 
 	// Figure out which screens bucket (< 5 or > 4) applies, then look up the
 	// garments-per-hour rate for that bucket + this job's weight class.
 	const regime = screenPrintRegime(screens);
-	const ratePerHour = SCREEN_PRINT_RATE_PER_HOUR[regime]?.[item.weightClass];
+	const ratePerHour = sp.ratePerHour[regime]?.[item.weightClass];
 	if (ratePerHour === undefined) {
 		throw new MissingFormulaError(
 			`the screen_print_auto rate_per_hr table for the ${regime === 'SCREENS_LT_5' ? 'screens < 5' : 'screens > 4'} regime has no entry for weight class "${item.weightClass}"`
@@ -171,26 +151,9 @@ interface EmbroideryRatePlan {
 	sewRateDivisor: number; // minutes = (Z/6) * (X / divisor)
 }
 
-// Every color of thread used means one machine stop to swap thread, at 5 minutes per
-// swap. This number is the same regardless of garment style or weight class.
-const EMBROIDERY_THREAD_CHANGE_MIN_PER_COLOR = 5; // minutes = Y * 5, same for Flat and Cap
-
-// The rate plan to use for a regular (non-cap) garment, looked up by weight class.
-// Heavier/bulkier garments generally take longer to hoop, load/unload, and clean up
-// between pieces — that's why BULKY's numbers are bigger than THIN's for most steps.
-const EMBROIDERY_FLAT_PLAN: Record<WeightClass, EmbroideryRatePlan> = {
-	THIN: { setupBoxingDivisor: 240, hoopingFactor: 1.5, loadUnloadFactor: 2, cleanupFactor: 4, sewRateDivisor: 850 },
-	POLY: { setupBoxingDivisor: 180, hoopingFactor: 2, loadUnloadFactor: 2, cleanupFactor: 6, sewRateDivisor: 850 },
-	BULKY: { setupBoxingDivisor: 120, hoopingFactor: 1.5, loadUnloadFactor: 2, cleanupFactor: 4, sewRateDivisor: 850 }
-};
-
-// The rate plan to use for a cap (headwear), looked up by whether the cap has a stiff
-// front panel (STRUCTURED) or not (UNSTRUCTURED). Notice sewRateDivisor is 650 here
-// instead of 850 like Flat garments above — caps sew slower on this machine.
-const EMBROIDERY_CAP_PLAN: Record<CapConstruction, EmbroideryRatePlan> = {
-	STRUCTURED: { setupBoxingDivisor: 240, hoopingFactor: 1, loadUnloadFactor: 1, cleanupFactor: 1.5, sewRateDivisor: 650 },
-	UNSTRUCTURED: { setupBoxingDivisor: 240, hoopingFactor: 2.5, loadUnloadFactor: 1, cleanupFactor: 1.5, sewRateDivisor: 650 }
-};
+// Embroidery rate plans (thread-change minutes, flat + cap tables) are read live from
+// currentFormulas().embroidery (see formulaSettings.ts) — admin-editable in Settings →
+// Formulas. Defaults trace back to the client's embroidery tab; see DEFAULT_FORMULAS.
 
 /**
  * "Steaming (IF Dark/Pigment)" is a real step in the client's table (Z * (60/360) for
@@ -214,16 +177,17 @@ function estimateEmbroideryHours(item: EstimateHoursInput): EstimateHoursResult 
 	const stitchCount = item.stitchCount; // "X" — total stitches in the design
 	if (stitchCount == null) throw new MissingLineItemDataError('stitch_count', 'stitchCount');
 
+	const emb = currentFormulas().embroidery;
 	// Pick which set of rate numbers (the "plan") applies to this specific job. A cap
 	// needs its capConstruction (structured/unstructured) set too, since that's what
 	// selects which cap plan to use — checked separately from the FLAT case just above
 	// it, since FLAT doesn't need that field at all.
 	let plan: EmbroideryRatePlan;
 	if (item.garmentStyle === GarmentStyle.FLAT) {
-		plan = EMBROIDERY_FLAT_PLAN[item.weightClass];
+		plan = emb.flat[item.weightClass];
 	} else if (item.garmentStyle === GarmentStyle.CAP) {
 		if (!item.capConstruction) throw new MissingLineItemDataError('cap_construction (structured vs unstructured)', 'capConstruction');
-		plan = EMBROIDERY_CAP_PLAN[item.capConstruction];
+		plan = emb.cap[item.capConstruction];
 	} else {
 		// garmentStyle wasn't set to either FLAT or CAP (it's probably just null,
 		// meaning nobody has filled it in yet on this line item).
@@ -235,7 +199,7 @@ function estimateEmbroideryHours(item: EstimateHoursInput): EstimateHoursResult 
 	// this job. A few of these divide quantity by 6 first (quantity/6) because the
 	// embroidery machine hoops (loads) 6 garments onto it at a time as one batch.
 	const setupBoxingMinutes = quantity * (60 / plan.setupBoxingDivisor);
-	const threadChangeMinutes = inkColorCount * EMBROIDERY_THREAD_CHANGE_MIN_PER_COLOR;
+	const threadChangeMinutes = inkColorCount * emb.threadChangeMinPerColor;
 	const hoopingMinutes = (quantity / 6) * plan.hoopingFactor;
 	const loadUnloadMinutes = (quantity / 6) * plan.loadUnloadFactor;
 	const cleanupMinutes = (quantity / 6) * plan.cleanupFactor;
@@ -261,51 +225,29 @@ function perUnitHours(quantity: number, minutesPerUnit: number): number {
 	return (quantity * minutesPerUnit) / 60;
 }
 
-// Printed Re-Label: QO * (60 / rate) / 60, rate keyed by weight class.
-const RELABEL_UNITS_PER_HOUR: Record<WeightClass, number> = { THIN: 144, POLY: 144, BULKY: 72 };
-
-// Hang Tags: QO * (60 / rate) / 60, rate keyed by weight class.
-const HANG_TAG_UNITS_PER_HOUR: Record<WeightClass, number> = { THIN: 300, POLY: 300, BULKY: 150 };
-
-// Fold & Bag: QO * (60 / rate) / 60, keyed on short-sleeve tee vs anything else — NOT
-// weight class (see LineItem.foldBagGarment).
-const FOLD_BAG_UNITS_PER_HOUR: Record<FoldBagGarment, number> = { SS_TEE: 300, OTHER: 100 };
-
-// Matte Finish, Flat Surface: QO * (70 / rate) / 60 — note the numerator is 70, not 60
-// like the other flowcharts (that's how the client's chart reads).
-const MATTE_FLAT_MINUTES_NUMERATOR = 70;
-const MATTE_FLAT_RATE: Record<WeightClass, number> = { THIN: 200, POLY: 200, BULKY: 100 };
-
-// Matte Finish, Specialty Surface: QO * 1 / 60 — one minute per garment, the same for
-// every weight class.
-const MATTE_SPECIALTY_MINUTES_PER_UNIT = 1;
-
-// Wovens: the client's chart reads "QO * (60/90)" with no trailing "/ 60", unlike every
-// other finishing chart, and the client describes it as not fully thought out yet.
-// ASSUMPTION (confirmed with Yara 2026-09-23, not yet with the client): the "/ 60" was
-// just left off, so this is 90 units/hour like the other charts' pattern. Read
-// literally it would be 40 minutes per garment (~67h for 100 units). Revisit once the
-// client finalizes the Wovens formula.
-const WOVENS_UNITS_PER_HOUR = 90;
+// Finishing formulas read from currentFormulas().finishing (see formulaSettings.ts) —
+// admin-editable in Settings → Formulas. Defaults trace back to the client's
+// finishing flowcharts; see DEFAULT_FORMULAS.
 
 function estimateFinishingHours(item: EstimateHoursInput): EstimateHoursResult {
 	const quantity = item.quantity;
+	const fin = currentFormulas().finishing;
 	switch (item.finishingStep) {
 		case FinishingStep.RELABEL:
-			return { station: 'printed_relabel', hours: perUnitHours(quantity, 60 / RELABEL_UNITS_PER_HOUR[item.weightClass]) };
+			return { station: 'printed_relabel', hours: perUnitHours(quantity, 60 / fin.relabelUnitsPerHour[item.weightClass]) };
 		case FinishingStep.HANG_TAG:
-			return { station: 'hang_tags', hours: perUnitHours(quantity, 60 / HANG_TAG_UNITS_PER_HOUR[item.weightClass]) };
+			return { station: 'hang_tags', hours: perUnitHours(quantity, 60 / fin.hangTagUnitsPerHour[item.weightClass]) };
 		case FinishingStep.FOLD_BAG:
 			if (!item.foldBagGarment) throw new MissingLineItemDataError('fold_bag_garment (SS tee vs other)', 'foldBagGarment');
-			return { station: 'fold_bag', hours: perUnitHours(quantity, 60 / FOLD_BAG_UNITS_PER_HOUR[item.foldBagGarment]) };
+			return { station: 'fold_bag', hours: perUnitHours(quantity, 60 / fin.foldBagUnitsPerHour[item.foldBagGarment]) };
 		case FinishingStep.MATTE:
 			if (!item.matteSurface) throw new MissingLineItemDataError('matte_surface (flat vs specialty)', 'matteSurface');
 			if (item.matteSurface === MatteSurface.SPECIALTY) {
-				return { station: 'matte_finish', hours: perUnitHours(quantity, MATTE_SPECIALTY_MINUTES_PER_UNIT) };
+				return { station: 'matte_finish', hours: perUnitHours(quantity, fin.matteSpecialtyMinutesPerUnit) };
 			}
-			return { station: 'matte_finish', hours: perUnitHours(quantity, MATTE_FLAT_MINUTES_NUMERATOR / MATTE_FLAT_RATE[item.weightClass]) };
+			return { station: 'matte_finish', hours: perUnitHours(quantity, fin.matteFlatMinutesNumerator / fin.matteFlatRate[item.weightClass]) };
 		case FinishingStep.WOVENS:
-			return { station: 'wovens', hours: perUnitHours(quantity, 60 / WOVENS_UNITS_PER_HOUR) };
+			return { station: 'wovens', hours: perUnitHours(quantity, 60 / fin.wovensUnitsPerHour) };
 		default:
 			throw new MissingFormulaError(`a finishing line item with finishingStep "${item.finishingStep}"`);
 	}
@@ -374,6 +316,12 @@ function roundToQuarterHour(hours: number): number {
  * formula for a given kind of job yet, we throw an error instead of guessing — see
  * the MissingFormulaError/MissingLineItemDataError classes above for why.
  *
+ * MANUAL OVERRIDE (2026-09-28): a positive `estimatedHoursOverride` replaces the
+ * formula's number for any job type with a real formula; `overridden: true` plus
+ * `formulaHours` in the result tells the UI to show the engine's own estimate alongside
+ * via `engineEstimateFor`. DTF, DTG, and OTHER have no formula and REQUIRE
+ * `manualEstimatedHours` instead (never an override).
+ *
  * The final hours are rounded to the nearest 15 minutes (see roundToQuarterHour
  * above) so estimates shown at import/order creation and slots produced by
  * propose_schedule share the same granularity.
@@ -384,6 +332,10 @@ function roundToQuarterHour(hours: number): number {
  * divided by N; everything else stays fixed. Default 1 = the unchanged formula.
  */
 export function estimateHours(item: EstimateHoursInput, crewSize = 1): EstimateHoursResult {
+	// Kick off a background refresh if the formula cache is older than its TTL — see
+	// formulaSettings.ts's multi-instance note. The call is fire-and-forget; this
+	// function still returns its result synchronously against whatever's cached.
+	maybeRefreshFormulas();
 	const raw = applyEstimateOverride(item);
 	const crew = Math.max(1, Math.floor(crewSize));
 	const divisible = raw.crewDivisibleHours ?? 0;
@@ -424,6 +376,25 @@ function applyEstimateOverride(item: EstimateHoursInput): EstimateHoursResult {
 	const kind = expectedStationFor(item);
 	if (!kind) throw new MissingFormulaError(`a line item of type "${item.decorationType ?? item.finishingStep ?? item.itemType}"`);
 	return { station: kind, hours: override, crewDivisibleHours: override, overridden: true, formulaHours: null };
+}
+
+/**
+ * What the engine's formula would say for this line item, ignoring any manual
+ * override. Returns null when the line item has no engine formula at all (DTF, DTG,
+ * OTHER — for those the override IS the estimate, so there's nothing separate to
+ * show alongside). Never throws: swallows MissingFormulaError/MissingLineItemDataError
+ * and returns null, since this is display-only.
+ */
+export function engineEstimateFor(item: EstimateHoursInput): EstimateHoursResult | null {
+	if (item.itemType === LineItemType.OTHER) return null;
+	if (item.itemType === LineItemType.DECORATION && (item.decorationType === DecorationType.DTF || item.decorationType === DecorationType.DTG)) return null;
+	try {
+		const raw = estimateHoursRaw(item);
+		return { ...raw, hours: roundToQuarterHour(raw.hours) };
+	} catch (err) {
+		if (err instanceof EstimationError) return null;
+		throw err;
+	}
 }
 
 function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {

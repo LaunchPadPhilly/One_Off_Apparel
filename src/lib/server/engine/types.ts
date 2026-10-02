@@ -68,7 +68,9 @@ export interface EstimateHoursResult {
 	// (unrounded). estimateHours(item, crewSize) divides only this part by the crew.
 	crewDivisibleHours?: number;
 	// NEW (2026-09-28): true when a person's edited estimate replaced the formula, and
-	// what the formula alone would say (rounded; null when it can't run yet).
+	// what the formula alone would say (rounded; null when it can't run yet). Callers
+	// show "Engine estimated ~X.Xh" alongside an override; the engine estimate is what
+	// `engineEstimateFor` returns for that same line item.
 	overridden?: boolean;
 	formulaHours?: number | null;
 }
@@ -76,9 +78,16 @@ export interface EstimateHoursResult {
 /** One line item waiting to be placed, as propose_schedule needs it. */
 export interface BacklogItem extends EstimateHoursInput {
 	id: string;
-	// The order's internal_due_date — the hard floor propose_schedule sorts and
-	// places against. Never external_ship_date; see CLAUDE.md's orders table note.
+	// The order's `deadline` — the hard floor propose_schedule sorts and places
+	// against. Since 2026-09-28 there is only one date on an order (see the Order
+	// model in prisma/schema.prisma); its meaning (firm customer commitment vs
+	// internal target) is carried alongside on `deadlineIsTight`, not by a second
+	// date.
 	dueDate: Date;
+	// true = firm customer commitment; false = internal target. Placement is
+	// identical either way (both cap the job's latest-possible day at `dueDate`);
+	// only the meaning of an at-risk flag against it softens for internal targets.
+	deadlineIsTight: boolean;
 	// NEW (2026-09-23): the line item ids this job must be scheduled AFTER — already
 	// resolved from LineItem.dependsOn (a specific id, or every sibling for
 	// "all_siblings"). Empty/absent for decoration rows. See proposeSchedule.ts.
@@ -126,6 +135,12 @@ export interface AtRiskFlag {
 	lineItemId: string;
 	requiredStation: string;
 	dueDate: Date;
+	// Whether the missed dueDate above is a firm customer commitment (true) or an
+	// internal target (false). Set from the source Order's deadlineIsTight so the UI
+	// can display an at-risk flag against a loose target more softly than one that
+	// misses a customer promise. The engine's placement math itself doesn't branch on
+	// this; it only carries the label through.
+	deadlineIsTight: boolean;
 	reason: string;
 }
 

@@ -1,28 +1,33 @@
 import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
-import { repackOrdered } from '$lib/schedule/repackDay';
+import { cascadeInsert, cascadeMove, cascadeRemove, type CascadeItem } from '$lib/schedule/repackDay';
 import { SHIFT_START_MIN, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
 import type { Prisma } from '../../../../prisma/generated/prisma/client';
 import { LineItemStatus, LineItemType } from '../../../../prisma/generated/prisma/enums';
 
 /**
- * Keeps finishers after their prints inside one schedule draft (2026-09-23), on top of
- * the draft board's packed-queue model ($lib/schedule/repackDay.ts): every (station,
- * day) is a queue packed back-to-back from shift open, and a finisher's only extra
- * rule is that it can't start before the job(s) it depends on end — so the packer
- * holds it at that time (`notBeforeMin`) instead of flush against the job ahead of it.
- * That hold is the only way a gap appears in a packed day.
+ * Server-side finisher-hold enforcement layered over the client-side gap-preserving
+ * cascade (2026-09-28 rewrite of the earlier "always pack from shift open" model).
+ * $lib/schedule/repackDay.ts is the ONE source of truth for the cascade math — this
+ * module handles the two things it can't:
  *
- * - Dropping a finisher on a day before its print's day, or on the print's day when it
- *   can't fit after the print within the shift, is REFUSED with a message. Dropping it
- *   earlier in the right day's queue just holds it until the print ends.
- * - When a print moves later, its finishers are re-packed only if they'd now start too
- *   early — held on the same day if they still fit, else moved to the front of the next
- *   day's queue — cascading to anything waiting on them (e.g. fold & bag on
- *   "all_siblings"). A print moving earlier doesn't pull its finishers along.
+ *  1. Applying the user's mutation as a server-authoritative write (defense-in-depth
+ *     against a client that could send an overlapping or shift-overflow position).
+ *  2. Re-settling any finisher whose print now ends AFTER the finisher's current
+ *     start — cascading the finisher (and everything after it on that day) forward
+ *     to its new earliest allowed start, or moving it to the next day if it no
+ *     longer fits.
+ *
+ * User contract (matches repackDay.ts):
+ *  - MOVE / INSERT / REMOVE preserve gaps in the destination day.
+ *  - Dropping a finisher before its print, or where it can't fit after the print
+ *    within the shift, is REFUSED with a plain reason.
+ *  - When a print moves later, its finishers are cascaded to a legal position —
+ *    held on the same day if they still fit, else pushed onto the next day.
+ *  - A print moving earlier doesn't pull its finishers along.
  *
  * "After" is judged on real wall-clock times from $lib/schedule/shift.ts, the same
- * model the timeline renders and the engine places with. A dependency that's already
- * COMPLETE imposes no constraint.
+ * model the timeline renders and the engine places with. A COMPLETE dependency
+ * imposes no constraint.
  */
 
 type Db = Pick<Prisma.TransactionClient, 'scheduleAssignment' | 'lineItem'>;
@@ -46,7 +51,6 @@ interface DraftPlacement {
 	sequenceOrder: number;
 }
 
-/** One placement's position after a server-side repack — what the client reconciles to. */
 export interface PlacementPosition {
 	id: string;
 	date: string;
@@ -61,7 +65,7 @@ interface TimePoint {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// Same duration rule the drafts workspace renders with (+page.svelte's hydration).
+/** Duration in working minutes — same rule the client uses (min 15). */
 function durationMinutes(estimatedHours: number): number {
 	return Math.max(15, Math.round(estimatedHours * 60));
 }
@@ -124,26 +128,14 @@ async function loadContext(db: Db, draftId: string, extraLineItemIds: string[] =
 		return dep ? [dep] : [];
 	}
 
-	function dependentsOf(lineItemId: string): LineItemNode[] {
-		const item = nodes.get(lineItemId);
-		if (!item) return [];
-		return lineItems.filter(
-			(other) =>
-				other.itemType === LineItemType.FINISHING &&
-				other.id !== lineItemId &&
-				(other.dependsOn === lineItemId ||
-					(other.dependsOn === ALL_SIBLINGS_DEPENDENCY && other.orderId === item.orderId) ||
-					(other.dependsOn === ALL_DECORATIONS_DEPENDENCY && other.orderId === item.orderId && item.itemType === LineItemType.DECORATION))
-		);
-	}
-
-	return { nodes, placements, dependenciesOf, dependentsOf };
+	return { nodes, placements, dependenciesOf };
 }
 
 type Context = Awaited<ReturnType<typeof loadContext>>;
 
-/** The latest end among `item`'s placed dependencies; `missing` when one isn't placed
- *  in this draft (and isn't already complete); null when nothing constrains it. */
+/** Earliest legal start for `item` given its dependencies' current placements. Returns
+ *  null when nothing constrains it; { missing } when a dependency isn't placed and
+ *  isn't already complete. */
 function earliestAllowedStart(ctx: Context, item: LineItemNode): TimePoint | { missing: LineItemNode } | null {
 	let earliest: TimePoint | null = null;
 	for (const dep of ctx.dependenciesOf(item)) {
@@ -163,10 +155,27 @@ function earliestFor(ctx: Context, placement: DraftPlacement): TimePoint | null 
 	return earliest && !('missing' in earliest) ? earliest : null;
 }
 
+/** notBeforeMin for a placement on its OWN day (undefined if the constraint is on
+ *  another day — the caller handles cross-day moves separately). */
+function sameDayNotBefore(ctx: Context, p: DraftPlacement): number | undefined {
+	const earliest = earliestFor(ctx, p);
+	return earliest && earliest.dayMs === p.dayMs ? earliest.minute : undefined;
+}
+
+function dayPeersOf(ctx: Context, stationId: string, dayMs: number): DraftPlacement[] {
+	return ctx.placements.filter((p) => p.stationId === stationId && p.dayMs === dayMs).sort((a, b) => a.startMin - b.startMin);
+}
+
+/** Convert the ctx's DraftPlacement into a plain CascadeItem including per-item notBefore. */
+function toCascadeItems(ctx: Context, peers: readonly DraftPlacement[]): CascadeItem[] {
+	return peers.map((p) => ({ id: p.id, startMin: p.startMin, durationMin: p.durationMin, notBeforeMin: sameDayNotBefore(ctx, p) }));
+}
+
 /**
  * A human-readable reason to refuse putting `lineItemId` on `date`, or null if it's
- * allowed. Only finishers are ever refused. Within the allowed day, the packer holds
- * the finisher until its print ends, so the exact drop position doesn't matter.
+ * allowed. Only finishers are ever refused (they may only be scheduled AFTER the jobs
+ * they depend on). Wall-clock feasibility on the target day is checked too — a finisher
+ * whose print ends at 4:00pm can't fit a 2-hour job on that day and must go to another.
  */
 export async function checkFinisherPlacement(db: Db, draftId: string, lineItemId: string, date: Date, durationMin: number): Promise<string | null> {
 	const ctx = await loadContext(db, draftId, [lineItemId]);
@@ -189,78 +198,181 @@ export async function checkFinisherPlacement(db: Db, draftId: string, lineItemId
 }
 
 /**
- * Repacks the given (station, day) queues with finishers held after their prints,
- * then settles any finisher elsewhere in the draft that would now start too early
- * (cascading). Writes every changed row and returns the positions of every placement
- * in every day it touched, so the client can reconcile its optimistic layout, plus
- * how many finishers were moved because of a print.
+ * Describes what the caller (place / move / remove action) just did, so this module
+ * can apply the same cascade the client did, server-authoritatively.
  */
-export async function repackDraftDays(
-	tx: Db,
-	draftId: string,
-	days: ReadonlyArray<{ stationId: string; date: Date }>
-): Promise<{ peers: PlacementPosition[]; pushedCount: number }> {
+export type DraftMutation =
+	| { kind: 'insert'; assignmentId: string; stationId: string; dayMs: number; targetStartMin: number; durationMin: number }
+	| { kind: 'move'; assignmentId: string; oldStationId: string; oldDayMs: number; newStationId: string; newDayMs: number; targetStartMin: number }
+	| { kind: 'remove'; oldStationId: string; oldDayMs: number; removedStartMin: number; removedDurationMin: number };
+
+/**
+ * Applies the user's mutation to the loaded placements in memory, using the same
+ * cascade helpers the client used, then settles any finisher whose print now ends
+ * after the finisher's start. Writes changed rows and returns the positions of every
+ * placement in every day it touched.
+ */
+export async function repackDraftDays(tx: Db, draftId: string, mutation: DraftMutation): Promise<{ peers: PlacementPosition[]; pushedCount: number }> {
 	const ctx = await loadContext(tx, draftId);
-	const before = new Map(ctx.placements.map((p) => [p.id, { dayMs: p.dayMs, startMin: p.startMin, sequenceOrder: p.sequenceOrder }]));
+	const before = new Map(ctx.placements.map((p) => [p.id, { dayMs: p.dayMs, stationId: p.stationId, startMin: p.startMin, sequenceOrder: p.sequenceOrder }]));
 	const touchedDays = new Set<string>();
 	const pushed = new Set<string>();
 
-	function repackInMemory(stationId: string, dayMs: number) {
+	function markTouched(stationId: string, dayMs: number) {
 		touchedDays.add(`${stationId}__${dayMs}`);
-		const queue = ctx.placements
-			.filter((p) => p.stationId === stationId && p.dayMs === dayMs)
-			.sort((a, b) => a.sequenceOrder - b.sequenceOrder || a.startMin - b.startMin)
-			.map((p) => {
-				const earliest = earliestFor(ctx, p);
-				return { placement: p, durationMin: p.durationMin, notBeforeMin: earliest && earliest.dayMs === dayMs ? earliest.minute : undefined };
-			});
-		for (const packed of repackOrdered(queue)) {
-			packed.placement.startMin = packed.startMin;
-			packed.placement.sequenceOrder = packed.sequenceOrder;
-		}
 	}
 
-	for (const day of days) repackInMemory(day.stationId, day.date.getTime());
+	function applyCascadeResult(stationId: string, dayMs: number, placements: readonly { id: string; startMin: number; sequenceOrder: number }[]) {
+		const byId = new Map(placements.map((p) => [p.id, p]));
+		for (const p of ctx.placements) {
+			if (p.stationId !== stationId || p.dayMs !== dayMs) continue;
+			const upd = byId.get(p.id);
+			if (upd) {
+				p.startMin = upd.startMin;
+				p.sequenceOrder = upd.sequenceOrder;
+			}
+		}
+		markTouched(stationId, dayMs);
+	}
 
-	// Settle finishers that now start before their dependencies end. Each pass either
-	// holds one on its own day or moves it to the front of the next day's queue.
+	// 1. Apply the user's mutation via the shared cascade helpers.
+	if (mutation.kind === 'insert') {
+		const peers = dayPeersOf(ctx, mutation.stationId, mutation.dayMs);
+		const items = toCascadeItems(ctx, peers);
+		const incoming: CascadeItem = { id: mutation.assignmentId, startMin: mutation.targetStartMin, durationMin: mutation.durationMin };
+		const result = cascadeInsert(items, incoming, mutation.targetStartMin);
+		if ('conflict' in result) throw new Error(result.conflict);
+		// Update the incoming assignment's fields on the in-memory placement (created by
+		// the caller with placeholder position — cascade tells us where it actually goes).
+		const insertedStart = result.incomingStart ?? mutation.targetStartMin;
+		const target = ctx.placements.find((p) => p.id === mutation.assignmentId);
+		if (target) {
+			target.startMin = insertedStart;
+			target.stationId = mutation.stationId;
+			target.dayMs = mutation.dayMs;
+		}
+		applyCascadeResult(mutation.stationId, mutation.dayMs, result.placements);
+	} else if (mutation.kind === 'move') {
+		const stayed = mutation.oldStationId === mutation.newStationId && mutation.oldDayMs === mutation.newDayMs;
+		if (stayed) {
+			const peers = dayPeersOf(ctx, mutation.newStationId, mutation.newDayMs);
+			const items = toCascadeItems(ctx, peers);
+			const result = cascadeMove(items, mutation.assignmentId, mutation.targetStartMin);
+			if ('conflict' in result) throw new Error(result.conflict);
+			applyCascadeResult(mutation.newStationId, mutation.newDayMs, result.placements);
+		} else {
+			// Cross-day/cross-row: remove from origin, insert into destination.
+			const originPeers = dayPeersOf(ctx, mutation.oldStationId, mutation.oldDayMs);
+			const originItems = toCascadeItems(ctx, originPeers);
+			const removeResult = cascadeRemove(originItems, mutation.assignmentId);
+			if ('conflict' in removeResult) throw new Error(removeResult.conflict);
+			applyCascadeResult(mutation.oldStationId, mutation.oldDayMs, removeResult.placements);
+
+			// Update the moving placement's station/day BEFORE recomputing destination peers,
+			// so `dayPeersOf` for the destination sees the moving placement in place.
+			const moving = ctx.placements.find((p) => p.id === mutation.assignmentId);
+			if (moving) {
+				moving.stationId = mutation.newStationId;
+				moving.dayMs = mutation.newDayMs;
+				moving.startMin = mutation.targetStartMin;
+			}
+			const destPeers = dayPeersOf(ctx, mutation.newStationId, mutation.newDayMs).filter((p) => p.id !== mutation.assignmentId);
+			const destItems = toCascadeItems(ctx, destPeers);
+			const insertResult = cascadeInsert(destItems, { id: mutation.assignmentId, startMin: mutation.targetStartMin, durationMin: moving?.durationMin ?? 15 }, mutation.targetStartMin);
+			if ('conflict' in insertResult) throw new Error(insertResult.conflict);
+			const insertedStart = insertResult.incomingStart ?? mutation.targetStartMin;
+			if (moving) moving.startMin = insertedStart;
+			applyCascadeResult(mutation.newStationId, mutation.newDayMs, insertResult.placements);
+		}
+	} else if (mutation.kind === 'remove') {
+		// Caller already deleted the row from the DB; ctx no longer includes it. Pull
+		// forward every remaining peer whose OLD start was strictly greater than the
+		// removed row's OLD start by the removed row's working duration (the "close the
+		// gap" contract from repackDay.ts's cascadeRemove — kept in sync here because
+		// the removed row is gone from ctx, so cascadeRemove itself can't be reused
+		// directly).
+		const peers = dayPeersOf(ctx, mutation.oldStationId, mutation.oldDayMs);
+		for (const p of peers) {
+			if (p.startMin > mutation.removedStartMin) {
+				p.startMin = Math.max(SHIFT_START_MIN, p.startMin - mutation.removedDurationMin);
+			}
+		}
+		// Renumber sequenceOrder by new startMin.
+		const sorted = [...peers].sort((a, b) => a.startMin - b.startMin);
+		sorted.forEach((p, i) => (p.sequenceOrder = i));
+		markTouched(mutation.oldStationId, mutation.oldDayMs);
+	}
+
+	// 2. Settle finisher-hold violations. A print moving later can push its finishers
+	//    forward; a finisher pushed past shift end moves to the next day's queue front.
 	for (let guard = 0; guard < 500; guard++) {
 		const violator = ctx.placements.find((p) => {
 			const earliest = earliestFor(ctx, p);
 			if (!earliest) return false;
-			const fitsWhereItIs = p.dayMs !== earliest.dayMs || workingMinutesUntilShiftEnd(p.startMin) >= Math.min(p.durationMin, workingMinutesUntilShiftEnd(SHIFT_START_MIN));
-			return isBefore({ dayMs: p.dayMs, minute: p.startMin }, earliest) || !fitsWhereItIs;
+			if (isBefore({ dayMs: p.dayMs, minute: p.startMin }, earliest)) return true;
+			// Also violates if it can't fit within the shift starting at its current time.
+			if (workingMinutesUntilShiftEnd(p.startMin) < p.durationMin) return true;
+			return false;
 		});
 		if (!violator) break;
 		pushed.add(violator.id);
 		const earliest = earliestFor(ctx, violator)!;
+		const originStation = violator.stationId;
 		const originDay = violator.dayMs;
 
 		if (violator.dayMs < earliest.dayMs) {
+			// Move to earliest's day, front-of-queue at shift start (will be re-cascaded).
 			violator.dayMs = earliest.dayMs;
-			violator.sequenceOrder = -1; // front of that day's queue; the hold places it right after the print
+			violator.startMin = SHIFT_START_MIN;
 		} else {
-			repackInMemory(violator.stationId, violator.dayMs);
-			const stillFits = workingMinutesUntilShiftEnd(violator.startMin) >= Math.min(violator.durationMin, workingMinutesUntilShiftEnd(SHIFT_START_MIN));
-			if (!isBefore({ dayMs: violator.dayMs, minute: violator.startMin }, earliest) && stillFits) continue;
-			violator.dayMs += DAY_MS;
-			violator.sequenceOrder = -1;
+			// Same day — cascade violator to its notBefore. If it doesn't fit, push to next.
+			const peers = dayPeersOf(ctx, violator.stationId, violator.dayMs);
+			const items = toCascadeItems(ctx, peers);
+			const result = cascadeMove(items, violator.id, earliest.minute);
+			if ('conflict' in result || workingMinutesUntilShiftEnd(earliest.minute) < violator.durationMin) {
+				// Doesn't fit on this day — push to next day's front.
+				violator.dayMs += DAY_MS;
+				violator.startMin = SHIFT_START_MIN;
+			} else {
+				applyCascadeResult(violator.stationId, violator.dayMs, result.placements);
+			}
 		}
-		repackInMemory(violator.stationId, violator.dayMs);
-		if (originDay !== violator.dayMs) repackInMemory(violator.stationId, originDay);
+		// Recompute origin day now that violator is gone (if it moved days).
+		if (originDay !== violator.dayMs) {
+			const remainingOrigin = dayPeersOf(ctx, originStation, originDay);
+			// No cascade needed — the violator's departure is a remove, but subsequent
+			// peers keep their positions (we don't pull them forward for a system-driven
+			// move; the human contract only applies to user removes).
+			markTouched(originStation, originDay);
+			void remainingOrigin;
+		}
+		// Cascade-insert violator on its new day.
+		const destPeers = dayPeersOf(ctx, violator.stationId, violator.dayMs).filter((p) => p.id !== violator.id);
+		const destItems = toCascadeItems(ctx, destPeers);
+		const insertResult = cascadeInsert(destItems, { id: violator.id, startMin: violator.startMin, durationMin: violator.durationMin, notBeforeMin: earliest && earliest.dayMs === violator.dayMs ? earliest.minute : undefined }, violator.startMin);
+		if ('conflict' in insertResult) {
+			// Can't fit on this day either — push another day.
+			violator.dayMs += DAY_MS;
+			violator.startMin = SHIFT_START_MIN;
+			continue;
+		}
+		violator.startMin = insertResult.incomingStart ?? violator.startMin;
+		applyCascadeResult(violator.stationId, violator.dayMs, insertResult.placements);
 	}
 
+	// 3. Write changes.
 	const peers: PlacementPosition[] = [];
 	for (const p of ctx.placements) {
-		const prior = before.get(p.id)!;
-		const changed = prior.dayMs !== p.dayMs || prior.startMin !== p.startMin || prior.sequenceOrder !== p.sequenceOrder;
+		const prior = before.get(p.id);
+		if (!prior) continue;
+		const changed = prior.dayMs !== p.dayMs || prior.stationId !== p.stationId || prior.startMin !== p.startMin || prior.sequenceOrder !== p.sequenceOrder;
 		if (changed) {
 			await tx.scheduleAssignment.update({
 				where: { id: p.id },
-				data: { date: new Date(p.dayMs), startMinuteOfDay: p.startMin, sequenceOrder: p.sequenceOrder }
+				data: { date: new Date(p.dayMs), stationId: p.stationId, startMinuteOfDay: p.startMin, sequenceOrder: p.sequenceOrder }
 			});
 		}
-		if (changed || touchedDays.has(`${p.stationId}__${p.dayMs}`)) {
+		if (changed || touchedDays.has(`${p.stationId}__${p.dayMs}`) || touchedDays.has(`${prior.stationId}__${prior.dayMs}`)) {
 			peers.push({ id: p.id, date: iso(p.dayMs), sequenceOrder: p.sequenceOrder, startMinuteOfDay: p.startMin });
 		}
 	}
