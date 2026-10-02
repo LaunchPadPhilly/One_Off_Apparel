@@ -1,7 +1,7 @@
 import { prisma } from '$lib/server/prisma';
 import { proposeSchedule } from '$lib/server/engine/proposeSchedule';
 import { ScheduleAssignmentStatus, ScheduleStrategy } from '../../../../prisma/generated/prisma/enums';
-import { fetchBacklog, fetchCapacity } from './buildBacklogAndCapacity';
+import { fetchBacklog, fetchStaffedCapacity } from './buildBacklogAndCapacity';
 import { createDraft } from './draft';
 import type { DateRange } from './types';
 
@@ -59,7 +59,9 @@ export async function proposeIntoNewDraft(actor: string): Promise<ProposeIntoNew
 		actor
 	);
 
-	const [{ backlog, externalDependencies }, capacity] = await Promise.all([fetchBacklog(), fetchCapacity(range)]);
+	const { backlog, externalDependencies } = await fetchBacklog();
+	// Each (station, day) staffed from the roster (planStaffing.ts, 2026-09-28).
+	const capacity = await fetchStaffedCapacity(range, backlog);
 	const result = proposeSchedule(backlog, capacity, externalDependencies);
 
 	// Each placement's wall-clock start comes straight from the engine now (2026-09-23):
@@ -79,7 +81,9 @@ export async function proposeIntoNewDraft(actor: string): Promise<ProposeIntoNew
 					estimatedHours: assignment.estimatedHours,
 					status: ScheduleAssignmentStatus.PROPOSED,
 					proposedBy: actor,
-					scheduleDraftId: draft.id
+					scheduleDraftId: draft.id,
+					// The day's crew on this station (planStaffing.ts, 2026-09-28).
+					crew: { create: assignment.crewWorkerIds.map((workerId) => ({ workerId })) }
 				}
 			});
 

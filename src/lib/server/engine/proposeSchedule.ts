@@ -150,9 +150,14 @@ export function proposeSchedule(
 			if (end) earliest = earliest ? laterOf(earliest, end) : end;
 		}
 
-		const workingMin = estimate.hours * 60;
 		const family = batchFamilyKey(item, estimate.station);
-		const candidates: { state: SlotState; start: number; gapMin: number }[] = [];
+		// Crew (2026-09-28): a slot staffed by N people runs this job in estimateHours(item, N)
+		// — only the crew-divisible part shrinks. No crew info = one person (old behavior).
+		const hoursFor = (slot: CapacitySlot) => {
+			const crew = slot.crewWorkerIds?.length ?? 1;
+			return crew > 1 ? estimateHours(item, crew).hours : estimate.hours;
+		};
+		const candidates: { state: SlotState; start: number; gapMin: number; hours: number }[] = [];
 		for (const state of slots.values()) {
 			const { slot } = state;
 			// Any station of the job's kind will do — e.g. either of two auto presses — except
@@ -162,6 +167,8 @@ export function proposeSchedule(
 			if (dayMs > item.dueDate.getTime()) continue;
 			if (earliest && dayMs < earliest.dayMs) continue;
 
+			const hours = hoursFor(slot);
+			const workingMin = hours * 60;
 			let start = state.cursor;
 			let gapMin = 0;
 			if (earliest && dayMs === earliest.dayMs && earliest.minute > start) {
@@ -173,11 +180,11 @@ export function proposeSchedule(
 				gapMin = workingMinutesUntilShiftEnd(start) - workingMinutesUntilShiftEnd(waitUntil);
 				start = waitUntil;
 			}
-			if (slot.availableHrs < estimate.hours + gapMin / 60) continue;
+			if (slot.availableHrs < hours + gapMin / 60) continue;
 			// A dependency-constrained job on its dependency's day must actually finish
 			// within the shift; otherwise it would visually pile up at 16:30.
 			if (earliest && dayMs === earliest.dayMs && workingMinutesUntilShiftEnd(start) < workingMin) continue;
-			candidates.push({ state, start, gapMin });
+			candidates.push({ state, start, gapMin, hours });
 		}
 		candidates.sort((a, b) => {
 			const aBatched = a.state.families.has(family);
@@ -199,9 +206,10 @@ export function proposeSchedule(
 			continue;
 		}
 
-		const { state, start, gapMin } = best;
+		const { state, start, gapMin, hours } = best;
+		const workingMin = hours * 60;
 		const batched = state.families.has(family);
-		state.slot.availableHrs -= estimate.hours + gapMin / 60;
+		state.slot.availableHrs -= hours + gapMin / 60;
 		state.placedCount += 1;
 		state.families.add(family);
 		const end = Math.min(wallClockEnd(start, workingMin), SHIFT_END_MIN);
@@ -215,10 +223,11 @@ export function proposeSchedule(
 			date: state.slot.date,
 			sequenceOrder: state.placedCount,
 			startMinuteOfDay: start,
-			estimatedHours: estimate.hours
+			estimatedHours: hours,
+			crewWorkerIds: state.slot.crewWorkerIds ?? []
 		});
 		reasoning.push(
-			`${item.id}: placed at "${state.slot.stationName}" on ${state.slot.date.toISOString().slice(0, 10)} (slot #${state.placedCount}, ${estimate.hours.toFixed(2)}h)` +
+			`${item.id}: placed at "${state.slot.stationName}" on ${state.slot.date.toISOString().slice(0, 10)} (slot #${state.placedCount}, ${hours.toFixed(2)}h${state.slot.crewWorkerIds?.length ? `, crew of ${state.slot.crewWorkerIds.length}` : ''})` +
 				(batched ? ' — batched with a same-setup job already on that slot' : '') +
 				(earliest ? ' — after the job it waits on' : '')
 		);

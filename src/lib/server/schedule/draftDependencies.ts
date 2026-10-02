@@ -1,6 +1,6 @@
-import { ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
+import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
 import { cascadeInsert, cascadeMove, cascadeRemove, type CascadeItem } from '$lib/schedule/repackDay';
-import { SHIFT_END_MIN, SHIFT_START_MIN, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
+import { SHIFT_START_MIN, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
 import type { Prisma } from '../../../../prisma/generated/prisma/client';
 import { LineItemStatus, LineItemType } from '../../../../prisma/generated/prisma/enums';
 
@@ -120,6 +120,10 @@ async function loadContext(db: Db, draftId: string, extraLineItemIds: string[] =
 	function dependenciesOf(item: LineItemNode): LineItemNode[] {
 		if (item.itemType !== LineItemType.FINISHING || !item.dependsOn) return [];
 		if (item.dependsOn === ALL_SIBLINGS_DEPENDENCY) return lineItems.filter((other) => other.orderId === item.orderId && other.id !== item.id);
+		// A matte not linked to one design (2026-09-28): every design on the order.
+		if (item.dependsOn === ALL_DECORATIONS_DEPENDENCY) {
+			return lineItems.filter((other) => other.orderId === item.orderId && other.itemType === LineItemType.DECORATION);
+		}
 		const dep = nodes.get(item.dependsOn);
 		return dep ? [dep] : [];
 	}

@@ -300,60 +300,62 @@ model Order {
 // A physical garment with a print on the front and an embroidery on the back
 // is two rows here sharing one orderId, not one row — see CLAUDE.md.
 model LineItem {
-  id                    String                 @id @default(cuid())
-  orderId               String
-  itemType              LineItemType
-  design                String
+  id                     String                 @id @default(cuid())
+  orderId                String
+  itemType               LineItemType
+  design                 String
   // Decoration-oriented fields: meaningful when itemType is DECORATION,
   // null on FINISHING rows.
-  printLocation         PrintLocation?
-  decorationType        DecorationType?
-  inkColorCount         Int?
+  printLocation          PrintLocation?
+  decorationType         DecorationType?
+  inkColorCount          Int?
   // NEW (2026-09-28): the colors going ON the piece — ink / thread / patch colors as the
   // export's "Color(s)" column lists them, e.g. "109c Yellow, White". Display only (the
   // formulas use inkColorCount). Not the garment's own color — that's apparelColor.
-  decorationColors      String?
-  screens               Int?
-  stitchCount           Int?
+  decorationColors       String?
+  screens                Int?
+  stitchCount            Int?
   // Finishing-oriented fields: meaningful when itemType is FINISHING,
   // null on DECORATION rows.
-  finishingStep         FinishingStep?
+  finishingStep          FinishingStep?
   // NEW (2026-09-21): is this a normal garment ("FLAT" — a t-shirt, hoodie, etc.) or
   // headwear ("CAP")? We added this because embroidery pricing/timing math is
   // completely different for caps vs regular garments — it's not just a different
   // number, it's a different formula. Only matters for DECORATION rows; always null
   // on FINISHING rows. See estimateHours.ts for where this actually gets used.
-  garmentStyle          GarmentStyle?
+  garmentStyle           GarmentStyle?
   // NEW (2026-09-21): only filled in when garmentStyle is "CAP" — is the cap
   // STRUCTURED (has a stiff front panel) or UNSTRUCTURED (soft, no stiff panel)?
   // Caps use a different embroidery formula depending on this. Stays null for
   // every non-cap row.
-  capConstruction       CapConstruction?
+  capConstruction        CapConstruction?
   // NEW (2026-09-23): FINISHING rows with finishingStep MATTE only — is the matte
   // finish going on a FLAT surface or a SPECIALTY one? The client's Matte tab uses a
   // different formula for each (see estimateHours.ts). Null on every other row.
-  matteSurface          MatteSurface?
+  matteSurface           MatteSurface?
   // NEW (2026-09-23): FINISHING rows with finishingStep FOLD_BAG only — is the
   // garment being folded a short-sleeve tee (SS_TEE) or anything else (OTHER)? The
   // client's Fold & Bag tab is keyed on this, not on weight class. Null elsewhere.
-  foldBagGarment        FoldBagGarment?
-  // Reviewer-entered hours. Two uses:
-  //   1. Required for a job type with no formula — DTF, DTG, and OTHER — where the
-  //      engine can't estimate at all. Missing → the order page asks "how many hours?".
-  //   2. An override for a job with a real formula (screen print, embroidery, any
-  //      finishing step) when the admin knows the engine estimate isn't right for this
-  //      particular job (2026-09-28 decision). When set, estimateHours.ts uses this
-  //      number instead of the formula and reports it as an override, so the UI can
-  //      show "Engine estimated ~X.Xh" alongside.
-  manualEstimatedHours  Float?
+  foldBagGarment         FoldBagGarment?
+  // Hours a reviewer entered by hand for a job type that has no formula — DTF, DTG
+  // and OTHER today, whose time varies by artwork so the client has no fixed table.
+  // estimateHours.ts uses it only for those types (never overrides a real formula);
+  // until it's set, the order page asks "how many hours?".
+  manualEstimatedHours   Float?
+  // NEW (2026-09-28): hours a person set on the order page because the estimate was off
+  // (one-person time). Replaces the formula's hours for this job on a job type that
+  // DOES have a formula; null = use the formula. Already-approved schedule rows keep
+  // the hours they had. Distinct from manualEstimatedHours (above), which is for job
+  // types with no formula at all.
+  estimatedHoursOverride Float?
   // NEW (2026-09-28): OTHER rows only — a job type this system doesn't model yet
   // (e.g. "Patch Install"), kept instead of dropped at import so a person can review
   // it. `otherJobType` is the name as written in the export; `assignedStationId` is
   // the station a reviewer says it runs on (the order page asks), and its time is
   // manualEstimatedHours. The engine only ever places it on that exact station.
-  otherJobType          String?
-  assignedStationId     String?
-  assignedStation       Station?               @relation(fields: [assignedStationId], references: [id], onDelete: SetNull)
+  otherJobType           String?
+  assignedStationId      String?
+  assignedStation        Station?               @relation(fields: [assignedStationId], references: [id], onDelete: SetNull)
   // Either another LineItem's id, or the literal string "all_siblings"
   // (waits on every other line item under the same order). This is
   // deliberately a plain string, not a Prisma relation: a real FK
@@ -361,18 +363,18 @@ model LineItem {
   // is evaluated in application code (check_completion), not the DB.
   // Do not conflate with ScheduleAssignment.sequenceOrder — that is batch
   // ordering within one station's day, this is cross-line-item dependency.
-  dependsOn             String?
-  status                LineItemStatus         @default(NEEDS_REVIEW)
-  artworkApprovalStatus ArtworkApprovalStatus?
-  weightClass           WeightClass
-  apparelColor          String
-  quantity              Int
-  sizeBreakdown         Json
-  estimatedHours        Json?
-  reviewConfidence      Float?
-  order                 Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  scheduleAssignments   ScheduleAssignment[]
-  actuals               Actual[]
+  dependsOn              String?
+  status                 LineItemStatus         @default(NEEDS_REVIEW)
+  artworkApprovalStatus  ArtworkApprovalStatus?
+  weightClass            WeightClass
+  apparelColor           String
+  quantity               Int
+  sizeBreakdown          Json
+  estimatedHours         Json?
+  reviewConfidence       Float?
+  order                  Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  scheduleAssignments    ScheduleAssignment[]
+  actuals                Actual[]
 
   @@index([orderId])
   @@index([status])
@@ -402,6 +404,7 @@ model Station {
   actuals             Actual[]
   certifications      WorkerCertification[]
   assignedLineItems   LineItem[]
+  staffingPins        StaffingPin[]
 
   @@index([kind])
 }
@@ -409,13 +412,16 @@ model Station {
 // A person on the shop floor (2026-09-25). A roster of names, deliberately NOT
 // linked to User — floor staff don't log in. `archivedAt` is "delete".
 model Worker {
-  id             String                @id @default(cuid())
+  id             String                 @id @default(cuid())
   name           String
   notes          String?
   archivedAt     DateTime?
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
   certifications WorkerCertification[]
+  unavailability WorkerUnavailability[]
+  staffingPins   StaffingPin[]
+  crewSlots      AssignmentCrew[]
 }
 
 // Which stations a worker is certified to run. Per station rather than per kind,
@@ -429,6 +435,47 @@ model WorkerCertification {
 
   @@id([workerId, stationId])
   @@index([stationId])
+}
+
+// A person who is out on a given day (2026-09-28) — set by telling Claude in chat
+// (set_worker_availability). The staffing plan never puts them on a station that day.
+model WorkerUnavailability {
+  workerId  String
+  date      DateTime @db.Date
+  reason    String?
+  createdBy String
+  createdAt DateTime @default(now())
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@id([workerId, date])
+  @@index([date])
+}
+
+// A person a human pinned to one station for one day (2026-09-28, via Claude:
+// set_worker_station). The staffing plan keeps it and only places everyone else.
+model StaffingPin {
+  workerId  String
+  date      DateTime @db.Date
+  stationId String
+  createdBy String
+  createdAt DateTime @default(now())
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  station   Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
+
+  @@id([workerId, date])
+  @@index([date])
+}
+
+// The crew on one scheduled job (2026-09-28). One person works one station for the
+// whole day, so every job on a (station, day) in a plan shares the same crew.
+model AssignmentCrew {
+  assignmentId String
+  workerId     String
+  assignment   ScheduleAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  worker       Worker             @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@id([assignmentId, workerId])
+  @@index([workerId])
 }
 
 model CapacityCalendar {
@@ -467,6 +514,9 @@ model ScheduleAssignment {
   scheduleDraftId  String?
   scheduleDraft    ScheduleDraft?           @relation(fields: [scheduleDraftId], references: [id], onDelete: SetNull)
   lineItem         LineItem                 @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
+  // Who works this job (2026-09-28): the day's crew on this station, picked by the
+  // engine (planStaffing.ts). Empty for hand-placed jobs and plans made with no roster.
+  crew             AssignmentCrew[]
   station          Station                  @relation(fields: [stationId], references: [id], onDelete: Restrict)
 
   @@index([lineItemId])

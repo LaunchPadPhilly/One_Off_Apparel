@@ -9,6 +9,9 @@
 
 	let { data, form }: PageProps = $props();
 
+	// Which line item's estimate is being edited inline (2026-09-28), if any.
+	let editingEstimateId = $state<string | null>(null);
+
 	// data.gaps (see orderGaps.ts, computed server-side and shared with the notes-box
 	// fill-in action so both read the exact same outstanding-gap logic) splits into two
 	// very differently-treated things:
@@ -34,17 +37,6 @@
 		manualEstimatedHours: 'How many hours does it need (no formula for this job type)',
 		assignedStationId: 'What station is it assigned to'
 	};
-
-	// One-line summary of a line item's engine estimate — shown alongside a manual
-	// override so the reviewer sees what the engine would have said, and can decide
-	// whether to keep the override. Reads the same DisplayEstimate shape the badge above
-	// uses (see estimateForDisplay.ts): `engineHours` is only ever populated when the
-	// current estimate came from a manual override AND the engine also has a formula for
-	// the row.
-	function engineEstimateNote(estimate: { ok: true; hours: number; engineHours?: number } | { ok: false }) {
-		if (!estimate.ok || estimate.engineHours == null) return '';
-		return `Engine estimated ~${estimate.engineHours.toFixed(2)}h — clear the override to use it.`;
-	}
 
 	const needsReReview = $derived(data.order.status === 'CONFIRMED' && data.gaps.blockingCount > 0);
 
@@ -333,12 +325,64 @@
 					     badge when we can compute it, or a warn-toned badge with the reason in
 					     a hover tooltip when we can't yet (missing formula vs missing job data;
 					     see estimateForDisplay.ts). -->
-					{#if item.estimate.ok}
-						<span class="badge badge--success">~{item.estimate.hours.toFixed(2)}h</span>
+					<!-- NEW (2026-09-28): click the estimate to correct it when the formula's
+					     number is off (setEstimate). An edited estimate says so, shows what
+					     the formula would say, and can go back to the formula. -->
+					{#if data.canEdit && editingEstimateId === item.id}
+						<form
+							method="POST"
+							action="?/setEstimate"
+							class="estimate-edit"
+							use:enhance={() => async ({ result, update }) => {
+								await update({ reset: false });
+								if (result.type === 'success') editingEstimateId = null;
+							}}
+						>
+							<input type="hidden" name="lineItemId" value={item.id} />
+							<label class="estimate-edit__field">
+								<span class="visually-hidden">Estimated hours for {item.design}</span>
+								<input
+									name="hours"
+									type="number"
+									min="0.25"
+									max="200"
+									step="0.25"
+									value={item.estimate.ok ? item.estimate.hours : ''}
+									required
+									autocomplete="off"
+								/>
+								h
+							</label>
+							<button type="submit" use:pressable>Save</button>
+							<button type="button" class="button--secondary" onclick={() => (editingEstimateId = null)}>Cancel</button>
+						</form>
+					{:else if item.estimate.ok}
+						{#if data.canEdit}
+							<button type="button" class="badge badge--success badge--button" title="Click to edit this estimate" onclick={() => (editingEstimateId = item.id)}>
+								~{item.estimate.hours.toFixed(2)}h ✎
+							</button>
+						{:else}
+							<span class="badge badge--success">~{item.estimate.hours.toFixed(2)}h</span>
+						{/if}
+						{#if item.estimate.overridden}
+							<span class="badge" title="Set by hand on this page">
+								edited{#if item.estimate.formulaHours != null} · formula says {item.estimate.formulaHours.toFixed(2)}h{/if}
+							</span>
+							{#if data.canEdit}
+								<form method="POST" action="?/setEstimate" use:enhance class="estimate-reset">
+									<input type="hidden" name="lineItemId" value={item.id} />
+									<input type="hidden" name="clear" value="true" />
+									<button type="submit" class="button--secondary button--small" use:pressable>Use formula</button>
+								</form>
+							{/if}
+						{/if}
 					{:else}
 						<span class="badge badge--warn" title={item.estimate.reason}>
 							{item.estimate.category === 'missing_formula' ? 'No formula yet' : 'Missing job details'}
 						</span>
+						{#if data.canEdit && (item.estimate.category === 'missing_formula' || item.estimate.field !== 'assignedStationId')}
+							<button type="button" class="badge badge--button" onclick={() => (editingEstimateId = item.id)}>Set estimate ✎</button>
+						{/if}
 					{/if}
 				</div>
 				<p class="muted">
@@ -457,30 +501,18 @@
 								</label>
 							{/if}
 						{/if}
-						<!-- Reviewer-entered hours. Required for DTF/DTG/OTHER (no formula
-						     exists); for every other job type it's an OVERRIDE — leave blank to
-						     use the engine's estimate, or enter a number when the engine is off
-						     for this particular job (2026-09-28 decision). Clearing the input
-						     removes an override on save (the hidden `…Submitted` marker below
-						     tells the server this input was on the form and might be
-						     intentionally blank). -->
+						<!-- Reviewer-entered hours. Required for DTF/DTG/OTHER (no formula exists).
+						     For job types that DO have a formula, use the "edit estimate" button
+						     next to the badge above (writes to estimatedHoursOverride). -->
 						{#if item.itemType === 'OTHER' || item.decorationType === 'DTF' || item.decorationType === 'DTG'}
 							<label>
 								Hours needed
 								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
 							</label>
-						{:else}
-							<label>
-								Override engine estimate (hours)
-								<input name="manualEstimatedHours" type="number" min="0" step="0.25" value={item.manualEstimatedHours ?? ''} placeholder="leave blank to use engine" autocomplete="off" />
-							</label>
+							<input type="hidden" name="manualEstimatedHoursSubmitted" value="1" />
 						{/if}
-						<input type="hidden" name="manualEstimatedHoursSubmitted" value="1" />
 						<button class="button button--secondary" use:pressable type="submit">Save</button>
 					</form>
-					{#if item.estimate.ok && item.estimate.engineHours != null}
-						<p class="muted engine-estimate-note">{engineEstimateNote(item.estimate)}</p>
-					{/if}
 					{/key}
 				{/if}
 			</div>
@@ -489,6 +521,48 @@
 </div>
 
 <style>
+	/* Editable estimate (2026-09-28). */
+	.badge--button {
+		cursor: pointer;
+		font: inherit;
+		font-size: 0.8rem;
+	}
+
+	.badge--button:hover {
+		filter: brightness(1.08);
+	}
+
+	.estimate-edit,
+	.estimate-reset {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.estimate-edit__field {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+	}
+
+	.estimate-edit__field input {
+		width: 5.5rem;
+	}
+
+	.button--small {
+		padding: 0.2rem 0.6rem;
+		font-size: 0.8rem;
+	}
+
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+	}
+
 	.fields {
 		display: flex;
 		gap: 0.75rem;
@@ -503,11 +577,6 @@
 		gap: 0.25rem;
 		font-size: 0.85rem;
 		color: var(--ink-500);
-	}
-
-	.engine-estimate-note {
-		margin: -0.2rem 0 0.75rem;
-		font-size: 0.82rem;
 	}
 
 	dl {

@@ -9,6 +9,14 @@ import { getSchedule } from '$lib/server/schedule/getSchedule';
 import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersistSchedule';
 import { commitSchedule } from '$lib/server/schedule/commitSchedule';
 import { simulateChange, simulateChangeSchema } from '$lib/server/schedule/simulateChange';
+import {
+	getStaffing,
+	getStaffingSchema,
+	setWorkerAvailability,
+	setWorkerAvailabilitySchema,
+	setWorkerStation,
+	setWorkerStationSchema
+} from '$lib/server/schedule/staffing';
 
 /**
  * The tools this deployment exposes over MCP. Both entry points import this list
@@ -160,5 +168,46 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		requiredScope: 'SCHEDULE_READ',
 		readOnly: true,
 		handler: async ({ change }) => simulateChange(change)
+	}),
+	// ─── Daily staffing (2026-09-28) ───────────────────────────────────────────
+	// The deterministic engine picks each day's crew (engine/planStaffing.ts). These let
+	// a person tell Claude about organic changes — someone out, someone moved — which the
+	// next proposed schedule takes into account. None of them changes an approved
+	// schedule by itself; a new plan still has to be proposed and approved by a person.
+	defineTool({
+		name: 'get_staffing',
+		description:
+			"Shows who works where: the roster with each person's certified stations, who is out, who is pinned to a " +
+			"station, and the crew on each station/day of the approved schedule. Example question: 'who's on the " +
+			"autos Tuesday?' → { from: '2026-10-06', to: '2026-10-06' }. Returns { roster, out, pinned, approvedCrews }.",
+		inputSchema: getStaffingSchema.shape,
+		requiredScope: 'SCHEDULE_READ',
+		readOnly: true,
+		handler: async (input) => getStaffing(input)
+	}),
+	defineTool({
+		name: 'set_worker_availability',
+		description:
+			'Marks a person out (available: false) or back in (available: true) for one or more days, by name. ' +
+			'The next proposed schedule will not staff them on those days. Returns the approved jobs they were on ' +
+			'those days — tell the user, and offer to propose an updated schedule for them to approve. Only the ' +
+			"given days are affected. Example: 'Maria is out today' → { workerName: 'Maria', from: '<today>', to: " +
+			"'<today>', available: false, reason: 'sick' }.",
+		inputSchema: setWorkerAvailabilitySchema.shape,
+		requiredScope: 'SCHEDULE_WRITE',
+		readOnly: false,
+		handler: async (input, principal) => setWorkerAvailability(input, principalIdentity(principal))
+	}),
+	defineTool({
+		name: 'set_worker_station',
+		description:
+			'Pins a person to one station for one day, by name — the staffing plan keeps them there and places ' +
+			'everyone else around them. They must be certified on that station and not marked out. Omit ' +
+			"stationName (or pass null) to clear the pin. Example: 'put Jo on embroidery Thursday' → " +
+			"{ workerName: 'Jo', date: '2026-10-08', stationName: 'Embroidery' }.",
+		inputSchema: setWorkerStationSchema.shape,
+		requiredScope: 'SCHEDULE_WRITE',
+		readOnly: false,
+		handler: async (input, principal) => setWorkerStation(input, principalIdentity(principal))
 	})
 ];

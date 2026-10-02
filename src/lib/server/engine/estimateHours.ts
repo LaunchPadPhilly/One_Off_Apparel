@@ -1,4 +1,4 @@
-import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface } from '../../../../prisma/generated/prisma/enums';
+import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface, type CapConstruction, type FoldBagGarment, type WeightClass } from '../../../../prisma/generated/prisma/enums';
 import { expectedStationFor } from '$lib/schedule/expectedStation';
 import { currentFormulas, maybeRefreshFormulas } from './formulaSettings';
 import type { EstimateHoursInput, EstimateHoursResult } from './types';
@@ -123,7 +123,8 @@ function estimateScreenPrintAutoHours(item: EstimateHoursInput): EstimateHoursRe
 
 	// Add setup + run together, then divide by 60 to convert minutes into hours (since
 	// that's the unit the rest of the scheduling engine works in).
-	return { station: 'screen_print_auto', hours: (setupMinutes + runMinutes) / 60 };
+	// Crew (2026-09-28): only the run time speeds up with more people; setup is fixed.
+	return { station: 'screen_print_auto', hours: (setupMinutes + runMinutes) / 60, crewDivisibleHours: runMinutes / 60 };
 }
 
 // Direct port of the embroidery tab (confirmed with the client, 2026-09-21). Flat and
@@ -207,7 +208,9 @@ function estimateEmbroideryHours(item: EstimateHoursInput): EstimateHoursResult 
 	// Add every step together, then convert from minutes to hours (÷ 60) since that's
 	// the unit the rest of the scheduling engine expects back.
 	const totalMinutes = setupBoxingMinutes + threadChangeMinutes + hoopingMinutes + loadUnloadMinutes + cleanupMinutes + sewMinutes;
-	return { station: 'embroidery', hours: totalMinutes / 60 };
+	// Crew (client, 2026-09-28): only setup & boxing speeds up with more people — thread
+	// changes, hooping, load/unload, cleanup and the machine's sew time don't.
+	return { station: 'embroidery', hours: totalMinutes / 60, crewDivisibleHours: setupBoxingMinutes / 60 };
 }
 
 // ─── Finishing steps (client's finishing flowcharts, 2026-09-23) ─────────────────────
@@ -262,7 +265,8 @@ function estimateManualHours(item: EstimateHoursInput, station: string, label: s
 	if (hours == null || !(hours > 0)) {
 		throw new MissingLineItemDataError(`manual_estimated_hours (${label} has no formula — how many hours does this job need?)`, 'manualEstimatedHours');
 	}
-	return { station, hours, fromManualOverride: true };
+	// Crew (client, 2026-09-28): the entered hours are for one person; more people divide them.
+	return { station, hours, crewDivisibleHours: hours };
 }
 
 /**
@@ -282,7 +286,8 @@ function estimateOtherHours(item: EstimateHoursInput): EstimateHoursResult {
 	if (hours == null || !(hours > 0)) {
 		throw new MissingLineItemDataError(`manual_estimated_hours (${name} has no formula — how many hours does this job need?)`, 'manualEstimatedHours');
 	}
-	return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours, fromManualOverride: true };
+	// Crew: not decided for OTHER jobs yet, so the entered hours stay fixed.
+	return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours, crewDivisibleHours: 0 };
 }
 
 /**
@@ -311,24 +316,66 @@ function roundToQuarterHour(hours: number): number {
  * formula for a given kind of job yet, we throw an error instead of guessing — see
  * the MissingFormulaError/MissingLineItemDataError classes above for why.
  *
- * MANUAL OVERRIDE (2026-09-28): if `manualEstimatedHours` is set to a positive number,
- * it wins for every job type, not just the ones with no formula. This lets an admin
- * say "the engine says 3h but I know this run will be 1h" without touching the
- * formula code. `fromManualOverride: true` in the result tells the UI to show the
- * engine's own estimate alongside via `engineEstimateFor`. DTF, DTG, and OTHER are
- * unchanged: they still REQUIRE this field (no formula to fall back to).
+ * MANUAL OVERRIDE (2026-09-28): a positive `estimatedHoursOverride` replaces the
+ * formula's number for any job type with a real formula; `overridden: true` plus
+ * `formulaHours` in the result tells the UI to show the engine's own estimate alongside
+ * via `engineEstimateFor`. DTF, DTG, and OTHER have no formula and REQUIRE
+ * `manualEstimatedHours` instead (never an override).
  *
  * The final hours are rounded to the nearest 15 minutes (see roundToQuarterHour
  * above) so estimates shown at import/order creation and slots produced by
  * propose_schedule share the same granularity.
+ *
+ * `crewSize` (2026-09-28): the client's formulas are the rate for ONE person. With N
+ * people on the job, only its crew-divisible part (`crewDivisibleHours` — screen print
+ * run time, embroidery setup & boxing, all finishing time, DTF/DTG entered hours) is
+ * divided by N; everything else stays fixed. Default 1 = the unchanged formula.
  */
-export function estimateHours(item: EstimateHoursInput): EstimateHoursResult {
+export function estimateHours(item: EstimateHoursInput, crewSize = 1): EstimateHoursResult {
 	// Kick off a background refresh if the formula cache is older than its TTL — see
 	// formulaSettings.ts's multi-instance note. The call is fire-and-forget; this
 	// function still returns its result synchronously against whatever's cached.
 	maybeRefreshFormulas();
-	const raw = estimateHoursRaw(item);
-	return { ...raw, hours: roundToQuarterHour(raw.hours) };
+	const raw = applyEstimateOverride(item);
+	const crew = Math.max(1, Math.floor(crewSize));
+	const divisible = raw.crewDivisibleHours ?? 0;
+	const hours = raw.hours - divisible + divisible / crew;
+	return { ...raw, hours: roundToQuarterHour(hours) };
+}
+
+/**
+ * A person's edited estimate (2026-09-28, the order page): when the formula's number is
+ * off, `estimatedHoursOverride` replaces it for this job (one-person hours). The station
+ * still comes from the job's type, and a bigger crew still shrinks the same share of it
+ * the formula would have (e.g. only screen print's run portion). If the formula can't
+ * run yet — a missing field, or no formula — the person's number stands in for it:
+ * decorations and finishing then treat all of it as crew-divisible (like DTF's entered
+ * hours), OTHER jobs none of it, and an OTHER job still needs its station assigned.
+ */
+function applyEstimateOverride(item: EstimateHoursInput): EstimateHoursResult {
+	const override = item.estimatedHoursOverride;
+	if (override == null || !(override > 0)) return estimateHoursRaw(item);
+
+	let formula: EstimateHoursResult | null = null;
+	try {
+		formula = estimateHoursRaw(item);
+	} catch (error) {
+		if (!(error instanceof EstimationError)) throw error;
+	}
+	if (formula) {
+		const divisibleShare = formula.hours > 0 ? (formula.crewDivisibleHours ?? 0) / formula.hours : 0;
+		return { ...formula, hours: override, crewDivisibleHours: override * divisibleShare, overridden: true, formulaHours: roundToQuarterHour(formula.hours) };
+	}
+
+	if (item.itemType === LineItemType.OTHER) {
+		if (!item.assignedStationId) {
+			throw new MissingLineItemDataError(`assigned station (which station does ${item.otherJobType ? `"${item.otherJobType}"` : 'this job'} run on?)`, 'assignedStationId');
+		}
+		return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours: override, crewDivisibleHours: 0, overridden: true, formulaHours: null };
+	}
+	const kind = expectedStationFor(item);
+	if (!kind) throw new MissingFormulaError(`a line item of type "${item.decorationType ?? item.finishingStep ?? item.itemType}"`);
+	return { station: kind, hours: override, crewDivisibleHours: override, overridden: true, formulaHours: null };
 }
 
 /**
@@ -342,7 +389,7 @@ export function engineEstimateFor(item: EstimateHoursInput): EstimateHoursResult
 	if (item.itemType === LineItemType.OTHER) return null;
 	if (item.itemType === LineItemType.DECORATION && (item.decorationType === DecorationType.DTF || item.decorationType === DecorationType.DTG)) return null;
 	try {
-		const raw = estimateHoursRawFormulaOnly(item);
+		const raw = estimateHoursRaw(item);
 		return { ...raw, hours: roundToQuarterHour(raw.hours) };
 	} catch (err) {
 		if (err instanceof EstimationError) return null;
@@ -351,25 +398,6 @@ export function engineEstimateFor(item: EstimateHoursInput): EstimateHoursResult
 }
 
 function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {
-	// Universal manual override: an admin-entered number wins over any formula, for
-	// every job type. DTF/DTG/OTHER still fall through to their own helpers, which
-	// require this field and error if missing — same behavior as before.
-	if (
-		item.manualEstimatedHours != null &&
-		item.manualEstimatedHours > 0 &&
-		item.itemType !== LineItemType.OTHER &&
-		!(item.itemType === LineItemType.DECORATION && (item.decorationType === DecorationType.DTF || item.decorationType === DecorationType.DTG))
-	) {
-		const station = expectedStationFor(item);
-		if (station) return { station, hours: item.manualEstimatedHours, fromManualOverride: true };
-		// No known station for this row's type (e.g. an unrecognized decoration type)
-		// — fall through to the router below, which will produce the same
-		// MissingFormulaError it would today. Don't guess a station.
-	}
-	return estimateHoursRawFormulaOnly(item);
-}
-
-function estimateHoursRawFormulaOnly(item: EstimateHoursInput): EstimateHoursResult {
 	if (item.itemType === LineItemType.DECORATION) {
 		switch (item.decorationType) {
 			case DecorationType.SCREEN_PRINT:
@@ -389,5 +417,7 @@ function estimateHoursRawFormulaOnly(item: EstimateHoursInput): EstimateHoursRes
 
 	if (item.itemType === LineItemType.OTHER) return estimateOtherHours(item);
 
-	return estimateFinishingHours(item);
+	// Every finishing formula is pure per-garment time, so all of it speeds up with crew.
+	const finishing = estimateFinishingHours(item);
+	return { ...finishing, crewDivisibleHours: finishing.hours };
 }

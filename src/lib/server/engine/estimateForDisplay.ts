@@ -1,4 +1,4 @@
-import { engineEstimateFor, estimateHours, MissingFormulaError, MissingLineItemDataError, type MissingLineItemField } from './estimateHours';
+import { estimateHours, MissingFormulaError, MissingLineItemDataError, type MissingLineItemField } from './estimateHours';
 import type { EstimateHoursInput } from './types';
 
 /**
@@ -45,28 +45,15 @@ import type { EstimateHoursInput } from './types';
  * object straight from estimateHours(), so `instanceof` is available and preferred).
  */
 export type DisplayEstimate =
-	| {
-			ok: true;
-			hours: number;
-			station: string;
-			// When the estimate came from a manual override AND the engine can compute an
-			// alternative for the same line item, this is the engine's own number — for
-			// showing "Engine estimated ~X.Xh" alongside the override. Absent otherwise
-			// (formula-derived estimate, or a job type with no formula at all).
-			engineHours?: number;
-	  }
+	| { ok: true; hours: number; station: string; overridden: boolean; formulaHours: number | null }
 	| { ok: false; category: 'missing_formula'; reason: string }
 	| { ok: false; category: 'missing_data'; reason: string; field: MissingLineItemField };
 
 export function estimateForDisplay(item: EstimateHoursInput): DisplayEstimate {
 	try {
 		const result = estimateHours(item);
-		const out: DisplayEstimate = { ok: true, hours: result.hours, station: result.station };
-		if (result.fromManualOverride) {
-			const engine = engineEstimateFor(item);
-			if (engine) out.engineHours = engine.hours;
-		}
-		return out;
+		// overridden/formulaHours (2026-09-28): a person's edited estimate, and what the formula says.
+		return { ok: true, hours: result.hours, station: result.station, overridden: result.overridden ?? false, formulaHours: result.overridden ? (result.formulaHours ?? null) : result.hours };
 	} catch (err) {
 		if (err instanceof MissingFormulaError) return { ok: false, category: 'missing_formula', reason: err.message };
 		if (err instanceof MissingLineItemDataError) return { ok: false, category: 'missing_data', reason: err.message, field: err.field };

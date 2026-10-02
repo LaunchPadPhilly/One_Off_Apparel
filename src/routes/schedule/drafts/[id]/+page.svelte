@@ -403,6 +403,7 @@
 		const item = findLineItem(lineItemId);
 		if (!item || item.itemType !== 'FINISHING' || !item.dependsOn) return '';
 		if (item.dependsOn === 'all_siblings') return 'Waits on every other job on this order';
+		if (item.dependsOn === 'all_decorations') return 'Waits on every design on this order';
 		const dep = findLineItem(item.dependsOn);
 		if (!dep) return '';
 		const depPlacement = placements.find((p) => p.lineItemId === dep.id);
@@ -478,6 +479,9 @@
 		stationName: string;
 		startMin: number;
 		durationMin: number;
+		// The day's crew on this job, by name (planStaffing.ts, 2026-09-28). Empty for
+		// hand-placed or hand-moved jobs.
+		crew: string[];
 	};
 	// Hydrate from server: each ScheduleAssignment tied to this draft becomes a
 	// placement. estimatedHours * 60 is the working duration; startMinuteOfDay
@@ -490,7 +494,8 @@
 			date: a.date,
 			stationName: a.stationName,
 			startMin: a.startMinuteOfDay,
-			durationMin: Math.max(15, Math.round(a.estimatedHours * 60))
+			durationMin: Math.max(15, Math.round(a.estimatedHours * 60)),
+			crew: a.crew
 		}))
 	);
 
@@ -768,6 +773,9 @@
 			// $lib/schedule/repackDay.ts) needs an absolute time.
 			const targetStart = Math.round(dropMin);
 
+			// A job moved to another station or day loses its planned crew (handled
+			// in the cross-day branch below; the server clears it too). Same-day moves
+			// keep their crew.
 			if (stayedOnSameDay) {
 				// Same-row move: cascade shifts every peer AFTER the moving item by
 				// the same delta, so any gaps between them are preserved. Refused if
@@ -802,7 +810,7 @@
 				placements = placements.map((p) => {
 					if (p.id === existing.id) {
 						const next = insertCascade.placements.find((q) => q.id === existing.id)!;
-						return { ...p, date, stationName, startMin: next.startMin };
+						return { ...p, date, stationName, startMin: next.startMin, crew: [] };
 					}
 					const next = newStarts.get(p.id);
 					return next != null ? { ...p, startMin: next } : p;
@@ -859,7 +867,8 @@
 			date,
 			stationName,
 			startMin: targetStart,
-			durationMin
+			durationMin,
+			crew: []
 		};
 		const cascade = cascadeInsert<CascadeItem & Placement>(destinationPeers, incoming, targetStart);
 		if ('conflict' in cascade) {
@@ -1245,10 +1254,15 @@
 							<span class="day__capacity muted">
 								{formatHours(WORKING_HOURS)} per station · 8a–4:30p
 							</span>
+							<!-- Who's out that day (set through Claude, 2026-09-28). -->
+							{#if data.outByDate[day.date]?.length}
+								<span class="day__out">Out: {data.outByDate[day.date].join(', ')}</span>
+							{/if}
 						</header>
 						<div class="station-rows">
 							{#snippet stationRow(date: string, station: string)}
 								{@const rowPlacements = placementsForDay(date, station)}
+								{@const rowCrew = [...new Set(rowPlacements.flatMap((p) => p.crew))].sort()}
 								{@const isDragTarget = dragOverKey === trackKey(date, station)}
 								{@const isBlocked = activeExpectedStation !== null && activeExpectedStation !== kindOf(station)}
 								<div
@@ -1256,8 +1270,12 @@
 									class:station-row--empty={rowPlacements.length === 0}
 									class:station-row--blocked={isBlocked}
 								>
-									<div class="station-row__label" title={rowLabel(station)}>
+									<div class="station-row__label" title={rowCrew.length ? `${rowLabel(station)} — ${rowCrew.join(', ')}` : rowLabel(station)}>
 										{rowLabel(station)}
+										<!-- The day's crew on this station (planStaffing.ts, 2026-09-28). -->
+										{#if rowCrew.length}
+											<span class="station-row__crew">{rowCrew.join(', ')}</span>
+										{/if}
 									</div>
 									<div class="station-row__bar" aria-label="{rowLabel(station)} on {date}">
 										<div
@@ -2077,6 +2095,22 @@
 
 	.day__capacity {
 		font-size: var(--fs-xs);
+	}
+
+	/* Daily staffing (2026-09-28): who's out that day. */
+	.day__out {
+		font-size: var(--fs-xs);
+		font-weight: 600;
+		color: var(--ink-700);
+	}
+
+	/* The day's crew under the station name. */
+	.station-row__crew {
+		display: block;
+		font-weight: 450;
+		color: var(--ink-500);
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	/* One stacked row per station within a day card. The label column is a fixed

@@ -13,6 +13,11 @@ import type {
 // see the schema note in prisma/schema.prisma and CLAUDE.md's Domain section. Shared
 // here so check_completion and whatever creates finishing rows never drift on the string.
 export const ALL_SIBLINGS_DEPENDENCY = 'all_siblings' as const;
+// NEW (2026-09-28): only for a MATTE row the import couldn't link to its design — it
+// waits on every DECORATION row on the order instead. Deliberately NOT "all_siblings":
+// that would include fold & bag, which itself waits on everything, and the two would
+// wait on each other forever.
+export const ALL_DECORATIONS_DEPENDENCY = 'all_decorations' as const;
 
 /**
  * The subset of LineItem fields estimate_hours needs. Deliberately not the full Prisma
@@ -45,6 +50,9 @@ export interface EstimateHoursInput {
 	// "Patch Install") — the export's name for it, and the station a reviewer assigned.
 	otherJobType?: string | null;
 	assignedStationId?: string | null;
+	// NEW (2026-09-28): a person's corrected one-person estimate (order page). Replaces
+	// the formula's hours when set — see estimateHours.ts' applyEstimateOverride.
+	estimatedHoursOverride?: number | null;
 }
 
 export interface EstimateHoursResult {
@@ -56,12 +64,15 @@ export interface EstimateHoursResult {
 	// assigned. When present, the job may only be placed on this station.
 	stationId?: string;
 	hours: number;
-	// true when `hours` came from LineItem.manualEstimatedHours (either a reviewer
-	// override on a job that has a real formula, or the required hours entry for a
-	// job with no formula — DTF/DTG/OTHER). false or absent when `hours` was computed
-	// by the engine. Callers show "Engine estimated ~X.Xh" alongside an override; the
-	// engine estimate is what `engineEstimateFor` returns for that same line item.
-	fromManualOverride?: boolean;
+	// NEW (2026-09-28): how much of the ONE-person time speeds up with a bigger crew
+	// (unrounded). estimateHours(item, crewSize) divides only this part by the crew.
+	crewDivisibleHours?: number;
+	// NEW (2026-09-28): true when a person's edited estimate replaced the formula, and
+	// what the formula alone would say (rounded; null when it can't run yet). Callers
+	// show "Engine estimated ~X.Xh" alongside an override; the engine estimate is what
+	// `engineEstimateFor` returns for that same line item.
+	overridden?: boolean;
+	formulaHours?: number | null;
 }
 
 /** One line item waiting to be placed, as propose_schedule needs it. */
@@ -99,6 +110,9 @@ export interface CapacitySlot {
 	stationKind: string;
 	date: Date;
 	availableHrs: number;
+	// NEW (2026-09-28): the people working this station that day (planStaffing.ts).
+	// Absent = no roster in use, so jobs are estimated for one person (the old behavior).
+	crewWorkerIds?: string[];
 }
 
 export interface ProposedAssignment {
@@ -113,6 +127,8 @@ export interface ProposedAssignment {
 	// print's wall-clock end, not just on the same-or-later day.
 	startMinuteOfDay: number;
 	estimatedHours: number;
+	// NEW (2026-09-28): the crew the hours were estimated for (empty = one unnamed person).
+	crewWorkerIds: string[];
 }
 
 export interface AtRiskFlag {

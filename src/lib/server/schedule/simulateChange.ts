@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { proposeSchedule } from '$lib/server/engine/proposeSchedule';
 import type { ProposeScheduleResult } from '$lib/server/engine/types';
-import { fetchBacklog, fetchCapacity } from './buildBacklogAndCapacity';
+import { fetchBacklog, fetchStaffedCapacity } from './buildBacklogAndCapacity';
 import { dateRangeSchema } from './types';
 
 /**
@@ -50,7 +50,9 @@ export type SimulateChangeInput = z.infer<typeof simulateChangeSchema>;
  * copy of the real backlog.
  */
 export async function simulateChange(input: SimulateChangeInput): Promise<ProposeScheduleResult> {
-	const [{ backlog, externalDependencies }, capacity] = await Promise.all([fetchBacklog(), fetchCapacity(input.range)]);
+	const { backlog, externalDependencies } = await fetchBacklog();
+	// Staffed from the real backlog (2026-09-28); the hypothetical change reuses that crew.
+	const capacity = await fetchStaffedCapacity(input.range, backlog);
 
 	if (input.type === 'rush_order') {
 		// dueDate arrives as an ISO date string (z.iso.date(), so the tool's advertised

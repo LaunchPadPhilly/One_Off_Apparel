@@ -6,9 +6,10 @@ import {
 	LineItemType,
 	OrderStatus
 } from '../../../../prisma/generated/prisma/enums';
-import { ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
+import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
+import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
 import type { DateRange } from './types';
 
 function startOfToday(): Date {
@@ -76,13 +77,19 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 	const orderIds = [...new Set(lineItems.map((item) => item.orderId))];
 	const siblings = await prisma.lineItem.findMany({
 		where: { orderId: { in: orderIds } },
-		select: { id: true, orderId: true, status: true }
+		select: { id: true, orderId: true, status: true, itemType: true }
 	});
 	const siblingIdsByOrder = new Map<string, string[]>();
+	const decorationIdsByOrder = new Map<string, string[]>();
 	for (const sibling of siblings) {
 		const ids = siblingIdsByOrder.get(sibling.orderId) ?? [];
 		ids.push(sibling.id);
 		siblingIdsByOrder.set(sibling.orderId, ids);
+		if (sibling.itemType === LineItemType.DECORATION) {
+			const decorationIds = decorationIdsByOrder.get(sibling.orderId) ?? [];
+			decorationIds.push(sibling.id);
+			decorationIdsByOrder.set(sibling.orderId, decorationIds);
+		}
 	}
 	const statusById = new Map(siblings.map((sibling) => [sibling.id, sibling.status]));
 
@@ -94,10 +101,14 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 		if (item.itemType === LineItemType.FINISHING) {
 			// The finishing rule (finishingDependencies.ts, 2026-09-28) wins over whatever
 			// an older row has stored: relabel / hang tags / wovens wait on nothing, fold &
-			// bag on everything, matte on its stored decoration.
+			// bag on everything, matte on its linked decoration — or, when it isn't linked to
+			// one, on every design on the order. An unlinked matte stored as "all_siblings"
+			// (imports before this fix) is read the same way: waiting on everything would
+			// include fold & bag, which waits on everything too, a deadlock.
 			const rule = finishingDependencyRule(item.finishingStep);
-			const allSiblings = rule === 'all_siblings' || (rule === 'decoration' && item.dependsOn === ALL_SIBLINGS_DEPENDENCY);
-			if (allSiblings) dependsOnIds = (siblingIdsByOrder.get(item.orderId) ?? []).filter((id) => id !== item.id);
+			const unlinkedMatte = rule === 'decoration' && (item.dependsOn === ALL_DECORATIONS_DEPENDENCY || item.dependsOn === ALL_SIBLINGS_DEPENDENCY);
+			if (rule === 'all_siblings') dependsOnIds = (siblingIdsByOrder.get(item.orderId) ?? []).filter((id) => id !== item.id);
+			else if (unlinkedMatte) dependsOnIds = decorationIdsByOrder.get(item.orderId) ?? [];
 			else if (rule === 'decoration' && item.dependsOn) dependsOnIds = [item.dependsOn];
 		}
 		for (const id of dependsOnIds) {
@@ -120,6 +131,7 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			manualEstimatedHours: item.manualEstimatedHours,
 			otherJobType: item.otherJobType,
 			assignedStationId: item.assignedStationId,
+			estimatedHoursOverride: item.estimatedHoursOverride,
 			// Never null here: the `deadline: { gte: … }` filter above excludes orders
 			// with no deadline yet (they can't be confirmed without one anyway).
 			dueDate: item.order.deadline!,
@@ -194,4 +206,37 @@ export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
 	}
 
 	return [...realSlots, ...defaultSlots];
+}
+
+/**
+ * Who's available to staff stations in a date range (2026-09-28): the active roster
+ * with its certifications on active stations, the days people are out, and people a
+ * human pinned to a station (both set through Claude). Feeds planStaffing.
+ */
+export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInputs> {
+	const from = new Date(range.from);
+	const to = new Date(range.to);
+	const [workers, unavailability, pins] = await Promise.all([
+		prisma.worker.findMany({
+			where: { archivedAt: null },
+			select: { id: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
+		}),
+		prisma.workerUnavailability.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true } }),
+		prisma.staffingPin.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true, stationId: true } })
+	]);
+	return {
+		workers: workers.map((worker) => ({ id: worker.id, stationIds: worker.certifications.map((cert) => cert.stationId) })),
+		unavailable: new Set(unavailability.map((row) => staffingKey(row.workerId, row.date))),
+		pins: new Map(pins.map((row) => [staffingKey(row.workerId, row.date), row.stationId]))
+	};
+}
+
+/**
+ * fetchCapacity() with each (station, day) staffed by planStaffing — the capacity every
+ * engine run should use (2026-09-28). Slots with nobody on them are dropped; with no
+ * roster at all it's the same as fetchCapacity().
+ */
+export async function fetchStaffedCapacity(range: DateRange, backlog: readonly BacklogItem[]): Promise<CapacitySlot[]> {
+	const [capacity, inputs] = await Promise.all([fetchCapacity(range), fetchStaffingInputs(range)]);
+	return planStaffing(backlog, capacity, inputs);
 }
