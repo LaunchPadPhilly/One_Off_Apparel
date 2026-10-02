@@ -124,7 +124,7 @@ function build() {
 	const pwFile = requireEnv('PW_FILE');
 	const urlFile = requireEnv('URL_FILE');
 	const mode = requireEnv('BUILD_MODE');
-	const dbName = process.env.DB_NAME || '__PROJECT_SLUG__';
+	const dbName = process.env.DB_NAME || 'ooa';
 	let user = process.env.DB_USER || '';
 	let rawPassword;
 

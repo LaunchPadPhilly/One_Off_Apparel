@@ -29,6 +29,7 @@
 			point the signed-in redirect in <code>src/routes/+page.server.ts</code> at it.
 		</p>
 		<div class="grid">
+			<NavCard href="/orders" title="Orders" description="Create orders, view estimates, and manage approval gates." />
 			<NavCard href="/settings" title="Settings" description="Your scopes, connected AI clients, and appearance." />
 			{#if data.isAdmin}
 				<NavCard href="/admin" title="Admin" description="Agent tokens, connected apps, activity log, and users." />

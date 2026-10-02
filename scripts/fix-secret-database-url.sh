@@ -13,8 +13,8 @@
 #   repair  Read an existing secret, fix a malformed connection string in place,
 #           and write a new version. Dry run unless --apply.
 #
-#             scripts/fix-secret-database-url.sh repair uat/__PROJECT_SLUG__/app
-#             scripts/fix-secret-database-url.sh repair uat/__PROJECT_SLUG__/app --apply
+#             scripts/fix-secret-database-url.sh repair uat/ooa/app
+#             scripts/fix-secret-database-url.sh repair uat/ooa/app --apply
 #
 # Both modes fix the two faults that have actually broken this project:
 #
@@ -63,7 +63,7 @@ if [ "$SUB" = "build" ]; then
 	ENVIRONMENT="uat"
 	DB_USER=""
 	DB_ENDPOINT=""
-	DB_NAME="__PROJECT_SLUG__"
+	DB_NAME="ooa"
 	OUT_FILE=""
 	MERGE_INTO=""
 	FROM_RDS=0
@@ -143,7 +143,7 @@ if [ "$SUB" = "build" ]; then
 	# Default deliberately outside the repository. An earlier draft defaulted to
 	# the repo root, where `.gitignore`'s .env rules would NOT have matched it —
 	# a password-bearing file one `git add -A` away from being committed.
-	DEST="${OUT_FILE:-${TMPDIR:-/tmp}/__PROJECT_SLUG__-database-url.$ENVIRONMENT}"
+	DEST="${OUT_FILE:-${TMPDIR:-/tmp}/ooa-database-url.$ENVIRONMENT}"
 	install -m 600 /dev/null "$DEST"
 	cat "$URL_FILE" > "$DEST"
 	echo ""

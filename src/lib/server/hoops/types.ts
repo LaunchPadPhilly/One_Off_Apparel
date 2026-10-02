@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
+import { ArtworkApprovalStatus, BlankOrderingStatus, CustomerApprovalStatus } from '../../../../prisma/generated/prisma/enums';
 
 /**
  * Candidate data for one line item, as already extracted from a Hoops export — by
@@ -15,17 +16,35 @@ import { ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
  */
 export const lineItemCandidateBaseSchema = z.object({
 	localId: z.string().min(1),
-	itemType: z.enum(['DECORATION', 'FINISHING']),
+	itemType: z.enum(['DECORATION', 'FINISHING', 'OTHER']),
+	// NEW (2026-09-28): OTHER rows only — the export's own name for a job type the system
+	// doesn't model yet (e.g. "Patch Install"). Kept so a reviewer can assign it.
+	otherJobType: z.string().min(1).nullish(),
 	design: z.string().min(1),
 	printLocation: z.enum(['FRONT', 'BACK', 'LEFT', 'RIGHT']).nullish(),
 	decorationType: z.enum(['SCREEN_PRINT', 'EMBROIDERY', 'DTF', 'DTG']).nullish(),
-	finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG']).nullish(),
+	finishingStep: z.enum(['MATTE', 'RELABEL', 'FOLD_BAG', 'HANG_TAG', 'WOVENS']).nullish(),
+	// NEW (2026-09-21): flat garment vs headwear — decoration-only, meaningful today for
+	// embroidery's estimate_hours formula. See prisma/schema.prisma's
+	// LineItem.garmentStyle comment. `.nullish()` means this field is optional and can
+	// be null/undefined — most existing line items won't have it set yet.
+	garmentStyle: z.enum(['FLAT', 'CAP']).nullish(),
+	// NEW (2026-09-21): only meaningful when garmentStyle above is 'CAP'.
+	capConstruction: z.enum(['STRUCTURED', 'UNSTRUCTURED']).nullish(),
+	// NEW (2026-09-23): finishing-only — MATTE rows use matteSurface, FOLD_BAG rows use
+	// foldBagGarment to pick their formula. See prisma/schema.prisma.
+	matteSurface: z.enum(['FLAT', 'SPECIALTY']).nullish(),
+	foldBagGarment: z.enum(['SS_TEE', 'OTHER']).nullish(),
+	// NEW (2026-09-23): reviewer-entered hours for DTF/DTG, which have no formula.
+	manualEstimatedHours: z.number().positive().max(200).nullish(),
 	// Another line item's `localId` in this same order candidate, or the literal
 	// "all_siblings" sentinel — never a real LineItem.id (none exist yet at import time).
 	dependsOn: z.string().nullish(),
 	weightClass: z.enum(['THIN', 'POLY', 'BULKY']),
 	apparelColor: z.string().min(1),
 	inkColorCount: z.number().int().nonnegative().nullish(),
+	// NEW (2026-09-28): the colors going on the piece, as written (e.g. "109c Yellow, White").
+	decorationColors: z.string().trim().max(300).nullish(),
 	screens: z.number().int().nonnegative().nullish(),
 	stitchCount: z.number().int().nonnegative().nullish(),
 	quantity: z.number().int().positive(),
@@ -34,20 +53,20 @@ export const lineItemCandidateBaseSchema = z.object({
 });
 
 export const lineItemCandidateSchema = lineItemCandidateBaseSchema
-	.refine((item) => (item.itemType === 'DECORATION' ? item.decorationType != null : item.finishingStep != null), {
-		message: 'decorationType is required for DECORATION rows, finishingStep is required for FINISHING rows'
+	.refine((item) => (item.itemType === 'DECORATION' ? item.decorationType != null : item.itemType === 'FINISHING' ? item.finishingStep != null : item.otherJobType != null), {
+		message: 'decorationType is required for DECORATION rows, finishingStep for FINISHING rows, otherJobType for OTHER rows'
 	})
-	.refine((item) => item.itemType !== 'DECORATION' || item.finishingStep == null, {
-		message: 'finishingStep must be null on DECORATION rows'
+	.refine((item) => item.itemType === 'FINISHING' || item.finishingStep == null, {
+		message: 'finishingStep must be null on DECORATION and OTHER rows'
 	})
-	.refine((item) => item.itemType !== 'FINISHING' || item.decorationType == null, {
-		message: 'decorationType must be null on FINISHING rows'
+	.refine((item) => item.itemType === 'DECORATION' || item.decorationType == null, {
+		message: 'decorationType must be null on FINISHING and OTHER rows'
 	})
+	// No "FINISHING rows must set dependsOn" rule any more (2026-09-28): relabel / hang
+	// tags / wovens wait on nothing, and importHoopsExport.ts decides every finishing
+	// row's real dependency itself (finishingDependencies.ts), whatever is sent here.
 	.refine((item) => item.itemType !== 'DECORATION' || item.dependsOn == null, {
 		message: 'dependsOn is finishing-rows-only — see CLAUDE.md'
-	})
-	.refine((item) => item.itemType !== 'FINISHING' || (item.dependsOn != null && item.dependsOn.length > 0), {
-		message: 'FINISHING rows must set dependsOn (another localId, or "all_siblings") or they can never be unlocked'
 	});
 
 export type LineItemCandidate = z.infer<typeof lineItemCandidateSchema>;
@@ -55,10 +74,15 @@ export type LineItemCandidate = z.infer<typeof lineItemCandidateSchema>;
 export const orderCandidateSchema = z.object({
 	hoopsOrderId: z.string().min(1),
 	customerName: z.string().min(1),
-	externalShipDate: z.iso.date(),
-	internalDueDate: z.iso.date(),
+	// Null when the export has no Deadline (2026-09-28): the order still imports, and
+	// the order page asks for the ship date before it can be confirmed. Nothing about an
+	// incomplete export should stop it reaching Orders for review.
+	externalShipDate: z.iso.date().nullable(),
+	internalDueDate: z.iso.date().nullable(),
 	importedBy: z.string().min(1),
-	lineItems: z.array(lineItemCandidateSchema).min(1),
+	// May be empty (2026-09-28): an order whose rows all failed to parse still imports,
+	// with each dropped row listed in confidenceFlags for the reviewer.
+	lineItems: z.array(lineItemCandidateSchema),
 	// Free-text notes on anything Claude was unsure about reading this order — not a
 	// schema column, just carried through to the tool's returned confidence_flags[]
 	// (and into the audit log) for the human confirming the import to see.
@@ -77,12 +101,49 @@ export const ALL_SIBLINGS = ALL_SIBLINGS_DEPENDENCY;
 export const orderCorrectionSchema = z
 	.object({
 		customerName: z.string().min(1),
+		// internalDueDate defaults to 14 days before externalShipDate (see
+		// internalDueDate.ts) whenever externalShipDate changes without an explicit
+		// internalDueDate alongside it — but a human reviewing the order can still
+		// override it directly; the default is a starting point, not a lock. See
+		// updateOrderFields.ts / confirmImport.ts for exactly how the two interact.
 		externalShipDate: z.iso.date(),
-		internalDueDate: z.iso.date()
+		internalDueDate: z.iso.date(),
+		// Free-text, human-entered only — e.g. why a job ran late. See CLAUDE.md.
+		notes: z.string(),
+		// NEW: the pre-production approval gates buildBacklogAndCapacity.ts's
+		// fetchBacklog() requires (adopted from the schedule-creation-workflow branch).
+		// Not part of the Hoops import candidate — these aren't read off the export,
+		// they're set afterward as the shop actually orders blanks / gets customer
+		// sign-off. Without a way to set them, no order could ever reach the schedule
+		// backlog through the UI.
+		blankOrderingStatus: z.enum(BlankOrderingStatus),
+		customerApprovalStatus: z.enum(CustomerApprovalStatus)
 	})
 	.partial();
 
-export const lineItemCorrectionSchema = lineItemCandidateBaseSchema.omit({ localId: true, dependsOn: true }).partial();
+// This line builds a "correction" schema by starting from the base schema above and
+// removing two fields that don't make sense to edit after the fact (localId,
+// dependsOn), then making everything else optional (.partial()) so a correction can
+// touch just one field without having to resupply every other one. Because it's
+// DERIVED from lineItemCandidateBaseSchema rather than a separate hand-written list of
+// fields, the new garmentStyle/capConstruction fields added above automatically became
+// editable here too — nothing extra had to be added in this specific line.
+export const lineItemCorrectionSchema = lineItemCandidateBaseSchema
+	.omit({ localId: true, dependsOn: true })
+	.extend({
+		// NEW: same reasoning as Order.blankOrderingStatus/customerApprovalStatus above —
+		// the artwork-approval gate, but per decoration line item rather than per order.
+		// Null on finishing rows (checked by the caller, not enforced here — same pattern
+		// updateLineItemFields already uses for every other field).
+		artworkApprovalStatus: z.enum(ArtworkApprovalStatus),
+		// NEW (2026-09-28): OTHER rows only — the station a reviewer says this job runs
+		// on. updateLineItemFields checks it's a real, active station.
+		assignedStationId: z.string().min(1),
+		// NEW (2026-09-28): a person's corrected estimate for this job (one-person hours);
+		// null clears it back to the formula.
+		estimatedHoursOverride: z.number().positive().max(200).nullable()
+	})
+	.partial();
 
 export type OrderCorrection = z.infer<typeof orderCorrectionSchema>;
 export type LineItemCorrection = z.infer<typeof lineItemCorrectionSchema>;

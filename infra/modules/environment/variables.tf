@@ -98,7 +98,7 @@ variable "repository" {
 variable "ecr_repository_prefix" {
   description = "ECR repository name prefix (the `name_prefix` of infra/global). Only used for the parked placeholder image URI."
   type        = string
-  default     = "__PROJECT_SLUG__"
+  default     = "ooa"
 }
 
 variable "web_secret_keys" {

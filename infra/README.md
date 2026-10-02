@@ -5,7 +5,7 @@ them in providers or backends.
 
 ```bash
 export AWS_PROFILE=<operator-profile>
-export AWS_REGION=__AWS_REGION__
+export AWS_REGION=us-east-1
 ```
 
 ## Roots (apply in this order the first time)

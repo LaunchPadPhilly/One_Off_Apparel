@@ -1,4 +1,4 @@
-# __PROJECT_DISPLAY_NAME__
+# One Off Apparel
 
 Internal data platform: staff sign in with Google Workspace, an admin grants each person
 explicit data scopes, and AI clients reach the same data through a read-only MCP server
