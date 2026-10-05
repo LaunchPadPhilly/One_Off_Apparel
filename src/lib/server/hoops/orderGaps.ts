@@ -83,20 +83,8 @@ export function computeOrderGaps(
 			target: { level: 'order', field: 'deadline' }
 		});
 	}
-	if (order.blankOrderingStatus !== 'RECEIVED') {
-		questions.push({
-			key: 'blanks',
-			question: 'Have blanks for this order been ordered, and have they arrived yet?',
-			target: { level: 'order', field: 'blankOrderingStatus' }
-		});
-	}
-	if (order.customerApprovalStatus !== 'APPROVED') {
-		questions.push({
-			key: 'customer-approval',
-			question: 'Has the customer approved this order yet?',
-			target: { level: 'order', field: 'customerApprovalStatus' }
-		});
-	}
+	// No blanks or customer-approval question (2026-10-02): blanks are always assumed
+	// ordered and the customer's approval assumed — the work doesn't wait on either.
 
 	// Two line items easily share the exact same missing-formula reason (e.g. two
 	// "Matte Finish" rows, same station, same "no formula yet" message) — counted by

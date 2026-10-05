@@ -37,6 +37,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 					decorationType: true,
 					finishingStep: true,
 					inkColorCount: true,
+					decorationColors: true,
 					screens: true,
 					stitchCount: true,
 					quantity: true,

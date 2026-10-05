@@ -2,6 +2,16 @@ import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface
 import { expectedStationFor } from '$lib/schedule/expectedStation';
 import { currentFormulas, maybeRefreshFormulas } from './formulaSettings';
 import type { EstimateHoursInput, EstimateHoursResult } from './types';
+import { countDecorationColors } from './decorationColors';
+
+/**
+ * Color count for screen print / embroidery. Never a question (2026-10-02: assume what
+ * the PDF says): the stored count if set, else the colors the PDF's "Color(s)" column
+ * lists, else 1. Editing the count on the order page still overrides it.
+ */
+function colorCountFor(item: EstimateHoursInput): number {
+	return item.inkColorCount ?? countDecorationColors(item.decorationColors) ?? 1;
+}
 
 /**
  * Base for both "can't estimate this job" error classes — proposeSchedule.ts catches
@@ -92,7 +102,7 @@ function estimateScreenPrintAutoHours(item: EstimateHoursInput): EstimateHoursRe
 	// won't show as "pending" on the Orders page. Open question whether this should
 	// throw MissingLineItemDataError instead, like embroidery does.
 	const screens = item.screens ?? 0;
-	const inkColorCount = item.inkColorCount ?? 0;
+	const inkColorCount = colorCountFor(item);
 	const sp = currentFormulas().screenPrint;
 
 	// Setup time in minutes: per-screen + per-ink-color + a fixed baseline. All three
@@ -172,8 +182,7 @@ function estimateEmbroideryHours(item: EstimateHoursInput): EstimateHoursResult 
 	// throw a clear, specific error saying exactly what's missing — instead of, say,
 	// silently treating a missing value as 0 (which would produce a wrong, misleadingly
 	// confident-looking answer).
-	const inkColorCount = item.inkColorCount; // "Y" — number of thread colors
-	if (inkColorCount == null) throw new MissingLineItemDataError('ink_color_count (thread color count)', 'inkColorCount');
+	const inkColorCount = colorCountFor(item); // "Y" — number of thread colors
 	const stitchCount = item.stitchCount; // "X" — total stitches in the design
 	if (stitchCount == null) throw new MissingLineItemDataError('stitch_count', 'stitchCount');
 
