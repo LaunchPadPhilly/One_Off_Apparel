@@ -65,7 +65,10 @@ export async function stopAssignment(assignmentId: string, stoppedBy: string) {
 			where: {
 				lineItemId: assignment.lineItemId,
 				id: { not: assignmentId },
-				status: { not: ScheduleAssignmentStatus.COMPLETE }
+				// Only committed work still to do counts. A PROPOSED row (a draft plan not
+				// yet approved) isn't real work, and counting it would stop check_completion
+				// from ever running for this line item.
+				status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] }
 			}
 		});
 

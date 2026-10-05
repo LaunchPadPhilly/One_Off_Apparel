@@ -99,7 +99,9 @@ export function proposeSchedule(
 ): ProposeScheduleResult {
 	const slots = new Map<string, SlotState>();
 	for (const slot of capacity) {
-		slots.set(slotKey(slot.stationId, slot.date), { slot: { ...slot }, cursor: SHIFT_START_MIN, placedCount: 0, families: new Set() });
+		// A day with committed work kept in place starts its free time after that work.
+		const cursor = Math.max(SHIFT_START_MIN, slot.busyUntilMin ?? SHIFT_START_MIN);
+		slots.set(slotKey(slot.stationId, slot.date), { slot: { ...slot }, cursor, placedCount: slot.committedJobCount ?? 0, families: new Set() });
 	}
 
 	const assignments: ProposedAssignment[] = [];
@@ -136,7 +138,13 @@ export function proposeSchedule(
 		const [item] = pending.splice(index, 1);
 		const dependsOnIds = item.dependsOnIds ?? [];
 
-		const blockedBy = dependsOnIds.filter((id) => unplaced.has(id) || (!inBacklog.has(id) && externalDependencies.get(id) !== 'complete'));
+		// A dependency outside this backlog is fine if it's done, or already on the
+		// committed schedule (then this job waits for its end time, below).
+		const externalOk = (id: string) => {
+			const state = externalDependencies.get(id);
+			return state === 'complete' || (typeof state === 'object' && state !== null);
+		};
+		const blockedBy = dependsOnIds.filter((id) => unplaced.has(id) || (!inBacklog.has(id) && !externalOk(id)));
 		if (blockedBy.length > 0) {
 			flag(
 				item,
@@ -164,7 +172,8 @@ export function proposeSchedule(
 		// placed in this run (dependencies already complete impose no constraint).
 		let earliest: TimePoint | null = null;
 		for (const id of dependsOnIds) {
-			const end = placedEnd.get(id);
+			const external = externalDependencies.get(id);
+			const end = placedEnd.get(id) ?? (typeof external === 'object' ? external.endsAt : undefined);
 			if (end) earliest = earliest ? laterOf(earliest, end) : end;
 		}
 

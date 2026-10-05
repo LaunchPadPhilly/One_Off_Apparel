@@ -1,6 +1,7 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import { requireScopePage } from '$lib/server/auth/guards';
 import { deleteDraft, getDraft } from '$lib/server/schedule/draft';
+import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { checkFinisherPlacement, repackDraftDays } from '$lib/server/schedule/draftDependencies';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
@@ -379,6 +380,7 @@ export const actions: Actions = {
 			where: { id },
 			select: {
 				scheduleDraftId: true,
+				status: true,
 				stationId: true,
 				date: true,
 				lineItemId: true,
@@ -390,6 +392,10 @@ export const actions: Actions = {
 		});
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
+		// An approved job is on the live schedule; changing it here would skip the
+		// approval gate. Changes go through a new proposed plan instead.
+		if (existing.status !== ScheduleAssignmentStatus.PROPOSED)
+			return fail(409, { message: 'This job is already approved, so it can’t be changed here. Propose a new plan to move it.' });
 
 		const station = await findActiveStation(stationName);
 		if (!station) return fail(400, { message: 'That station no longer exists (it may have been archived in Settings → Stations). Reload the board.' });
@@ -444,10 +450,14 @@ export const actions: Actions = {
 		// Only allow removal of assignments belonging to this draft.
 		const existing = await prisma.scheduleAssignment.findUnique({
 			where: { id },
-			select: { scheduleDraftId: true, stationId: true, date: true }
+			select: { scheduleDraftId: true, status: true, stationId: true, date: true }
 		});
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
+		// An approved job is on the live schedule; changing it here would skip the
+		// approval gate. Changes go through a new proposed plan instead.
+		if (existing.status !== ScheduleAssignmentStatus.PROPOSED)
+			return fail(409, { message: 'This job is already approved, so it can’t be changed here. Propose a new plan to move it.' });
 
 		const result = await prisma.$transaction(async (tx) => {
 			const removed = await tx.scheduleAssignment.findUnique({ where: { id }, select: { estimatedHours: true, startMinuteOfDay: true } });
@@ -484,6 +494,22 @@ export const actions: Actions = {
 			data: { displayTitle: nextTitle, colorHex: nextColor }
 		});
 		return { success: true as const };
+	},
+
+	// The second human approval gate, from the board (2026-10-05): approves every
+	// proposed job in this draft — the same commitDraft() the commit_schedule MCP tool
+	// uses, so moved jobs replace their old slots exactly as they do from chat.
+	approveDraft: async ({ params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		try {
+			const result = await commitDraft(params.id, user.email);
+			return { approved: true as const, approvedCount: result.assignments.length, replacedCount: result.replacedCount };
+		} catch (err) {
+			if (err instanceof CommitScheduleError) return fail(409, { message: err.message });
+			throw err;
+		}
 	},
 
 	deleteDraft: async ({ params, locals, url }) => {

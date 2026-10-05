@@ -10,7 +10,15 @@
 	import { deserialize } from '$app/forms';
 	import type { PageProps } from './$types';
 
-	let { data }: PageProps = $props();
+	let { data, form }: PageProps = $props();
+
+	// Proposed jobs still waiting for a person's yes — what Approve would make official.
+	const proposedCount = $derived(data.assignments.filter((a) => a.status === 'PROPOSED').length);
+
+	function confirmApprove(event: SubmitEvent) {
+		const message = `Approve ${proposedCount} job${proposedCount === 1 ? '' : 's'}? They go on the live schedule, and any job this plan moved leaves its old slot.`;
+		if (!confirm(message)) event.preventDefault();
+	}
 
 	let search = $state('');
 
@@ -961,6 +969,14 @@
 		</div>
 		<div class="header-actions">
 			<span class="badge">{data.draft.status}</span>
+			<!-- The second human approval gate from the board — same commit path as
+			     Claude's commit_schedule tool (commitSchedule.ts). Full-page POST so the
+			     page reloads with the approved state. -->
+			{#if proposedCount > 0}
+				<form method="POST" action="?/approveDraft" onsubmit={confirmApprove}>
+					<button type="submit" class="button">Approve {proposedCount} job{proposedCount === 1 ? '' : 's'}</button>
+				</form>
+			{/if}
 			<!-- Full-page form POST rather than a fetch: the delete action
 			     redirects to /schedule, and letting SvelteKit follow the redirect
 			     natively is simpler than reconstructing the navigation client-side.
@@ -971,6 +987,14 @@
 			</form>
 		</div>
 	</div>
+
+	{#if form && 'approved' in form && form.approved}
+		<p class="auto-propose-feedback">
+			Approved {form.approvedCount} job{form.approvedCount === 1 ? '' : 's'} — they're on the live schedule now{form.replacedCount > 0 ? `, replacing ${form.replacedCount} old slot${form.replacedCount === 1 ? '' : 's'}` : ''}.
+		</p>
+	{:else if form && 'message' in form && form.message}
+		<p class="auto-propose-feedback auto-propose-feedback--warn">{form.message}</p>
+	{/if}
 
 	<!-- One-time feedback right after "Create automatic schedule" — see
 	     proposeIntoNewDraft.ts / the ?placed=&atRisk= redirect. Not persisted; only

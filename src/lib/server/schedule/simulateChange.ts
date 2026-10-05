@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { proposeSchedule } from '$lib/server/engine/proposeSchedule';
 import type { ProposeScheduleResult } from '$lib/server/engine/types';
-import { fetchBacklog, fetchStaffedCapacity } from './buildBacklogAndCapacity';
+import { buildSchedulingRun } from './committedWork';
 import { dateRangeSchema } from './types';
 
 /**
@@ -52,16 +52,17 @@ export type SimulateChangeInput = z.infer<typeof simulateChangeSchema>;
  * Checks a "what if" against real capacity without changing anything — no database
  * write of any kind, ever (unlike propose_schedule, which persists drafts). Reuses the
  * same pure engine function propose_schedule does, against a hypothetically-modified
- * copy of the real backlog.
+ * copy of the real backlog. Like a real plan (2026-10-05), it keeps started work in
+ * place and lets approved, not-started jobs in the window move to make room — the
+ * client's rush-order rule — so the answer matches what propose_schedule would do.
  *
  * @returns the engine's full result (placements, at-risk flags, reasoning) for the
  *   hypothetical backlog — nothing is saved
  * @throws Error for `move_job` when the line item isn't in the current backlog
  */
 export async function simulateChange(input: SimulateChangeInput): Promise<ProposeScheduleResult> {
-	const { backlog, externalDependencies } = await fetchBacklog();
 	// Staffed from the real backlog (2026-09-28); the hypothetical change reuses that crew.
-	const capacity = await fetchStaffedCapacity(input.range, backlog);
+	const { backlog, externalDependencies, capacity } = await buildSchedulingRun(input.range, input.range);
 
 	if (input.type === 'rush_order') {
 		// dueDate arrives as an ISO date string (z.iso.date(), so the tool's advertised

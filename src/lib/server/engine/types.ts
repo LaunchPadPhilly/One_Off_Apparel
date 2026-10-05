@@ -109,7 +109,15 @@ export interface BacklogItem extends EstimateHoursInput {
  *  either it's already done (no constraint), or it can't be scheduled yet (so its
  *  dependents can't be either). A dependency id that's in neither the backlog nor this
  *  map is treated as not schedulable. */
-export type ExternalDependencyState = 'complete' | 'not_schedulable';
+export type ExternalDependencyState = 'complete' | 'not_schedulable' | ScheduledDependency;
+
+/** A dependency that's already on the committed schedule and stays where it is during
+ *  this run (2026-10-05 re-planning): started, or approved outside the days being
+ *  re-planned. Its dependents are placed after `endsAt`, like any placed print. */
+export interface ScheduledDependency {
+	/** When it ends: the day (UTC midnight, in ms) and the minute of that day. */
+	endsAt: { dayMs: number; minute: number };
+}
 
 /** One day's open capacity at one station, as propose_schedule needs it. */
 export interface CapacitySlot {
@@ -124,6 +132,12 @@ export interface CapacitySlot {
 	// NEW (2026-09-28): the people working this station that day (planStaffing.ts).
 	// Absent = no roster in use, so jobs are estimated for one person (the old behavior).
 	crewWorkerIds?: string[];
+	// NEW (2026-10-05): work already committed to this slot that this run keeps in
+	// place. `availableHrs` should already have those hours taken out; these say where
+	// the day's free time starts (minute of day) and how many jobs are already queued,
+	// so new jobs go after them. Absent = an empty day starting at shift open.
+	busyUntilMin?: number;
+	committedJobCount?: number;
 }
 
 /** One job the engine placed: which station, which day, when, and for how long. */

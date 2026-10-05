@@ -190,10 +190,13 @@ export async function importHoopsExport(orders: readonly OrderCandidate[]): Prom
 			}
 
 			orderIds.push(order.id);
-			if (orderCandidate.confidenceFlags) confidenceFlags.push(...orderCandidate.confidenceFlags);
-
-			const createdLineItems = await createLineItemsForOrder(tx, order.id, orderCandidate.lineItems, confidenceFlags);
+			// This order's own flags: the extraction's, plus any the import adds while
+			// creating line items ("1 color assumed", "matte not linked"). All of them go
+			// into the audit entry below, which is where the order page reads them from.
+			const orderFlags = [...(orderCandidate.confidenceFlags ?? [])];
+			const createdLineItems = await createLineItemsForOrder(tx, order.id, orderCandidate.lineItems, orderFlags);
 			lineItems.push(...createdLineItems);
+			confidenceFlags.push(...orderFlags);
 
 			await tx.domainAuditLog.create({
 				data: {
@@ -204,7 +207,7 @@ export async function importHoopsExport(orders: readonly OrderCandidate[]): Prom
 					diff: {
 						hoopsOrderId: orderCandidate.hoopsOrderId,
 						lineItemCount: orderCandidate.lineItems.length,
-						confidenceFlags: orderCandidate.confidenceFlags ?? []
+						confidenceFlags: orderFlags
 					}
 				}
 			});
