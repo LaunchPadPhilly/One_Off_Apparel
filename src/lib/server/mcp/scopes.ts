@@ -1,3 +1,8 @@
+/**
+ * MCP scopes: the permissions a caller needs to use a tool (each tool in mcp/tools.ts
+ * names one `requiredScope`). Used by handler.ts (the gate), the OAuth authorize/token
+ * routes (parsing what a client asks for) and the admin UI (granting/revoking).
+ */
 import { prisma } from '$lib/server/prisma';
 import type { McpScope } from '../../../../prisma/generated/prisma/enums.ts';
 
@@ -26,10 +31,12 @@ export const allScopes = Object.keys(scopeToWire) as McpScope[];
 /** The scope every new user receives on first login. Keep it the least sensitive one. */
 export const defaultScope: McpScope = 'DATA_READ';
 
+/** Storage form → wire form, e.g. `SCHEDULE_READ` → `'schedule:read'`. */
 export function scopeToWireFormat(scope: McpScope) {
 	return scopeToWire[scope];
 }
 
+/** Type guard: true when `value` is a storage-form scope name such as `'SCHEDULE_READ'`. */
 export function isMcpScope(value: unknown): value is McpScope {
 	return typeof value === 'string' && value in scopeToWire;
 }
@@ -43,6 +50,8 @@ export function parseScopeString(raw: string): McpScope[] {
 	return [...new Set(scopes)];
 }
 
+/** The scopes a user is granted right now (unrevoked McpUserScopeGrant rows). handler.ts
+ *  intersects this with an OAuth token's scopes on every request. */
 export async function getActiveScopes(userId: string) {
 	const grants = await prisma.mcpUserScopeGrant.findMany({
 		where: { userId, revokedAt: null },

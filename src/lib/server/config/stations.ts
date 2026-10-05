@@ -15,8 +15,15 @@ import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/en
  * `kind` (which estimate_hours formula the station runs) is fixed at creation — a job
  * already placed on a station was placed there *because* of its kind, so changing it
  * would silently invalidate the board's row restriction. Archive and re-create instead.
+ *
+ * Called from the admin-only Stations screen (src/routes/settings/+page.server.ts,
+ * `?screen=stations`), which calls `requireAdminApi` before anything here — these
+ * functions do no permission check of their own. Every change writes a DomainAuditLog row
+ * in the same transaction.
  */
 
+/** A refusal whose message is written for the admin (e.g. a duplicate name); the
+ *  settings page shows it as-is. */
 export class StationConfigError extends Error {}
 
 /** Assignment statuses that mean "this station still has live work on it". */
@@ -24,18 +31,22 @@ const OPEN_ASSIGNMENT_STATUSES = [ScheduleAssignmentStatus.PROPOSED, ScheduleAss
 
 const labelSchema = z.string().trim().min(1, 'Name is required.').max(60, 'Name must be 60 characters or fewer.');
 
+/** Form input for a new station. `kind` must be one of STATION_KINDS. */
 export const createStationSchema = z.object({
 	label: labelSchema,
 	kind: z.string().refine(isStationKind, 'Pick what kind of station this is.'),
 	autoSchedule: z.boolean()
 });
 
+/** Form input for editing a station. No `kind` — it's fixed at creation (see above). */
 export const updateStationSchema = z.object({
 	id: z.string().min(1),
 	label: labelSchema,
 	autoSchedule: z.boolean()
 });
 
+/** Every station, archived included, in board order, with how many active people are
+ *  certified on it and how many open (proposed/approved/in-progress) jobs it has. */
 export async function listStations() {
 	const [stations, openCounts] = await Promise.all([
 		prisma.station.findMany({
@@ -60,6 +71,7 @@ export async function listStations() {
 	}));
 }
 
+/** The "kind" dropdown's options for the create form. */
 export const stationKindOptions = STATION_KINDS.map((kind) => ({ value: kind.key, label: kind.label, category: kind.category }));
 
 /** Case-insensitive: two active stations both called "Screen Print Auto" would make
@@ -72,6 +84,7 @@ async function assertLabelFree(tx: Pick<typeof prisma, 'station'>, label: string
 	if (clash) throw new StationConfigError(`There's already an active station called "${label}".`);
 }
 
+/** "Screen Print & Wash" → "screen_print_and_wash"; falls back to "station" if nothing is left. */
 function slugify(label: string): string {
 	return (
 		label
@@ -82,6 +95,8 @@ function slugify(label: string): string {
 	);
 }
 
+/** Adds a station and returns the new row. Throws StationConfigError if an active
+ *  station already has that label. */
 export async function createStation(input: z.infer<typeof createStationSchema>, actor: string) {
 	return prisma.$transaction(async (tx) => {
 		await assertLabelFree(tx, input.label);
@@ -110,10 +125,13 @@ export async function createStation(input: z.infer<typeof createStationSchema>, 
 	});
 }
 
+/** Renames a station and/or toggles `autoSchedule`; returns the updated row. Throws
+ *  StationConfigError if it doesn't exist or the new label clashes with an active one. */
 export async function updateStation(input: z.infer<typeof updateStationSchema>, actor: string) {
 	return prisma.$transaction(async (tx) => {
 		const existing = await tx.station.findUnique({ where: { id: input.id } });
 		if (!existing) throw new StationConfigError('Station not found.');
+		// An archived station's label is only checked for clashes when it's restored.
 		if (!existing.archivedAt) await assertLabelFree(tx, input.label, input.id);
 
 		const updated = await tx.station.update({ where: { id: input.id }, data: { label: input.label, autoSchedule: input.autoSchedule } });
@@ -130,7 +148,9 @@ export async function updateStation(input: z.infer<typeof updateStationSchema>, 
 	});
 }
 
-/** Swap with the neighbouring active station above/below — the board's row order. */
+/** Swap with the neighbouring active station above/below — the board's row order.
+ *  Already at the top/bottom → does nothing. Throws StationConfigError if `id` isn't an
+ *  active station. */
 export async function moveStation(id: string, direction: 'up' | 'down', actor: string) {
 	return prisma.$transaction(async (tx) => {
 		const stations = await tx.station.findMany({ where: { archivedAt: null }, orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }], select: { id: true } });
@@ -153,7 +173,9 @@ export async function moveStation(id: string, direction: 'up' | 'down', actor: s
 /**
  * "Delete". Refused while the station still has proposed/approved/in-progress work,
  * because that work would vanish from the board without being done or moved — the
- * admin moves or removes it first (a draft can simply be deleted).
+ * admin moves or removes it first (a draft can simply be deleted). Throws
+ * StationConfigError (naming the drafts involved) when refused, or if the station is
+ * missing or already archived.
  */
 export async function archiveStation(id: string, actor: string) {
 	return prisma.$transaction(async (tx) => {
@@ -166,10 +188,12 @@ export async function archiveStation(id: string, actor: string) {
 			select: { scheduleDraft: { select: { name: true } } }
 		});
 		if (open.length > 0) {
+			// Assignments with no draft are on the live schedule (approved / in progress, or
+			// the propose_schedule MCP tool's un-drafted proposals).
 			const drafts = [...new Set(open.map((row) => row.scheduleDraft?.name).filter((name): name is string => Boolean(name)))];
-			const where = drafts.length > 0 ? ` (in ${drafts.map((name) => `"${name}"`).join(', ')}${open.some((row) => !row.scheduleDraft) ? ' and the live schedule' : ''})` : ' on the live schedule';
+			const location = drafts.length > 0 ? ` (in ${drafts.map((name) => `"${name}"`).join(', ')}${open.some((row) => !row.scheduleDraft) ? ' and the live schedule' : ''})` : ' on the live schedule';
 			throw new StationConfigError(
-				`${station.label} still has ${open.length} scheduled job${open.length === 1 ? '' : 's'}${where}. Move or remove ${open.length === 1 ? 'it' : 'them'} first, then remove the station.`
+				`${station.label} still has ${open.length} scheduled job${open.length === 1 ? '' : 's'}${location}. Move or remove ${open.length === 1 ? 'it' : 'them'} first, then remove the station.`
 			);
 		}
 
@@ -178,6 +202,8 @@ export async function archiveStation(id: string, actor: string) {
 	});
 }
 
+/** Un-archives a station (no-op if it isn't archived). Throws StationConfigError if it's
+ *  missing or an active station has since taken its label. */
 export async function restoreStation(id: string, actor: string) {
 	return prisma.$transaction(async (tx) => {
 		const station = await tx.station.findUnique({ where: { id } });

@@ -1,3 +1,8 @@
+/**
+ * The Production Board's "Stop" button (routes/schedule/+page.server.ts): finishes an
+ * IN_PROGRESS assignment, records how long it really took (an Actual row), and runs
+ * check_completion when it was the line item's last open assignment.
+ */
 import { prisma } from '$lib/server/prisma';
 import { checkCompletion } from '$lib/server/engine/checkCompletion';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
@@ -16,6 +21,9 @@ import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/en
  * than this transaction does (ScheduleAssignment, Actual), so there's no correctness
  * reason to force them atomic, and keeping them separate avoids relying on
  * cross-transaction lock behavior between two independent `prisma.$transaction` calls.
+ *
+ * @returns the updated (COMPLETE) assignment
+ * @throws Error if the assignment doesn't exist, isn't IN_PROGRESS, or has no startedAt
  */
 export async function stopAssignment(assignmentId: string, stoppedBy: string) {
 	const { updated, lineItemId, isLastForLineItem } = await prisma.$transaction(async (tx) => {

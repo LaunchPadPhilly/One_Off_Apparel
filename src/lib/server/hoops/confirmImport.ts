@@ -6,18 +6,27 @@ import { lineItemCorrectionSchema, orderCorrectionSchema, type ImportCorrections
 /**
  * Locks a Hoops import in as real once a person has checked it — the first of
  * CLAUDE.md's two human approval gates. Applies any corrections, then flips the given
- * orders from needs_review to confirmed. Never touches LineItem.status: propose_schedule's
- * backlog is filtered on LineItem.status alone (see CLAUDE.md's engine section — "backlog
- * only ever contains status: needs_review"), so whatever builds that backlog must also
- * check the parent Order is confirmed. That's this function's caller's job, not this one's.
+ * orders from needs_review to confirmed. Never touches LineItem.status: the scheduling
+ * backlog (fetchBacklog() in buildBacklogAndCapacity.ts) checks the parent Order is
+ * CONFIRMED itself, so flipping Order.status here is all it takes to make the line items
+ * schedulable.
+ *
+ * Called from the order page's "Confirm import" action (src/routes/orders/[id]/+page.server.ts)
+ * and the confirm_import MCP tool (src/lib/server/mcp/tools.ts) — both go through this
+ * same gate.
  *
  * Note: CLAUDE.md's tool signature is `confirm_import(order_ids[], corrections?)` — no
- * explicit confirmer identity, unlike `commit_schedule(assignment_ids[], approved_by)`.
- * That's presumably because at the MCP-tool layer the authenticated principal making the
- * call *is* the confirming human, so there's nothing to pass explicitly. This module has
- * no request-scoped principal (it's not wired into mcp/tools.ts — see importHoopsExport.ts
- * for why), so `confirmedBy` is a required parameter here; thread the caller's identity
- * through it once that wiring exists.
+ * explicit confirmer identity, unlike `commit_schedule(assignment_ids[], approved_by)`,
+ * because at the MCP-tool layer the authenticated principal making the call *is* the
+ * confirming human. This module has no request-scoped principal of its own, so each
+ * caller passes that identity in as `confirmedBy`.
+ *
+ * @param orderIds - database ids of the orders to confirm (all must be needs_review)
+ * @param confirmedBy - who is confirming, for the audit log
+ * @param corrections - optional field edits applied just before the check (see types.ts)
+ * @throws Error if an order id doesn't exist, isn't needs_review, or still has open
+ *         blocking items (orderGaps.ts) after corrections. The whole transaction rolls
+ *         back, so corrections aren't saved either.
  */
 export async function confirmImport(orderIds: readonly string[], confirmedBy: string, corrections?: ImportCorrections): Promise<void> {
 	if (orderIds.length === 0) return;
@@ -63,9 +72,9 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 			});
 		}
 
-		// NEW (2026-09-23): an order is only confirmable once it's fully valid — every
-		// line item estimable, blanks received, customer approved, all artwork approved
-		// (orderGaps.ts' blockingCount). Checked here, after corrections are applied and
+		// NEW (2026-09-23): an order is only confirmable once it's fully valid — a
+		// deadline set and every line item estimable (orderGaps.ts' blockingCount; blanks,
+		// customer approval and artwork are assumed done and no longer counted). Checked here, after corrections are applied and
 		// inside the same transaction, so neither the order page nor the confirm_import
 		// MCP tool can confirm around it.
 		const gapsByOrder = await fetchOrderGaps(orderIds, tx);

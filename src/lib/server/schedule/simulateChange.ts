@@ -1,3 +1,8 @@
+/**
+ * The `simulate_change` MCP tool's implementation (registered in mcp/tools.ts): answers
+ * "what if?" questions (a rush order, a moved due date) by running the real engine on a
+ * modified copy of the backlog. Key rule: it never writes to the database.
+ */
 import { z } from 'zod';
 import { proposeSchedule } from '$lib/server/engine/proposeSchedule';
 import type { ProposeScheduleResult } from '$lib/server/engine/types';
@@ -34,7 +39,7 @@ export const simulateChangeSchema = z.discriminatedUnion('type', [
 	z.object({
 		type: z.literal('move_job'),
 		// An existing (real) backlog line item, with a hypothetical due date in place of
-		// its real order's internal_due_date — "what if this needs to move to <date>?"
+		// its real order's `deadline` — "what if this needs to move to <date>?"
 		lineItemId: z.string(),
 		hypotheticalDueDate: z.iso.date(),
 		range: dateRangeSchema
@@ -48,6 +53,10 @@ export type SimulateChangeInput = z.infer<typeof simulateChangeSchema>;
  * write of any kind, ever (unlike propose_schedule, which persists drafts). Reuses the
  * same pure engine function propose_schedule does, against a hypothetically-modified
  * copy of the real backlog.
+ *
+ * @returns the engine's full result (placements, at-risk flags, reasoning) for the
+ *   hypothetical backlog — nothing is saved
+ * @throws Error for `move_job` when the line item isn't in the current backlog
  */
 export async function simulateChange(input: SimulateChangeInput): Promise<ProposeScheduleResult> {
 	const { backlog, externalDependencies } = await fetchBacklog();

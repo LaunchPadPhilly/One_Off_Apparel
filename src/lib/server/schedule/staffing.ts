@@ -12,17 +12,26 @@ import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/en
  * commits without a human).
  *
  * People and stations are matched by name, the way someone says them in chat.
+ *
+ * Backs the get_staffing, set_worker_availability and set_worker_station MCP tools
+ * (registered in mcp/tools.ts).
  */
 
-// A McpUserError so its message (written for the user) reaches Claude as-is.
+/**
+ * Any staffing problem the user can fix (unknown name, not certified, range too long…).
+ * A McpUserError so its message (written for the user) reaches Claude as-is.
+ */
 export class StaffingError extends McpUserError {}
 
+// Longest from–to range (in days) one call may cover.
 const MAX_RANGE_DAYS = 62;
 
 const isoDate = z.iso.date();
 
+/** Input for get_staffing: an inclusive "YYYY-MM-DD" range. */
 export const getStaffingSchema = z.object({ from: isoDate, to: isoDate });
 
+/** Input for set_worker_availability: `available: false` marks the person out on every day in the range. */
 export const setWorkerAvailabilitySchema = z.object({
 	workerName: z.string().trim().min(1),
 	from: isoDate,
@@ -31,6 +40,7 @@ export const setWorkerAvailabilitySchema = z.object({
 	reason: z.string().trim().max(200).optional()
 });
 
+/** Input for set_worker_station: pin a person to a station (by label) for one day. */
 export const setWorkerStationSchema = z.object({
 	workerName: z.string().trim().min(1),
 	date: isoDate,
@@ -38,6 +48,7 @@ export const setWorkerStationSchema = z.object({
 	stationName: z.string().trim().min(1).nullable().optional()
 });
 
+/** Every day from `from` to `to` inclusive, as midnight-UTC Dates. Throws a StaffingError if the range is backwards or too long. */
 function days(from: string, to: string): Date[] {
 	const start = new Date(`${from}T00:00:00Z`);
 	const end = new Date(`${to}T00:00:00Z`);
@@ -50,7 +61,7 @@ function days(from: string, to: string): Date[] {
 
 const iso = (date: Date) => date.toISOString().slice(0, 10);
 
-/** An active person by name: exact (case-insensitive), else a unique partial match. */
+/** An active person by name: exact (case-insensitive), else a unique partial match. Throws a StaffingError on no match or an ambiguous one. */
 async function findWorker(name: string) {
 	const workers = await prisma.worker.findMany({
 		where: { archivedAt: null },
@@ -64,7 +75,7 @@ async function findWorker(name: string) {
 	throw new StaffingError(`"${name}" matches more than one person: ${matches.map((w) => w.name).join(', ')}. Say which one.`);
 }
 
-/** An active station by its label (case-insensitive), else a unique partial match. */
+/** An active station by its label (case-insensitive), else a unique partial match. Throws a StaffingError on no match or an ambiguous one. */
 async function findStation(name: string) {
 	const stations = await prisma.station.findMany({ where: { archivedAt: null }, select: { id: true, label: true } });
 	const lower = name.toLowerCase();
@@ -75,7 +86,10 @@ async function findStation(name: string) {
 	throw new StaffingError(`"${name}" matches more than one station: ${matches.map((s) => s.label).join(', ')}. Say which one.`);
 }
 
-/** Who works where: the roster, days out, pins, and the crews on the approved schedule. */
+/**
+ * Who works where: the roster, days out, pins, and the crews on the approved schedule
+ * (APPROVED / IN_PROGRESS only). Read-only. Throws a StaffingError for a bad range.
+ */
 export async function getStaffing(input: z.infer<typeof getStaffingSchema>) {
 	const range = days(input.from, input.to);
 	const from = range[0];
@@ -94,6 +108,8 @@ export async function getStaffing(input: z.infer<typeof getStaffingSchema>) {
 		})
 	]);
 
+	// One crew per (day, station), merged across that station's jobs that day — "|" keys
+	// are split back apart below.
 	const crews = new Map<string, Set<string>>();
 	for (const a of assignments) {
 		const key = `${iso(a.date)}|${a.station.label}`;
@@ -118,7 +134,9 @@ export async function getStaffing(input: z.infer<typeof getStaffingSchema>) {
 /**
  * Mark someone out (or back in) for a range of days. Marking out also clears any pin
  * they had on those days. Returns the approved jobs they're currently crewing on those
- * days — the ones a re-plan would need to cover.
+ * days — the ones a re-plan would need to cover. Doesn't change those jobs itself.
+ *
+ * @throws StaffingError for an unknown/ambiguous name or a bad range
  */
 export async function setWorkerAvailability(input: z.infer<typeof setWorkerAvailabilitySchema>, actor: string) {
 	const worker = await findWorker(input.workerName);
@@ -175,7 +193,13 @@ export async function setWorkerAvailability(input: z.infer<typeof setWorkerAvail
 	};
 }
 
-/** Pin someone to a station for one day (they must be certified and not out), or clear it. */
+/**
+ * Pin someone to a station for one day (they must be certified and not out), or clear
+ * the pin when no station is given.
+ *
+ * @throws StaffingError for an unknown/ambiguous name or station, a missing
+ *   certification, or a person marked out that day
+ */
 export async function setWorkerStation(input: z.infer<typeof setWorkerStationSchema>, actor: string) {
 	const worker = await findWorker(input.workerName);
 	const date = new Date(`${input.date}T00:00:00Z`);

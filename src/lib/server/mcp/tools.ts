@@ -27,24 +27,31 @@ import {
  *  - Set `readOnly` truthfully (see McpToolDefinition in mcp/handler.ts). Read-only is
  *    the default expectation; `readOnly: false` is an approved, scoped exception for the
  *    write-tools below (import_hoops_export, confirm_import, add_order_note,
- *    commit_schedule) — each sits behind its own scope, and the first three write to
- *    data that's still human-editable/reversible afterward, never a bare irreversible
- *    write. See CLAUDE.md's Security constraints section for the decision record.
+ *    propose_schedule, commit_schedule, set_worker_availability, set_worker_station) —
+ *    each sits behind its own scope (IMPORT_WRITE or SCHEDULE_WRITE). All but
+ *    commit_schedule write data that's still human-editable/reversible afterward or is
+ *    only a draft; commit_schedule is itself the human schedule-approval gate. Never a
+ *    bare irreversible write. See CLAUDE.md's Security constraints section for the
+ *    decision record.
+ *  - The `description` strings are sent to Claude verbatim as the tool descriptions —
+ *    they are prompt text, not documentation. Change them deliberately, and connected
+ *    clients only see the change after they reconnect.
  *  - Parameterized queries only. Prisma's query builder does this; `$queryRaw` must use
  *    tagged-template parameters, never string interpolation.
  *  - Validate input with the Zod shape; the handler receives the parsed object.
  *  - Never return secrets, raw upstream payloads, or another user's private data.
  *
- * The first six are CLAUDE.md's "Domain MCP tools". import_hoops_export and
+ * These are the tools in CLAUDE.md's "Domain MCP tools" table. import_hoops_export and
  * confirm_import are the persistence half of the Hoops import feature
- * (src/lib/server/hoops/) — this repo still has no file parser (no documented Hoops
- * export format exists), so import_hoops_export takes already-structured order/line-item
- * data, not a raw file. get_schedule/propose_schedule/commit_schedule/simulate_change
+ * (src/lib/server/hoops/). import_hoops_export takes already-structured order/line-item
+ * data, not a raw file — the web upload's PDF extraction (hoops/extractOrderFromPdf.ts)
+ * is not exposed over MCP. get_schedule/propose_schedule/commit_schedule/simulate_change
  * wrap the deterministic engine (src/lib/server/engine/) plus the schedule persistence
  * layer (src/lib/server/schedule/) — Claude never computes hours or a schedule itself,
- * only calls these. add_order_note is a seventh, added later, so a note given in
- * conversation reaches Order.notes (and from there, the order's page and Reports)
- * without requiring the web form — same field, no separate write path.
+ * only calls these. add_order_note (added 2026-09-18) lets a note given in
+ * conversation reach Order.notes (and from there, the order's page and Reports)
+ * without requiring the web form — same field, no separate write path. The three
+ * staffing tools (2026-09-28) are documented at their section below.
  */
 
 // A plain `readonly McpToolDefinition[]` annotation on the array below would force every
@@ -56,6 +63,9 @@ function defineTool<Shape extends z.ZodRawShape>(tool: McpToolDefinition<Shape>)
 	return tool as unknown as McpToolDefinition;
 }
 
+/** Every tool this MCP server registers. Each tool's `principal` argument (when used)
+ *  only feeds principalIdentity() for attribution — the scope check already happened in
+ *  handler.ts before the handler runs. */
 export const mcpTools: readonly McpToolDefinition[] = [
 	defineTool({
 		name: 'import_hoops_export',

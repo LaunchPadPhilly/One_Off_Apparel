@@ -7,10 +7,10 @@ import { prisma } from '$lib/server/prisma';
  *
  * A couple of things worth knowing if you're new to this codebase:
  *
- * - There's a similar function, getSchedule.ts, used by the main Schedule/production
- *   board page — but that one deliberately skips jobs with status "PROPOSED" (a
- *   proposed-but-not-yet-approved schedule slot), because the production board should
- *   only show the *real*, approved schedule. This function is different on purpose: it
+ * - There's a similar function, getSchedule.ts, behind the get_schedule MCP tool —
+ *   but that one deliberately skips jobs with status "PROPOSED" (a
+ *   proposed-but-not-yet-approved schedule slot), because "what's scheduled" should
+ *   only mean the *real*, approved schedule. This function is different on purpose: it
  *   includes PROPOSED rows too, because on an order's own page we actually want to
  *   show "here's what the scheduler suggested for this order," even before a human
  *   has approved it.
@@ -21,7 +21,10 @@ import { prisma } from '$lib/server/prisma';
  *   what the `where: { lineItem: { orderId } }` below does — Prisma lets you filter
  *   through a relationship like this.
  *
+ * Called from the order detail page's load function (routes/orders/[id]/+page.server.ts).
+ *
  * @param orderId - the order whose schedule we want to look up
+ * @returns every assignment for the order, in any status, earliest first
  */
 export async function getScheduleForOrder(orderId: string) {
 	return prisma.scheduleAssignment.findMany({

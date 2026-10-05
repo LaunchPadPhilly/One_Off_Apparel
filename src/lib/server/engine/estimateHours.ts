@@ -1,4 +1,12 @@
-import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface, type CapConstruction, type FoldBagGarment, type WeightClass } from '../../../../prisma/generated/prisma/enums';
+/**
+ * estimate_hours: how long one line item takes, in hours, per station kind. Every
+ * number comes from the client's own spreadsheet/flowchart formulas (editable in
+ * Settings → Formulas, see formulaSettings.ts) — never from an LLM. Called by
+ * proposeSchedule.ts, planStaffing.ts and estimateForDisplay.ts (Orders pages, drafts).
+ * Key rule: a job missing what its formula needs throws an EstimationError instead of
+ * getting a guessed number.
+ */
+import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface } from '../../../../prisma/generated/prisma/enums';
 import { expectedStationFor } from '$lib/schedule/expectedStation';
 import { currentFormulas, maybeRefreshFormulas } from './formulaSettings';
 import type { EstimateHoursInput, EstimateHoursResult } from './types';
@@ -97,10 +105,11 @@ function estimateScreenPrintAutoHours(item: EstimateHoursInput): EstimateHoursRe
 	// `?? 0` means "if this value is missing (null/undefined), just treat it as 0" —
 	// a safe fallback so the math below doesn't crash on incomplete data.
 	// CAUTION: unlike embroidery below (which throws MissingLineItemDataError for a
-	// missing field), a screen-print job with no screens/ink count set still gets a
-	// number here — just a too-low one (setup shrinks to the fixed setup total). It
-	// won't show as "pending" on the Orders page. Open question whether this should
-	// throw MissingLineItemDataError instead, like embroidery does.
+	// missing stitch count), a screen-print job with no screens set still gets a
+	// number here — just a too-low one (no per-screen setup time), and it always lands
+	// in the "< 5 screens" rate regime. It won't show as "pending" on the Orders page.
+	// Open question whether this should throw MissingLineItemDataError instead. (The ink
+	// color count never goes missing: colorCountFor() falls back to the PDF's colors, then 1.)
 	const screens = item.screens ?? 0;
 	const inkColorCount = colorCountFor(item);
 	const sp = currentFormulas().screenPrint;
@@ -181,7 +190,8 @@ function estimateEmbroideryHours(item: EstimateHoursInput): EstimateHoursResult 
 	// filled in on this line item. If any of them are missing, we stop immediately and
 	// throw a clear, specific error saying exactly what's missing — instead of, say,
 	// silently treating a missing value as 0 (which would produce a wrong, misleadingly
-	// confident-looking answer).
+	// confident-looking answer). The color count is the one exception: it's assumed from
+	// the PDF (2026-10-02) — see colorCountFor().
 	const inkColorCount = colorCountFor(item); // "Y" — number of thread colors
 	const stitchCount = item.stitchCount; // "X" — total stitches in the design
 	if (stitchCount == null) throw new MissingLineItemDataError('stitch_count', 'stitchCount');
@@ -238,6 +248,8 @@ function perUnitHours(quantity: number, minutesPerUnit: number): number {
 // admin-editable in Settings → Formulas. Defaults trace back to the client's
 // finishing flowcharts; see DEFAULT_FORMULAS.
 
+/** Routes one finishing row to its per-garment rate. MATTE and FOLD_BAG need an extra
+ *  field (matteSurface / foldBagGarment) and throw MissingLineItemDataError without it. */
 function estimateFinishingHours(item: EstimateHoursInput): EstimateHoursResult {
 	const quantity = item.quantity;
 	const fin = currentFormulas().finishing;
@@ -278,14 +290,15 @@ function estimateManualHours(item: EstimateHoursInput, station: string, label: s
 	return { station, hours, crewDivisibleHours: hours };
 }
 
+/** The station kind an OTHER line item's estimate reports (stations of kind `other`). */
+export const OTHER_STATION_KIND = 'other';
+
 /**
  * OTHER rows (2026-09-28) — a job type the system doesn't model yet, e.g. "Patch
  * Install". Kept at import instead of dropped so a person can review it; it needs a
  * reviewer-assigned station and reviewer-entered hours, asked for in that order on the
  * order page. Placed only on that exact station (the result's `stationId`).
  */
-export const OTHER_STATION_KIND = 'other';
-
 function estimateOtherHours(item: EstimateHoursInput): EstimateHoursResult {
 	const name = item.otherJobType ? `"${item.otherJobType}"` : 'this job';
 	if (!item.assignedStationId) {
@@ -339,6 +352,10 @@ function roundToQuarterHour(hours: number): number {
  * people on the job, only its crew-divisible part (`crewDivisibleHours` — screen print
  * run time, embroidery setup & boxing, all finishing time, DTF/DTG entered hours) is
  * divided by N; everything else stays fixed. Default 1 = the unchanged formula.
+ *
+ * @returns the station kind (plus `stationId` for OTHER rows) and the rounded hours.
+ * @throws MissingFormulaError for an unknown decoration type / finishing step.
+ * @throws MissingLineItemDataError when this job is missing a field its formula needs.
  */
 export function estimateHours(item: EstimateHoursInput, crewSize = 1): EstimateHoursResult {
 	// Kick off a background refresh if the formula cache is older than its TTL — see
@@ -406,6 +423,8 @@ export function engineEstimateFor(item: EstimateHoursInput): EstimateHoursResult
 	}
 }
 
+/** The formula router behind estimateHours(): one-person, unrounded hours, ignoring any
+ *  override. Throws the same EstimationErrors estimateHours() documents. */
 function estimateHoursRaw(item: EstimateHoursInput): EstimateHoursResult {
 	if (item.itemType === LineItemType.DECORATION) {
 		switch (item.decorationType) {

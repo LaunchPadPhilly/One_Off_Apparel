@@ -1,3 +1,8 @@
+/**
+ * The `commit_schedule` MCP tool's implementation (registered in mcp/tools.ts): flips
+ * PROPOSED schedule assignments to APPROVED once a person has said yes. Key rule: it
+ * only ever approves rows that are still PROPOSED, all-or-nothing, in one transaction.
+ */
 import { prisma } from '$lib/server/prisma';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 
@@ -7,6 +12,11 @@ import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/en
  * table says; it does not touch Order or LineItem status. (When an order's status
  * should move to `scheduled` isn't documented anywhere — not addressed here rather
  * than guessed.)
+ *
+ * @param assignmentIds - the PROPOSED ScheduleAssignment ids to approve
+ * @param approvedBy - who approved them (stored on each row and in the audit log)
+ * @returns the updated (now APPROVED) rows; an empty array if no ids were given
+ * @throws Error if any id doesn't exist or isn't PROPOSED — nothing is approved then
  */
 export async function commitSchedule(assignmentIds: readonly string[], approvedBy: string) {
 	if (assignmentIds.length === 0) return [];

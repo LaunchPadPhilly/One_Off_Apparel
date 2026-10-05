@@ -1,3 +1,9 @@
+/**
+ * Shared plain-data types for the scheduling engine (estimateHours, proposeSchedule,
+ * planStaffing) plus the LineItem.dependsOn sentinel strings. Deliberately free of
+ * Prisma model types and DB access, so engine code stays pure and testable; the
+ * schedule/ layer (e.g. buildBacklogAndCapacity.ts) maps DB rows into these shapes.
+ */
 import type {
 	CapConstruction,
 	DecorationType,
@@ -58,6 +64,7 @@ export interface EstimateHoursInput {
 	estimatedHoursOverride?: number | null;
 }
 
+/** What estimate_hours returns for one line item: where it runs and for how long. */
 export interface EstimateHoursResult {
 	// The station *kind* (e.g. "screen_print_auto" — see $lib/schedule/stationKinds.ts),
 	// not a Station.id — which real station of that kind a job lands on is
@@ -92,8 +99,9 @@ export interface BacklogItem extends EstimateHoursInput {
 	// only the meaning of an at-risk flag against it softens for internal targets.
 	deadlineIsTight: boolean;
 	// NEW (2026-09-23): the line item ids this job must be scheduled AFTER — already
-	// resolved from LineItem.dependsOn (a specific id, or every sibling for
-	// "all_siblings"). Empty/absent for decoration rows. See proposeSchedule.ts.
+	// resolved from LineItem.dependsOn (a specific id, every decoration for
+	// "all_decorations", or every sibling for "all_siblings"). Empty/absent for
+	// decoration rows. See proposeSchedule.ts.
 	dependsOnIds?: string[];
 }
 
@@ -118,11 +126,14 @@ export interface CapacitySlot {
 	crewWorkerIds?: string[];
 }
 
+/** One job the engine placed: which station, which day, when, and for how long. */
 export interface ProposedAssignment {
 	lineItemId: string;
 	stationId: string;
 	stationName: string;
 	date: Date;
+	// Batch order within this station's day ONLY — never cross-job dependency ordering
+	// (that's dependsOnIds + startMinuteOfDay). See CLAUDE.md's naming conventions.
 	sequenceOrder: number;
 	// NEW (2026-09-23): wall-clock start (minutes from midnight) on the shift model in
 	// $lib/schedule/shift.ts. The engine now owns this (it used to be packed afterward
@@ -134,6 +145,7 @@ export interface ProposedAssignment {
 	crewWorkerIds: string[];
 }
 
+/** A job the engine could not place on time, with why (flag_at_risk — never hidden). */
 export interface AtRiskFlag {
 	lineItemId: string;
 	requiredStation: string;
@@ -147,6 +159,7 @@ export interface AtRiskFlag {
 	reason: string;
 }
 
+/** Everything proposeSchedule returns. Nothing in it is saved until commit_schedule. */
 export interface ProposeScheduleResult {
 	assignments: ProposedAssignment[];
 	atRisk: AtRiskFlag[];

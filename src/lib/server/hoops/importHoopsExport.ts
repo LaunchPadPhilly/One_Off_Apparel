@@ -7,6 +7,14 @@ import { finishingDependencyRule } from '$lib/server/engine/finishingDependencie
 import { ALL_DECORATIONS_DEPENDENCY } from '$lib/server/engine/types';
 import { countDecorationColors } from '$lib/server/engine/decorationColors';
 
+/*
+ * Saves extracted Hoops orders to the database for human review. Called from the Orders
+ * page's upload action (after extractOrderFromPdf.ts) and the import_hoops_export MCP
+ * tool. Key rule: everything lands as needs_review — nothing imported here is
+ * schedulable until a person confirms it (confirmImport.ts).
+ */
+
+/** What importHoopsExport() returns: the saved order ids, their new line item rows, and every confidence flag raised. */
 export interface ImportHoopsExportResult {
 	orderIds: string[];
 	lineItems: LineItem[];
@@ -59,6 +67,11 @@ function resolveInkColorCount(item: OrderCandidate['lineItems'][number], flags: 
 	return 1;
 }
 
+/**
+ * Creates every line item for one order inside the caller's transaction, applying the
+ * finishing-dependency, color-count and garment-style defaults above. Any flag raised
+ * along the way is appended to `flags`.
+ */
 async function createLineItemsForOrder(
 	tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
 	orderId: string,
@@ -118,11 +131,14 @@ async function createLineItemsForOrder(
 /**
  * Persists already-extracted Hoops order/line-item candidates (see types.ts for why
  * this doesn't parse a file itself). Creates `Order` rows at status needs_review and
- * `LineItem` rows at needs_review (decoration, and any finishing row with no unmet
- * dependency) or blocked (every other finishing row) — exactly per CLAUDE.md's schema
- * notes. Decoration rows get artworkApprovalStatus: APPROVED (always considered done); finishing rows leave
- * it null. Nothing here is schedulable yet: that gate is confirm_import + the
- * pre-production approval gates in the backlog query.
+ * `LineItem` rows at needs_review (decorations, OTHER rows, and relabel / hang tag /
+ * wovens) or blocked (matte and fold & bag, which wait on other rows) — exactly per
+ * CLAUDE.md's schema notes. Decoration rows get artworkApprovalStatus: APPROVED (always
+ * considered done); other rows leave it null. Nothing here is schedulable yet: that gate
+ * is confirm_import.
+ *
+ * @throws ZodError if any candidate fails orderCandidateSchema — checked before anything
+ *         is written, and the whole import runs in one transaction.
  *
  * Re-import (a hoopsOrderId that already exists) is always allowed and always reopens
  * review, regardless of the existing order's current status — this was an explicit

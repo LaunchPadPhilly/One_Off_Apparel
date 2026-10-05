@@ -1,3 +1,9 @@
+/**
+ * check_completion: the one place a line item, and then its order, becomes COMPLETE.
+ * Called from the Production Board's "Stop" flow (start/stop + actuals), never from
+ * scheduling. Key rule: Order.status only ever flips to COMPLETE here — application
+ * code must never set it directly (see CLAUDE.md's `orders` table notes).
+ */
 import { prisma } from '$lib/server/prisma';
 import { LineItemStatus, LineItemType, OrderStatus } from '../../../../prisma/generated/prisma/enums';
 import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY } from './types';
@@ -7,10 +13,16 @@ import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY } from './types';
  * of the start/stop + actuals flow, not the scheduling flow — never call this from
  * inside proposeSchedule (see CLAUDE.md's engine section).
  *
- * Marks the line item complete, unlocks any finishing line item under the same order
- * that was waiting specifically on it or on "all_siblings", and flips the order to
- * complete once every line item under it is complete. orders.status only ever
- * becomes complete through this path — never set it directly elsewhere.
+ * Marks the line item complete, unlocks (BLOCKED → NEEDS_REVIEW) any finishing line
+ * item under the same order that was waiting on it — specifically by id, on
+ * "all_decorations" once every decoration is done, or on "all_siblings" once every
+ * other line item is done — and flips the order to complete once every line item
+ * under it is complete. orders.status only ever becomes complete through this path —
+ * never set it directly elsewhere. Runs in one transaction, so a failure part-way
+ * leaves nothing half-updated.
+ *
+ * @param lineItemId the line item whose last station was just Stopped.
+ * @throws Prisma's not-found error if no line item has that id (the transaction rolls back).
  */
 export async function checkCompletion(lineItemId: string): Promise<void> {
 	await prisma.$transaction(async (tx) => {

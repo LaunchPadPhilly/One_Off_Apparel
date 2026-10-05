@@ -1,14 +1,22 @@
+/**
+ * The Production Board's "Start" button (routes/schedule/+page.server.ts): moves an
+ * APPROVED assignment to IN_PROGRESS and records `startedAt`. Key rule: a BLOCKED line
+ * item (a finisher still waiting on its print) can't be started.
+ */
 import { prisma } from '$lib/server/prisma';
 import { LineItemStatus, ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 
 /**
  * The Production Board's "Start" action — CLAUDE.md's schedule_assignments notes say
  * only that `started_at` "is set when the Start button fires," nothing more. Only
- * approved assignments can start (a proposed one isn't real yet — see get_schedule.ts).
+ * approved assignments can start (a proposed one isn't real yet — see getSchedule.ts).
  *
  * Deliberately does not touch LineItem.status. Whether/when a line item should move to
  * in_production isn't documented anywhere (see CLAUDE.md's production-board open item);
  * left alone rather than guessed, same as commit_schedule leaves Order.status alone.
+ *
+ * @returns the updated (IN_PROGRESS) assignment
+ * @throws Error if the assignment doesn't exist, isn't APPROVED, or its line item is BLOCKED
  */
 export async function startAssignment(assignmentId: string, startedBy: string) {
 	return prisma.$transaction(async (tx) => {

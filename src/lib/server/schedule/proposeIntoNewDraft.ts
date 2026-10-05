@@ -1,3 +1,9 @@
+/**
+ * Backs the "Create automatic schedule" button on /schedule (routes/schedule/+page.server.ts):
+ * makes a new draft and fills it with the deterministic engine's proposal. Key rule:
+ * everything it writes is PROPOSED and attached to the new draft — nothing is approved
+ * until a person approves it.
+ */
 import { prisma } from '$lib/server/prisma';
 import { proposeSchedule } from '$lib/server/engine/proposeSchedule';
 import { ScheduleAssignmentStatus, ScheduleStrategy } from '../../../../prisma/generated/prisma/enums';
@@ -5,10 +11,12 @@ import { fetchBacklog, fetchStaffedCapacity } from './buildBacklogAndCapacity';
 import { createDraft } from './draft';
 import type { DateRange } from './types';
 
+/** A Date as its "YYYY-MM-DD" UTC day. */
 function iso(date: Date): string {
 	return date.toISOString().slice(0, 10);
 }
 
+/** "YYYY-MM-DD" plus `days` calendar days, as "YYYY-MM-DD". */
 function addDays(isoDate: string, days: number): string {
 	const date = new Date(`${isoDate}T00:00:00Z`);
 	date.setUTCDate(date.getUTCDate() + days);
@@ -20,6 +28,7 @@ function addDays(isoDate: string, days: number): string {
 // schedule's window rather than inventing a second convention.
 const AUTOMATIC_SCHEDULE_WEEKS = 4;
 
+/** What the button reports back: the new draft's id and how many jobs did / didn't fit. */
 export interface ProposeIntoNewDraftResult {
 	draftId: string;
 	placedCount: number;
@@ -29,7 +38,7 @@ export interface ProposeIntoNewDraftResult {
 
 /**
  * "Create automatic schedule" — a brand-new ScheduleDraft populated straight from the
- * deterministic propose_schedule engine (fetchBacklog + fetchCapacity + proposeSchedule),
+ * deterministic propose_schedule engine (fetchBacklog + fetchStaffedCapacity + proposeSchedule),
  * the exact same engine the propose_schedule MCP tool already calls when Claude runs it
  * in conversation. No LLM decides any placement here — CLAUDE.md's non-negotiable design
  * principle ("Claude never computes hours or schedules itself") applies just as much to
@@ -39,9 +48,13 @@ export interface ProposeIntoNewDraftResult {
  * PROPOSED rows with no draft at all, which is what the `propose_schedule` MCP tool still
  * does on its own (see proposeAndPersistSchedule.ts) — that tool is untouched by this.
  *
- * fetchBacklog() already enforces every gate CLAUDE.md's engine section requires (order
- * CONFIRMED, blanks RECEIVED, customer approval APPROVED, artwork APPROVED per decoration
- * row) — this function does not add or loosen any of that.
+ * fetchBacklog() already enforces every scheduling gate (order CONFIRMED, deadline today
+ * or later — see its doc comment for the full, current list) — this function does not
+ * add or loosen any of that.
+ *
+ * The window is always today plus AUTOMATIC_SCHEDULE_WEEKS (UTC days).
+ *
+ * @param actor - who clicked the button (draft creator, proposedBy, audit log)
  */
 export async function proposeIntoNewDraft(actor: string): Promise<ProposeIntoNewDraftResult> {
 	const startIso = iso(new Date());

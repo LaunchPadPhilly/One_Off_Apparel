@@ -1,15 +1,25 @@
+/**
+ * The `propose_schedule` MCP tool's implementation (registered in mcp/tools.ts): runs the
+ * deterministic engine and saves its output as PROPOSED rows (no draft attached).
+ * Key rule: it only ever writes or deletes PROPOSED rows — never the approved schedule.
+ */
 import { prisma } from '$lib/server/prisma';
 import { proposeSchedule } from '$lib/server/engine/proposeSchedule';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 import { fetchBacklog, fetchStaffedCapacity } from './buildBacklogAndCapacity';
 import type { DateRange } from './types';
 
+/** The saved PROPOSED rows, the jobs that couldn't be placed, and the engine's explanation. */
 export interface ProposeAndPersistResult {
 	assignments: Awaited<ReturnType<typeof persistProposal>>;
 	atRisk: ReturnType<typeof proposeSchedule>['atRisk'];
 	reasoning: string[];
 }
 
+/**
+ * Saves the engine's placements as PROPOSED rows (plus an audit-log entry each), in one
+ * transaction, after clearing older PROPOSED rows for every line item this run looked at.
+ */
 async function persistProposal(
 	proposed: ReturnType<typeof proposeSchedule>['assignments'],
 	touchedLineItemIds: readonly string[],
@@ -65,12 +75,17 @@ async function persistProposal(
  * commit_schedule signature: `commit_schedule(assignment_ids[], approved_by)`). A
  * PROPOSED row is a draft, not yet real/scheduled — get_schedule doesn't return it, and
  * the Production Board wouldn't either.
+ *
+ * @param range - the window to schedule into
+ * @param proposedBy - who asked (stored on each row and in the audit log)
  */
 export async function proposeAndPersistSchedule(range: DateRange, proposedBy: string): Promise<ProposeAndPersistResult> {
 	const { backlog, externalDependencies } = await fetchBacklog();
 	const capacity = await fetchStaffedCapacity(range, backlog);
 	const result = proposeSchedule(backlog, capacity, externalDependencies);
 
+	// At-risk items are included too, so a job that was placed last run but can't be
+	// placed now loses its old PROPOSED row instead of keeping a stale one.
 	const touchedLineItemIds = [...result.assignments.map((a) => a.lineItemId), ...result.atRisk.map((a) => a.lineItemId)];
 	const assignments = await persistProposal(result.assignments, touchedLineItemIds, proposedBy);
 

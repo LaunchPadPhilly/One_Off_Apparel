@@ -26,6 +26,8 @@ import type { CapConstruction, FoldBagGarment, WeightClass } from '../../../../p
  * next deploy). Formula changes are rare enough that a ~30-second window is acceptable.
  */
 
+// Same shape as estimateHours.ts' EmbroideryRatePlan (where each field's formula term
+// is documented); kept local so this module doesn't import from the engine it feeds.
 interface EmbroideryRatePlan {
 	setupBoxingDivisor: number;
 	hoopingFactor: number;
@@ -34,6 +36,7 @@ interface EmbroideryRatePlan {
 	sewRateDivisor: number;
 }
 
+/** Every editable number the estimate formulas use, grouped by station family. */
 export interface FormulaSettings {
 	screenPrint: {
 		initialUnits: Record<WeightClass, number>;
@@ -106,7 +109,7 @@ export const DEFAULT_FORMULAS: FormulaSettings = {
 	}
 };
 
-// In-memory cache. Populated at startup by initFormulaSettings() and after every save
+// In-memory cache. Populated at startup by reloadFormulas() and after every save
 // by saveFormulas(); every server-side estimate call reads this via currentFormulas().
 let CURRENT: FormulaSettings = DEFAULT_FORMULAS;
 let lastLoadedAt = 0;
@@ -114,9 +117,10 @@ const CACHE_TTL_MS = 30_000;
 
 /**
  * The current effective formulas — DEFAULT_FORMULAS with any per-field overrides from
- * the DB merged on top. Sync accessor; the cache is refreshed by initFormulaSettings()
- * (called from hooks.server.ts on startup) and saveFormulas() (called from the settings
- * admin action). No async / no DB roundtrip on the hot path.
+ * the DB merged on top. Sync accessor; the cache is refreshed by reloadFormulas()
+ * (called from hooks.server.ts on startup, and by maybeRefreshFormulas() once the TTL
+ * passes) and saveFormulas() (called from the settings admin action). No async / no DB
+ * roundtrip on the hot path.
  */
 export function currentFormulas(): FormulaSettings {
 	return CURRENT;
@@ -126,7 +130,8 @@ export function currentFormulas(): FormulaSettings {
  * Reads the singleton FormulaSettings row from the DB (if any) and updates the
  * in-memory cache. Called eagerly at server startup and after every admin save; also
  * kicked off lazily when a caller notices the cache is older than CACHE_TTL_MS so
- * multi-instance staleness bounded by that TTL.
+ * multi-instance staleness is bounded by that TTL. Never throws: a DB error keeps the
+ * last good cached value.
  */
 export async function reloadFormulas(): Promise<void> {
 	try {
@@ -148,7 +153,12 @@ export function maybeRefreshFormulas(): void {
  * Persists a new formulas payload and refreshes the cache. `next` may be a full
  * FormulaSettings or a partial override; anything missing stays at its default. The
  * save writes the merged/canonical object so the DB always contains something
- * validation-ready, not scattered partials.
+ * validation-ready, not scattered partials. Does no validation of the numbers itself —
+ * the caller (the settings action) is expected to have checked them.
+ *
+ * @param actor who made the change, stored as `updatedBy`.
+ * @returns the merged formulas now in effect.
+ * @throws whatever Prisma throws if the upsert fails (the cache is left unchanged).
  */
 export async function saveFormulas(next: Partial<FormulaSettings>, actor: string): Promise<FormulaSettings> {
 	const merged = mergeWithDefaults(next);
@@ -206,6 +216,8 @@ function mergeWithDefaults(override: Partial<FormulaSettings> | null | undefined
 	};
 }
 
+/** mergeWithDefaults' helper for one embroidery plan table (flat or cap): overrides
+ *  individual fields per key; keys not already in `base` are ignored. */
 function mergePlanMap<K extends string>(base: Record<K, EmbroideryRatePlan>, override: Partial<Record<K, Partial<EmbroideryRatePlan>>> | undefined): Record<K, EmbroideryRatePlan> {
 	const out = { ...base };
 	if (!override) return out;

@@ -3,11 +3,18 @@ import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/en
 import type { DateRange } from './types';
 
 /**
+ * The `get_schedule` MCP tool's implementation (registered in mcp/tools.ts). Read-only.
+ *
  * Looks up what's currently scheduled — the live schedule, not draft proposals.
  * PROPOSED rows are excluded on purpose: propose_schedule persists them as drafts (see
  * proposeAndPersistSchedule.ts), but they only become part of "what's currently
  * scheduled" once commit_schedule approves them. This is the read side of that same
  * distinction, not a separate concept.
+ *
+ * @param range - inclusive "YYYY-MM-DD" from/to dates
+ * @param stationId - optional: only that station's assignments
+ * @returns APPROVED / IN_PROGRESS / COMPLETE assignments with their line item and
+ *   station, sorted by date, station, then queue position
  */
 export async function getSchedule(range: DateRange, stationId?: string) {
 	// range.from/to are z.iso.date() strings ("YYYY-MM-DD") — kept as plain date strings

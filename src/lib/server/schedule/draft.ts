@@ -9,9 +9,13 @@ import {
 /**
  * A schedule draft is a named, editable proposal for a production window (1–4 weeks
  * starting on a chosen date). It is the multi-draft parent record that lets a shop
- * hold several candidate schedules side-by-side; the actual ScheduleAssignment rows
- * are not linked here yet — that comes with "propose into a specific draft".
+ * hold several candidate schedules side-by-side; its PROPOSED ScheduleAssignment rows
+ * point back to it through `scheduleDraftId` (filled by the drafts workspace and by
+ * proposeIntoNewDraft.ts). Used by the /schedule, /schedule/new and
+ * /schedule/drafts/[id] routes.
  */
+
+/** Validates the "new draft" form (/schedule/new) before createDraft() runs. */
 export const createDraftSchema = z.object({
 	name: z.string().trim().min(1, 'Name is required').max(120, 'Name is too long'),
 	description: z.string().trim().max(1000).optional().nullable(),
@@ -22,6 +26,10 @@ export const createDraftSchema = z.object({
 
 export type CreateDraftInput = z.infer<typeof createDraftSchema>;
 
+/**
+ * Creates an empty draft (no assignments yet). `input` should already have passed
+ * createDraftSchema; `startDate` is stored as midnight UTC of that day.
+ */
 export async function createDraft(input: CreateDraftInput, createdBy: string) {
 	return prisma.scheduleDraft.create({
 		data: {
@@ -35,6 +43,7 @@ export async function createDraft(input: CreateDraftInput, createdBy: string) {
 	});
 }
 
+/** Every draft that isn't ARCHIVED, newest first. */
 export async function listDrafts() {
 	return prisma.scheduleDraft.findMany({
 		where: { status: { not: ScheduleDraftStatus.ARCHIVED } },
@@ -42,6 +51,7 @@ export async function listDrafts() {
 	});
 }
 
+/** One draft by id, or null if it doesn't exist. */
 export async function getDraft(id: string) {
 	return prisma.scheduleDraft.findUnique({ where: { id } });
 }
@@ -55,6 +65,9 @@ export async function getDraft(id: string) {
  * ARCHIVED): a draft the user actively deleted isn't one they might want to
  * find in an archive later, and leaving orphaned PROPOSED rows behind would
  * make them show up on future queries with no draft to explain them.
+ *
+ * Unlike deleteDrafts() below, a draft that doesn't exist is an error here (Prisma's
+ * not-found error from `scheduleDraft.delete`), and the whole transaction rolls back.
  */
 export async function deleteDraft(id: string, actor: string) {
 	await prisma.$transaction(async (tx) => {
