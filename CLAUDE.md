@@ -256,8 +256,12 @@ until they're answered, by hand or via the notes box.
 
 **Confirming requires a fully valid order (2026-09-23).** `confirmImport.ts` refuses to
 confirm while `computeOrderGaps(...).blockingCount > 0` (`orderGaps.ts`) — every line
-item estimable (no missing formula input, DTF/DTG hours entered), blanks `RECEIVED`,
-customer `APPROVED`, and a ship date set. **Artwork is not a gate** (client decision 2026-09-28: it's
+item estimable (no missing formula input, DTF/DTG hours entered) and a ship date set.
+**Blanks and customer approval are not gates either** (client decision 2026-10-02: assume
+what the PDF says): imports set `blankOrderingStatus = ORDERED` and
+`customerApprovalStatus = APPROVED`, `computeOrderGaps` never asks about them, and
+`fetchBacklog()` doesn't filter on them; both stay editable on the order page for the
+record. **Artwork is not a gate** (client decision 2026-09-28: it's
 always considered done — imported as `APPROVED`, never asked about). Enforced server-side
 inside the confirm transaction, so the order page's (disabled) button and the
 `confirm_import` MCP tool are gated identically. A **confirmed** order that stops being
@@ -494,8 +498,16 @@ and the engine number takes over again.
 `MissingFormulaError` is now only for an unknown decoration type / finishing step. Separately,
 `MissingLineItemDataError` (not a station-level gap) fires when a station's formula is
 real but one specific job is missing a required field — e.g. an embroidery line item with
-no `garmentStyle` set yet; a human resolves this by editing the line item, not by a
+no `stitchCount` yet; a human resolves this by editing the line item, not by a
 schema/decision change.
+
+**PDF-assumed defaults (client decision 2026-10-02: assume what's in the PDF rather than
+asking).** Color count for screen print and embroidery is never a question: the stored
+`ink_color_count`, else the number of colors in `decoration_colors`
+(`engine/decorationColors.ts`' `countDecorationColors`, e.g. "109c Yellow, White" = 2),
+else 1. The import stores that count and adds a flag when it had to assume 1. A decoration
+row the extraction didn't mark `CAP` is imported as `FLAT` (anything that isn't a hat is
+flat). Editing either field on the order page still overrides it.
 
 #### `check_completion(line_item_id)`
 Runs the moment the "Stop" button fires for the **last** station on a line item. This is
@@ -742,7 +754,7 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   this in: the manual draft workspace's candidate-order list used to be every order not
   `COMPLETE` (including `NEEDS_REVIEW`, which hasn't passed the import-confirmation
   gate) — now `CONFIRMED` only. Deliberately NOT the full `fetchBacklog()` gate set
-  (blanks received, customer approval) for the *manual* path — a human
+  (then: blanks received, customer approval — both dropped 2026-10-02) for the *manual* path — a human
   planning ahead can still place a confirmed order before every pre-production gate is
   finalized; only the automatic engine path enforces every gate. Four follow-up fixes
   (2026-09-22): (1) the CONFIRMED-only rule is now enforced server-side in
@@ -914,13 +926,13 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     resolved (2026-09-21)**: `LineItem.garmentStyle` (`flat`/`cap`) and
     `capConstruction` (`structured`/`unstructured`, cap-only) now exist and embroidery's
     formula uses them instead of `weight_class` when `garment_style` is `cap` (see
-    estimate_hours above). What's still open: `extractOrderFromPdf.ts` does not populate
-    these new fields yet — every sample's weight-class hint ("Thin - Trail Network",
-    "Fleece/Bulky") still reads as textile-specific, and caps still default `weightClass`
-    to `THIN` with a flagged low-confidence guess, same interim behavior as before. Real
-    caps therefore still hit `MissingLineItemDataError` (garment_style not set) until
-    either extraction is taught to recognize headwear, or a person sets `garmentStyle`
-    manually via the order's line-item edit form (now exposed there).
+    estimate_hours above). **Extraction fills them since 2026-10-02:**
+    `extractOrderFromPdf.ts` asks for `garmentStyle` on every decoration (CAP for
+    caps/hats/visors/beanies, FLAT otherwise) and `capConstruction` when the product name
+    says structured/unstructured; the import falls back to `FLAT` when none was given.
+    Still open: caps still default `weightClass` to `THIN` with a flagged low-confidence
+    guess, and a cap whose construction the export doesn't state still needs
+    `capConstruction` set by hand.
   - **Only one date ("Deadline") appears per job — resolved (2026-09-22, revised
     2026-09-28).** The 2026-09-22 answer was `internal_due_date = external_ship_date − 14 days`
     with the internal date auto-derived and non-editable; **superseded 2026-09-28** by a
