@@ -79,6 +79,27 @@ interface TimePoint {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Duration in working minutes — same rule the client uses (min 15). */
+
+/** How far past what it waits on a finishing step may be pushed before giving up. */
+const MAX_PUSH_DAYS = 60;
+
+/**
+ * A draft edit that can't be completed, written for the person dragging — the board
+ * actions turn it into a refusal message. Thrown inside the edit's transaction, so
+ * nothing is saved.
+ */
+export class DraftPlacementError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'DraftPlacementError';
+	}
+}
+
+/** Working minutes a job needs free in its day: all of it, or a whole shift if it's longer. */
+function fitMinutes(durationMin: number): number {
+	return Math.min(durationMin, workingMinutesUntilShiftEnd(SHIFT_START_MIN));
+}
+
 function durationMinutes(estimatedHours: number): number {
 	return Math.max(15, Math.round(estimatedHours * 60));
 }
@@ -340,16 +361,30 @@ export async function repackDraftDays(tx: Db, draftId: string, mutation: DraftMu
 	//    forward; a finisher pushed past shift end moves to the next day's queue front.
 	//    Fixing one violator can create another (its own finishers, or a peer it pushed),
 	//    so loop until none are left. `guard` is only a safety cap against an endless loop.
+	let settled = false;
 	for (let guard = 0; guard < 500; guard++) {
 		const violator = ctx.placements.find((p) => {
 			const earliest = earliestFor(ctx, p);
 			if (!earliest) return false;
 			if (isBefore({ dayMs: p.dayMs, minute: p.startMin }, earliest)) return true;
 			// Also violates if it can't fit within the shift starting at its current time.
-			if (workingMinutesUntilShiftEnd(p.startMin) < p.durationMin) return true;
+			// A job longer than a whole shift only has to start at shift open (same rule
+			// as checkFinisherPlacement) — otherwise it would "not fit" on every day and
+			// get pushed forward forever.
+			if (workingMinutesUntilShiftEnd(p.startMin) < fitMinutes(p.durationMin)) return true;
 			return false;
 		});
-		if (!violator) break;
+		if (!violator) {
+			settled = true;
+			break;
+		}
+		// Safety net: never save a job pushed absurdly far past what it waits on.
+		const target = earliestFor(ctx, violator)!;
+		if (violator.dayMs - target.dayMs > MAX_PUSH_DAYS * DAY_MS) {
+			throw new DraftPlacementError(
+				`"${ctx.nodes.get(violator.lineItemId)?.design ?? 'A finishing step'}" couldn't be fitted within ${MAX_PUSH_DAYS} days after the job it waits on. Nothing was changed — try a different day or station.`
+			);
+		}
 		pushed.add(violator.id);
 		const earliest = earliestFor(ctx, violator)!;
 		const originStation = violator.stationId;
@@ -364,7 +399,7 @@ export async function repackDraftDays(tx: Db, draftId: string, mutation: DraftMu
 			const peers = dayPeersOf(ctx, violator.stationId, violator.dayMs);
 			const items = toCascadeItems(ctx, peers);
 			const result = cascadeMove(items, violator.id, earliest.minute);
-			if ('conflict' in result || workingMinutesUntilShiftEnd(earliest.minute) < violator.durationMin) {
+			if ('conflict' in result || workingMinutesUntilShiftEnd(earliest.minute) < fitMinutes(violator.durationMin)) {
 				// Doesn't fit on this day — push to next day's front.
 				violator.dayMs += DAY_MS;
 				violator.startMin = SHIFT_START_MIN;
@@ -392,6 +427,10 @@ export async function repackDraftDays(tx: Db, draftId: string, mutation: DraftMu
 		}
 		violator.startMin = insertResult.incomingStart ?? violator.startMin;
 		applyCascadeResult(violator.stationId, violator.dayMs, insertResult.placements);
+	}
+
+	if (!settled) {
+		throw new DraftPlacementError('These finishing steps kept pushing each other around and couldn’t be settled. Nothing was changed — try placing them by hand on later days.');
 	}
 
 	// 3. Write changes.

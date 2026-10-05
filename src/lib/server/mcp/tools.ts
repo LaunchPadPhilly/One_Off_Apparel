@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import type { McpToolDefinition } from '$lib/server/mcp/handler';
+import type { McpToolDefinition, Principal } from '$lib/server/mcp/handler';
+import { prisma } from '$lib/server/prisma';
 import { principalIdentity } from '$lib/server/mcp/handler';
 import { importHoopsExport } from '$lib/server/hoops/importHoopsExport';
 import { confirmImport } from '$lib/server/hoops/confirmImport';
@@ -61,6 +62,22 @@ import {
 // an effectively untyped record — defeating the point of a per-tool Zod inputSchema. This
 // identity helper lets each tool literal be checked against its own inputSchema's inferred
 // shape first, then only widens to the common McpToolDefinition afterward.
+/**
+ * Who approved, for commit_schedule (2026-10-05). A person signed in through Claude
+ * (OAuth) is recorded as their own account, whatever name the call passes — so the
+ * schedule-approval gate's audit trail can't be pointed at someone else. A shared token
+ * (agent or legacy) has no person behind it, so the given name is kept but marked with
+ * the token it came through.
+ */
+async function approverFor(principal: Principal, givenName: string | undefined): Promise<string> {
+	if (principal.kind === 'oauth') {
+		const user = await prisma.user.findUnique({ where: { id: principal.userId }, select: { email: true } });
+		return user?.email ?? principal.userId;
+	}
+	if (!givenName) throw new CommitScheduleError('Say who approved this plan (approvedBy).');
+	return `${givenName} (via ${principalIdentity(principal)})`;
+}
+
 function defineTool<Shape extends z.ZodRawShape>(tool: McpToolDefinition<Shape>): McpToolDefinition {
 	return tool as unknown as McpToolDefinition;
 }
@@ -179,20 +196,22 @@ export const mcpTools: readonly McpToolDefinition[] = [
 			'clearly said to approve. Pass the draftId from propose_schedule to approve the whole plan, or ' +
 			'assignmentIds to approve some of it. Each approved job replaces its old not-started slot, so a moved ' +
 			"job is never on the schedule twice. Refused if a job in the plan has started since. Example: 'approve " +
-			"it' → { draftId: '...', approvedBy: 'Jeff' }. Returns { assignments, replacedCount }.",
+			"it' → { draftId: '...' }. The approver is recorded as the signed-in person. Returns { assignments, replacedCount }.",
 		inputSchema: {
 			draftId: z.string().min(1).optional(),
 			assignmentIds: z.array(z.string()).min(1).optional(),
-			// The person who approved, as they'd be named on the board.
-			approvedBy: z.string().min(1)
+			// Who approved. Ignored for people signed in through Claude (their own account
+			// is recorded); required when calling with a shared token.
+			approvedBy: z.string().min(1).optional()
 		},
 		requiredScope: 'SCHEDULE_WRITE',
 		readOnly: false,
-		handler: async ({ draftId, assignmentIds, approvedBy }) => {
+		handler: async ({ draftId, assignmentIds, approvedBy }, principal) => {
 			if ((draftId === undefined) === (assignmentIds === undefined)) {
 				throw new CommitScheduleError('Give either a draftId or assignmentIds (not both).');
 			}
-			return draftId ? commitDraft(draftId, approvedBy) : commitSchedule(assignmentIds ?? [], approvedBy);
+			const approver = await approverFor(principal, approvedBy);
+			return draftId ? commitDraft(draftId, approver) : commitSchedule(assignmentIds ?? [], approver);
 		}
 	}),
 	defineTool({

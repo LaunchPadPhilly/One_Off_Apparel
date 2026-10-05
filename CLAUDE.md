@@ -90,8 +90,11 @@ exposed to end users through the MCP server this repo builds. Don't conflate the
 
 ## Environments
 
-Both are AWS ECS Fargate, both defined in Terraform, both running the same image SHA
-promoted from one to the other.
+Both are AWS ECS Fargate, both defined in Terraform. Each is deployed from its own
+branch (`uat` → UAT, `main` → production), building its own images — see CI/CD Pipeline.
+**No AWS infrastructure exists yet** (2026-10-05): only `infra/environments/example` is in
+the repo; `infra/environments/uat` and `production` are still to be written and applied
+(Plays 05–10), and both deploy workflows fail until they are.
 
 | | Production | UAT |
 |---|---|---|
@@ -1039,10 +1042,16 @@ and one per environment copied from `environments/example`.
 
 ## CI/CD Pipeline
 
-`deploy.yml` on push to `main`: `build → deploy-uat → smoke-test-uat`, then **stops**.
-`deploy-production.yml` is `workflow_dispatch` only and promotes an already-built SHA,
-refusing any SHA not in ECR. Both images are built once and promoted unchanged. Do not
-chain production onto the push pipeline.
+Branch-per-environment (the workflows' own headers are authoritative):
+`deploy-uat.yml` runs on every push to `uat` (or by hand): `build → deploy-uat →
+smoke-test-uat`. `deploy.yml` runs on every push to `main`: `build → deploy-production`
+(+ smoke test). Each builds fresh web and MCP images from its own branch tip; there is no
+promote-by-SHA step any more — the required PR review on `uat` and `main` is the
+deliberate-promotion gate. Flow: feature branch → PR into `dev` → PR `dev` → `uat` (UAT
+testing) → PR into `main` (production). Both need repository Variables (`AWS_REGION`,
+`PROJECT_SLUG`, `PRIMARY_DOMAIN`, `ECS_CLUSTER[_UAT]`, `ECS_SERVICE_WEB[_UAT]`,
+`ECS_SERVICE_MCP[_UAT]`) and an `AWS_ROLE_ARN` secret in the matching GitHub
+Environment, all from Terraform outputs.
 
 In each environment: render both task definitions, run `prisma migrate deploy` as a
 **blocking one-off `run-task`** (nonzero exit fails the workflow), then roll out both
