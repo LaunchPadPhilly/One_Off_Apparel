@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '$lib/server/prisma';
-import { ArtworkApprovalStatus, LineItemStatus, LineItemType, OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import { ArtworkApprovalStatus, BlankOrderingStatus, CustomerApprovalStatus, LineItemStatus, LineItemType, OrderStatus } from '../../../../prisma/generated/prisma/enums';
 import type { LineItem, Order } from '../../../../prisma/generated/prisma/client';
 import { ALL_SIBLINGS, orderCandidateSchema, type OrderCandidate } from './types';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import { ALL_DECORATIONS_DEPENDENCY } from '$lib/server/engine/types';
+import { countDecorationColors } from '$lib/server/engine/decorationColors';
 
 export interface ImportHoopsExportResult {
 	orderIds: string[];
@@ -43,6 +44,21 @@ function resolveFinishingDependency(
 	return { dependsOn: ALL_DECORATIONS_DEPENDENCY, status: LineItemStatus.BLOCKED };
 }
 
+/**
+ * Screen print and embroidery need a color count for their formulas. The PDF already
+ * lists the colors (2026-10-02: assume what's in the PDF rather than asking), so when
+ * the extraction didn't state a count, count the "Color(s)" entries; when those don't
+ * name real colors ("TBD", blank), assume 1 and say so in a flag.
+ */
+function resolveInkColorCount(item: OrderCandidate['lineItems'][number], flags: string[]): number | null {
+	if (item.inkColorCount != null) return item.inkColorCount;
+	if (item.decorationType !== 'SCREEN_PRINT' && item.decorationType !== 'EMBROIDERY') return null;
+	const counted = countDecorationColors(item.decorationColors);
+	if (counted != null) return counted;
+	flags.push(`"${item.design}" lists no countable colors${item.decorationColors ? ` ("${item.decorationColors}")` : ''}, so 1 color was assumed.`);
+	return 1;
+}
+
 async function createLineItemsForOrder(
 	tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
 	orderId: string,
@@ -78,11 +94,13 @@ async function createLineItemsForOrder(
 				otherJobType: itemCandidate.itemType === LineItemType.OTHER ? (itemCandidate.otherJobType ?? null) : null,
 				weightClass: itemCandidate.weightClass,
 				apparelColor: itemCandidate.apparelColor,
-				inkColorCount: itemCandidate.inkColorCount ?? null,
+				inkColorCount: resolveInkColorCount(itemCandidate, flags),
 				decorationColors: itemCandidate.decorationColors || null,
 				screens: itemCandidate.screens ?? null,
 				stitchCount: itemCandidate.stitchCount ?? null,
-				garmentStyle: itemCandidate.garmentStyle ?? null,
+				// Anything that isn't a hat is flat (2026-10-02), so a decoration the
+				// extraction didn't mark CAP is FLAT rather than a question.
+				garmentStyle: itemCandidate.itemType === LineItemType.DECORATION ? (itemCandidate.garmentStyle ?? 'FLAT') : null,
 				capConstruction: itemCandidate.capConstruction ?? null,
 				matteSurface: itemCandidate.matteSurface ?? null,
 				foldBagGarment: itemCandidate.foldBagGarment ?? null,
@@ -135,6 +153,11 @@ export async function importHoopsExport(orders: readonly OrderCandidate[]): Prom
 				deadline: orderCandidate.deadline ? new Date(orderCandidate.deadline) : null,
 				deadlineIsTight: orderCandidate.deadlineIsTight,
 				status: OrderStatus.NEEDS_REVIEW,
+				// Assumed (2026-10-02): blanks are ordered and the customer has signed off.
+				// Neither is asked about or gates scheduling; both stay editable on the
+				// order page for the record.
+				blankOrderingStatus: BlankOrderingStatus.ORDERED,
+				customerApprovalStatus: CustomerApprovalStatus.APPROVED,
 				importedBy: orderCandidate.importedBy
 			};
 

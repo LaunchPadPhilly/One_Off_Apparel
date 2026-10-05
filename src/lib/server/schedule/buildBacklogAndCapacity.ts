@@ -1,7 +1,5 @@
 import { prisma } from '$lib/server/prisma';
 import {
-	BlankOrderingStatus,
-	CustomerApprovalStatus,
 	LineItemStatus,
 	LineItemType,
 	OrderStatus
@@ -31,8 +29,8 @@ export interface SchedulingBacklog {
  *      wait on — see proposeSchedule.ts. Being on the schedule doesn't unlock them on
  *      the floor; startAssignment.ts still refuses to Start a BLOCKED line item.)
  *   2. Order.status is CONFIRMED (import confirmation gate passed)
- *   3. Order.blankOrderingStatus is RECEIVED (garments are in hand)
- *   4. Order.customerApprovalStatus is APPROVED (customer signed off)
+ *   3–4. (Removed 2026-10-02: blanks are always assumed ordered and customer approval
+ *      assumed, so neither gates scheduling.)
  *   5. (Removed 2026-09-28: artwork approval is no longer a gate — the client always
  *      considers artwork done.)
  *   6. Order.deadline is today or later (2026-09-22 decision, retained across the
@@ -63,8 +61,6 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			],
 			order: {
 				status: OrderStatus.CONFIRMED,
-				blankOrderingStatus: BlankOrderingStatus.RECEIVED,
-				customerApprovalStatus: CustomerApprovalStatus.APPROVED,
 				deadline: { gte: startOfToday() }
 			}
 		},
@@ -120,6 +116,7 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			decorationType: item.decorationType,
 			finishingStep: item.finishingStep,
 			inkColorCount: item.inkColorCount,
+			decorationColors: item.decorationColors,
 			screens: item.screens,
 			stitchCount: item.stitchCount,
 			quantity: item.quantity,

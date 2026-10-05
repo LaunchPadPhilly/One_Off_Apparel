@@ -30,6 +30,9 @@ export interface EstimateHoursInput {
 	decorationType?: DecorationType | null;
 	finishingStep?: FinishingStep | null;
 	inkColorCount?: number | null;
+	// The "Color(s)" text from the PDF. Stands in for inkColorCount when that's empty
+	// (2026-10-02: assume what's in the PDF instead of asking) — see colorCountFor().
+	decorationColors?: string | null;
 	screens?: number | null;
 	stitchCount?: number | null;
 	quantity: number;

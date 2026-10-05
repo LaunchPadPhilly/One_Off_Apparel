@@ -72,6 +72,18 @@ const extractionTool: Anthropic.Tool = {
 							enum: ['FLAT', 'SPECIALTY', null],
 							description: 'MATTE rows only, and only if the export clearly says whether the matte goes on a flat or specialty surface. Otherwise null and note it in confidenceFlags — never guess.'
 						},
+						garmentStyle: {
+							type: ['string', 'null'],
+							enum: ['FLAT', 'CAP', null],
+							description:
+								'DECORATION rows only: the garment this decoration goes on, from its blank/garment block. CAP for headwear (cap, hat, snapback, trucker, visor, beanie); FLAT for everything else (tees, polos, hoodies, jackets, bags...). Null for finishing rows.'
+						},
+						capConstruction: {
+							type: ['string', 'null'],
+							enum: ['STRUCTURED', 'UNSTRUCTURED', null],
+							description:
+								'Only when garmentStyle is CAP: STRUCTURED or UNSTRUCTURED if the product name or description says so (e.g. "Structured Snapback", "Unstructured Dad Hat"). Null otherwise.'
+						},
 						foldBagGarment: {
 							type: ['string', 'null'],
 							enum: ['SS_TEE', 'OTHER', null],
@@ -89,7 +101,7 @@ const extractionTool: Anthropic.Tool = {
 								'From an inline hint like "(Thin - ...)" or "(Fleece/Bulky)" when present. If the product has no such hint (e.g. headwear), there is no correct value yet — default to "THIN" and you MUST add a confidenceFlags entry naming this line item and saying no weight-class signal existed.'
 						},
 						apparelColor: { type: 'string' },
-						inkColorCount: { type: ['integer', 'null'], description: 'From "N Color Screen Print" or similar. Null if not applicable.' },
+						inkColorCount: { type: ['integer', 'null'], description: 'From "N Color Screen Print" or similar. If no count is stated, count the colors listed in the decoration row "Color(s)" column (e.g. "White thread" = 1, "109c Yellow, White" = 2). Null only if not applicable or the colors are not listed.' },
 						decorationColors: {
 							type: ['string', 'null'],
 							description:
@@ -120,6 +132,7 @@ const SYSTEM_PROMPT = `You extract structured order data from a "Job" PDF export
 - Never invent a value you cannot support from the text. When something doesn't fit the schema (an unmapped treatment type, a missing signal, an ambiguous position), say so in confidenceFlags rather than guessing silently. This system's whole design assumes a human reviews everything you extract before it becomes real — your job is to make what you're unsure about visible, not to be right about everything.
 - If a treatment is real production work but has no matching decorationType or finishingStep (e.g. "Patch Install" — it's neither screen print/embroidery/DTF/DTG nor matte/relabel/fold&bag/hang tag/wovens), include it as itemType "OTHER" with otherJobType set to its name as written (e.g. "Patch Install"), decorationType and finishingStep null, and note it in confidenceFlags. Never force it into a type it isn't; a reviewer will assign its station and hours.
 - Rows that aren't production work on garments — administrative fees (digitizing fee, ink color change) and supply/material lines (e.g. "75 units of patches", leftover patches for the customer) — are never line items. Leave them out and mention them in confidenceFlags.
+- Every DECORATION row gets a garmentStyle, read from its garment block's product name/description: a cap or hat (snapback, trucker, dad hat, visor, beanie) is CAP; anything else — a shirt, tee, polo, hoodie, crewneck, jacket, bag — is FLAT. Never leave it null on a decoration.
 - If there is no "Deadline", return an empty deadline and say so in confidenceFlags. Never use another date instead.
 
 Call emit_extracted_order exactly once with everything you found.`;
