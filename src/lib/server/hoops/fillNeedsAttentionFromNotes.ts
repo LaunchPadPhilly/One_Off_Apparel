@@ -22,10 +22,13 @@ import type { OrderCorrection, LineItemCorrection } from './types';
  * unaddressed field — the tool is instructed to omit anything the note doesn't actually
  * answer, and this module double-checks that whatever comes back is one of the field's
  * real allowed values before writing anything.
+ *
+ * Called from the order page's notes-box form action (src/routes/orders/[id]/+page.server.ts).
  */
 
 const MODEL = 'claude-sonnet-5';
 
+/** An expected failure (empty note, nothing to answer, API problem); its message is shown to the reviewer as-is. */
 export class FillFromNotesError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -33,8 +36,13 @@ export class FillFromNotesError extends Error {
 	}
 }
 
+// What kind of answer a field accepts: a fixed list of enum values, or one of the
+// special kinds checked by hand below.
 type FieldKind = readonly string[] | 'integer' | 'hours' | 'date' | 'station';
 
+// Every field a gap question can target (OrderGapQuestion['target']['field']) must have
+// an entry here — it's both what Claude is told is allowed and what an answer is
+// checked against before it's written.
 const ALLOWED_VALUES: Record<string, FieldKind> = {
 	blankOrderingStatus: ['NOT_ORDERED', 'ORDERED', 'ISSUE', 'RECEIVED'],
 	customerApprovalStatus: ['NOT_SENT', 'PENDING_APPROVAL', 'CHANGES_REQUESTED', 'APPROVED'],
@@ -52,6 +60,7 @@ const ALLOWED_VALUES: Record<string, FieldKind> = {
 	assignedStationId: 'station'
 };
 
+/** Plain-language description of a field's allowed answers, for the question list sent to Claude. */
 function describeAllowedValues(kind: FieldKind, stationLabels: readonly string[]): string {
 	if (kind === 'integer') return 'a whole number';
 	if (kind === 'hours') return 'a number of hours greater than 0, decimals allowed (e.g. 1.5)';
@@ -60,6 +69,7 @@ function describeAllowedValues(kind: FieldKind, stationLabels: readonly string[]
 	return kind.join(', ');
 }
 
+/** A real calendar date in "YYYY-MM-DD" form (same check as extractOrderFromPdf.ts). */
 function isIsoDate(value: string): boolean {
 	if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
 	const date = new Date(`${value}T00:00:00.000Z`);
@@ -90,21 +100,40 @@ const answersTool: Anthropic.Tool = {
 	}
 };
 
+// Sent to Claude with every note. Wording here is behavior — the "never guess" rule is
+// what keeps unaddressed fields untouched (the validation below is the backstop).
 const SYSTEM_PROMPT = `You help a shop reviewer quickly resolve specific outstanding gaps on an apparel order, from their own plain-language note.
 
 You are given a numbered list of questions. Each has a key and its exact allowed answer values. Read the reviewer's note and, for each question it actually answers, call emit_answers with that question's key and the matching allowed value. A question the note doesn't address must simply be left out of the answers array — do not guess, infer, or default it, and never invent a key that wasn't given. Call emit_answers exactly once.`;
 
+/** How many of the order's outstanding questions the note answered (validly) and how many are still open. */
 export interface FillFromNotesResult {
 	answeredCount: number;
 	unansweredCount: number;
 }
 
+/**
+ * Reads a reviewer's note against the order's current outstanding questions and writes
+ * every valid answer through updateOrderFields / updateLineItemFields, then logs the
+ * whole fill to the audit log. The question list is recomputed from the database here,
+ * never taken from the browser.
+ *
+ * @param orderId - the order being reviewed (database id)
+ * @param note - the reviewer's free-text note
+ * @param actor - who wrote the note, for the audit log
+ * @returns counts of answered vs. still-open questions
+ * @throws FillFromNotesError for an empty note, unknown order, nothing to answer, a
+ *         missing API key, or an unusable Claude response. A field update can also throw
+ *         its own validation error (see updateOrderFields.ts).
+ */
 export async function fillNeedsAttentionFromNotes(orderId: string, note: string, actor: string): Promise<FillFromNotesResult> {
 	if (!note.trim()) throw new FillFromNotesError('Write a note answering one or more of the questions above first.');
 
 	const order = await prisma.order.findUnique({ where: { id: orderId }, include: { lineItems: true } });
 	if (!order) throw new FillFromNotesError(`Order ${orderId} not found`);
 
+	// Import-time flags live only in the latest import's audit entry (they're not an
+	// Order column), and computeOrderGaps needs them to build its info notes.
 	const lastImportLog = await prisma.domainAuditLog.findFirst({
 		where: { entity: 'Order', entityId: orderId, action: { in: ['hoops_import_created', 'hoops_import_reopened'] } },
 		orderBy: { at: 'desc' }

@@ -5,14 +5,22 @@ import { prisma } from '$lib/server/prisma';
  * The shop-floor roster (config settings, 2026-09-25): people by name, each with the
  * stations they're certified to run. Floor staff don't log in, so a Worker is
  * deliberately not linked to User. "Delete" is an archive, same as stations, so a
- * person's past assignments (once assignment-to-people lands) keep their history.
+ * person's past crew assignments (AssignmentCrew) keep their history.
  *
- * Nothing reads certifications yet — the next step (crew-based estimates and the
- * engine picking people) is what enforces "only certified people on a station".
+ * Certifications are what the daily staffing plan (engine/planStaffing.ts, fed by
+ * schedule/buildBacklogAndCapacity.ts) and the set_worker_station MCP tool read to
+ * enforce "only certified people on a station" (2026-09-28).
+ *
+ * Called from the admin-only People screen (src/routes/settings/+page.server.ts,
+ * `?screen=people`), which calls `requireAdminApi` before anything here — these
+ * functions do no permission check of their own. Every change writes a DomainAuditLog row
+ * in the same transaction.
  */
 
+/** A refusal whose message is written for the admin; the settings page shows it as-is. */
 export class WorkerConfigError extends Error {}
 
+/** Form input for a new person: name, optional notes (blank → null), certified station ids. */
 export const workerSchema = z.object({
 	name: z.string().trim().min(1, 'Name is required.').max(80, 'Name must be 80 characters or fewer.'),
 	notes: z
@@ -23,8 +31,11 @@ export const workerSchema = z.object({
 	stationIds: z.array(z.string().min(1)).max(200)
 });
 
+/** Same as workerSchema plus the id of the person being edited. */
 export const updateWorkerSchema = workerSchema.extend({ id: z.string().min(1) });
 
+/** Every person, active first then archived, each A–Z, with their certified station ids
+ *  (archived stations included). */
 export async function listWorkers() {
 	const workers = await prisma.worker.findMany({
 		orderBy: [{ archivedAt: { sort: 'asc', nulls: 'first' } }, { name: 'asc' }],
@@ -47,6 +58,8 @@ async function assertActiveStations(tx: Pick<typeof prisma, 'station'>, stationI
 	if (found !== new Set(stationIds).size) throw new WorkerConfigError('One of the selected stations no longer exists — reload and try again.');
 }
 
+/** Adds a person with their certifications; returns the new row. Throws
+ *  WorkerConfigError if any station id isn't an active station. */
 export async function createWorker(input: z.infer<typeof workerSchema>, actor: string) {
 	const stationIds = [...new Set(input.stationIds)];
 	return prisma.$transaction(async (tx) => {
@@ -64,7 +77,8 @@ export async function createWorker(input: z.infer<typeof workerSchema>, actor: s
 /**
  * Replaces the person's certifications with exactly the active stations ticked.
  * Certifications on *archived* stations aren't shown in the form, so they're left
- * alone — restoring that station restores the certification with it.
+ * alone — restoring that station restores the certification with it. Throws
+ * WorkerConfigError if the person is missing or a station id isn't an active station.
  */
 export async function updateWorker(input: z.infer<typeof updateWorkerSchema>, actor: string) {
 	const stationIds = [...new Set(input.stationIds)];
@@ -93,6 +107,8 @@ export async function updateWorker(input: z.infer<typeof updateWorkerSchema>, ac
 	});
 }
 
+/** Archives ("deletes") or restores a person. No-op if already in that state. Throws
+ *  WorkerConfigError if the person doesn't exist. */
 export async function setWorkerArchived(id: string, archived: boolean, actor: string) {
 	return prisma.$transaction(async (tx) => {
 		const worker = await tx.worker.findUnique({ where: { id } });

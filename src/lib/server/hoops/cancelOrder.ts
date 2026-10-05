@@ -28,6 +28,12 @@ export class CancelOrderError extends Error {}
  * @param orderId - which order to cancel (its database id)
  * @param actor - who is doing the cancelling (their email), so we can write it to the
  *                audit log for accountability
+ * @returns the updated Order row
+ * @throws CancelOrderError if the order doesn't exist, is already COMPLETE, or is
+ *         already CANCELLED
+ *
+ * Called from the Orders list and the order page (src/routes/orders/+page.server.ts and
+ * src/routes/orders/[id]/+page.server.ts).
  */
 export async function cancelOrder(orderId: string, actor: string) {
 	// prisma.$transaction runs everything inside this function as one atomic unit:

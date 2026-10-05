@@ -14,6 +14,14 @@ import { prisma } from '$lib/server/prisma';
  * textarea directly is rewriting the whole field on purpose, but a note added through
  * conversation is one more observation stacking on whatever's already there — losing
  * an earlier note because a later one overwrote it would be the wrong default.
+ *
+ * Called from the add_order_note MCP tool (src/lib/server/mcp/tools.ts).
+ *
+ * @param hoopsOrderId - the Hoops job number, e.g. "100127"
+ * @param note - the note text to append
+ * @param actor - who the note is from; written into the note line and the audit log
+ * @returns the updated Order row
+ * @throws Error if no order has that hoopsOrderId
  */
 export async function addOrderNote(hoopsOrderId: string, note: string, actor: string) {
 	return prisma.$transaction(async (tx) => {

@@ -27,13 +27,19 @@ import type { BacklogItem, CapacitySlot } from './types';
  * Known simplification: workload is the whole backlog's, spread evenly over the
  * window's days, not re-planned day by day as jobs get placed. Good enough to aim
  * people at the busy stations; revisit if it staffs obviously wrong in practice.
+ *
+ * Called from fetchStaffedCapacity() (schedule/buildBacklogAndCapacity.ts) before every
+ * engine run: automatic draft, propose_schedule and simulate_change.
  */
+
+/** One person on the roster, as the planner needs them. */
 export interface StaffingWorker {
 	id: string;
 	/** Active stations this person is certified on. */
 	stationIds: readonly string[];
 }
 
+/** Everything about people the planner needs, keyed by staffingKey() for per-day facts. */
 export interface StaffingInputs {
 	workers: readonly StaffingWorker[];
 	/** `${workerId}|YYYY-MM-DD` for every day a person is out. */
@@ -42,6 +48,8 @@ export interface StaffingInputs {
 	pins: ReadonlyMap<string, string>;
 }
 
+/** The `${workerId}|YYYY-MM-DD` key for StaffingInputs' sets/maps. A Date is read as
+ *  its UTC calendar day, matching how the engine keys capacity days. */
 export function staffingKey(workerId: string, date: Date | string): string {
 	return `${workerId}|${typeof date === 'string' ? date : date.toISOString().slice(0, 10)}`;
 }
@@ -90,6 +98,14 @@ function stationLoads(backlog: readonly BacklogItem[], capacity: readonly Capaci
 	return loads;
 }
 
+/**
+ * Assigns people to stations for each day in `capacity`, following the rules at the top
+ * of this file. Pure: no DB access, inputs are not mutated.
+ *
+ * @returns the capacity slots that have someone working them, each with
+ *   `crewWorkerIds` set (sorted). Slots nobody is on are dropped — that station is
+ *   closed that day. With an empty roster, a copy of `capacity` unchanged.
+ */
 export function planStaffing(backlog: readonly BacklogItem[], capacity: readonly CapacitySlot[], inputs: StaffingInputs): CapacitySlot[] {
 	if (inputs.workers.length === 0) return capacity.map((slot) => ({ ...slot }));
 

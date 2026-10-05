@@ -1,24 +1,46 @@
 import { prisma } from '$lib/server/prisma';
 import { OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import { McpUserError } from '$lib/server/mcp/handler';
 import { fetchOrderGaps } from './orderReadiness';
 import { lineItemCorrectionSchema, orderCorrectionSchema, type ImportCorrections } from './types';
 
 /**
  * Locks a Hoops import in as real once a person has checked it — the first of
  * CLAUDE.md's two human approval gates. Applies any corrections, then flips the given
- * orders from needs_review to confirmed. Never touches LineItem.status: propose_schedule's
- * backlog is filtered on LineItem.status alone (see CLAUDE.md's engine section — "backlog
- * only ever contains status: needs_review"), so whatever builds that backlog must also
- * check the parent Order is confirmed. That's this function's caller's job, not this one's.
+ * orders from needs_review to confirmed. Never touches LineItem.status: the scheduling
+ * backlog (fetchBacklog() in buildBacklogAndCapacity.ts) checks the parent Order is
+ * CONFIRMED itself, so flipping Order.status here is all it takes to make the line items
+ * schedulable.
+ *
+ * Called from the order page's "Confirm import" action (src/routes/orders/[id]/+page.server.ts)
+ * and the confirm_import MCP tool (src/lib/server/mcp/tools.ts) — both go through this
+ * same gate.
  *
  * Note: CLAUDE.md's tool signature is `confirm_import(order_ids[], corrections?)` — no
- * explicit confirmer identity, unlike `commit_schedule(assignment_ids[], approved_by)`.
- * That's presumably because at the MCP-tool layer the authenticated principal making the
- * call *is* the confirming human, so there's nothing to pass explicitly. This module has
- * no request-scoped principal (it's not wired into mcp/tools.ts — see importHoopsExport.ts
- * for why), so `confirmedBy` is a required parameter here; thread the caller's identity
- * through it once that wiring exists.
+ * explicit confirmer identity, unlike `commit_schedule(assignment_ids[], approved_by)`,
+ * because at the MCP-tool layer the authenticated principal making the call *is* the
+ * confirming human. This module has no request-scoped principal of its own, so each
+ * caller passes that identity in as `confirmedBy`.
+ *
+ * @param orderIds - database ids of the orders to confirm (all must be needs_review)
+ * @param confirmedBy - who is confirming, for the audit log
+ * @param corrections - optional field edits applied just before the check (see types.ts)
+ * @throws ConfirmImportError if an order id doesn't exist, isn't needs_review, a
+ *         correction targets an order/line item outside this confirmation, or an order
+ *         still has open blocking items (orderGaps.ts) after corrections. The whole transaction rolls
+ *         back, so corrections aren't saved either.
  */
+/**
+ * Why an order can't be confirmed, written for the person confirming. A McpUserError, so
+ * the message reaches Claude as-is (the order page shows it too).
+ */
+export class ConfirmImportError extends McpUserError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'ConfirmImportError';
+	}
+}
+
 export async function confirmImport(orderIds: readonly string[], confirmedBy: string, corrections?: ImportCorrections): Promise<void> {
 	if (orderIds.length === 0) return;
 
@@ -27,12 +49,12 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 		if (orders.length !== orderIds.length) {
 			const found = new Set(orders.map((order) => order.id));
 			const missing = orderIds.filter((id) => !found.has(id));
-			throw new Error(`confirm_import: order id(s) not found: ${missing.join(', ')}`);
+			throw new ConfirmImportError(`confirm_import: order id(s) not found: ${missing.join(', ')}`);
 		}
 
 		const notNeedsReview = orders.filter((order) => order.status !== OrderStatus.NEEDS_REVIEW);
 		if (notNeedsReview.length > 0) {
-			throw new Error(
+			throw new ConfirmImportError(
 				`confirm_import: order(s) not in needs_review status: ${notNeedsReview.map((order) => `${order.id} (${order.status})`).join(', ')}`
 			);
 		}
@@ -44,6 +66,17 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 			select: { id: true, orderId: true }
 		});
 		const lineItemsByOrder = new Map(lineItemOrders.map((row) => [row.id, row.orderId] as const));
+
+		// Corrections may only touch the orders being confirmed and their own line items —
+		// otherwise one confirm call could quietly edit an unrelated order (2026-10-05).
+		const confirming = new Set(orderIds);
+		const strayOrders = Object.keys(corrections?.orders ?? {}).filter((id) => !confirming.has(id));
+		const strayLineItems = Object.keys(corrections?.lineItems ?? {}).filter((id) => !lineItemsByOrder.has(id));
+		if (strayOrders.length > 0 || strayLineItems.length > 0) {
+			throw new ConfirmImportError(
+				`confirm_import: corrections can only change the orders being confirmed and their own jobs. Not part of this confirmation: ${[...strayOrders.map((id) => `order ${id}`), ...strayLineItems.map((id) => `line item ${id}`)].join(', ')}.`
+			);
+		}
 
 		for (const [lineItemId, patch] of Object.entries(corrections?.lineItems ?? {})) {
 			const validated = lineItemCorrectionSchema.parse(patch);
@@ -63,15 +96,15 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 			});
 		}
 
-		// NEW (2026-09-23): an order is only confirmable once it's fully valid — every
-		// line item estimable, blanks received, customer approved, all artwork approved
-		// (orderGaps.ts' blockingCount). Checked here, after corrections are applied and
+		// NEW (2026-09-23): an order is only confirmable once it's fully valid — a
+		// deadline set and every line item estimable (orderGaps.ts' blockingCount; blanks,
+		// customer approval and artwork are assumed done and no longer counted). Checked here, after corrections are applied and
 		// inside the same transaction, so neither the order page nor the confirm_import
 		// MCP tool can confirm around it.
 		const gapsByOrder = await fetchOrderGaps(orderIds, tx);
 		const notReady = orders.filter((order) => (gapsByOrder.get(order.id)?.blockingCount ?? 0) > 0);
 		if (notReady.length > 0) {
-			throw new Error(
+			throw new ConfirmImportError(
 				`confirm_import: can't confirm yet — ${notReady
 					.map((order) => `${order.hoopsOrderId} has ${gapsByOrder.get(order.id)!.blockingCount} open item(s) (see Needs attention on its order page)`)
 					.join('; ')}.`

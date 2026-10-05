@@ -8,6 +8,18 @@ import { mcpServerName } from '$lib/appConfig';
 import { looksLikeAgentToken, resolveAgentToken } from '$lib/server/mcp/agentTokens';
 import type { McpScope } from '../../../../prisma/generated/prisma/enums.ts';
 
+// The shared MCP endpoint: authentication, the per-tool scope check, and turning tool
+// results/errors into MCP responses. It knows nothing about orders or schedules — the
+// tool list (mcp/tools.ts) is passed in by the caller.
+//
+// The flow for every request, in plain words:
+//   1. Read the `Authorization: Bearer <token>` header (no header → 401).
+//   2. Work out who is calling (a "principal", see below). Unknown/revoked/expired → 401.
+//   3. Build an MCP server with *every* tool registered, whatever the caller holds.
+//   4. When a tool is called, guardedToolResult checks the caller holds that tool's
+//      `requiredScope`. No scope → a permission message; scope → run the tool.
+//   5. A tool error becomes a generic "unavailable" message unless it's an McpUserError.
+
 /**
  * Three ways to reach this endpoint:
  *
@@ -31,7 +43,7 @@ export type Principal =
 
 /** A human-readable actor identity for audit logs and `*_by` columns (e.g. proposedBy).
  *  The legacy static token has no identity of its own — it's unattributable by design
- *  (see Architecture above) — so it falls back to a literal, greppable label. */
+ *  (see CLAUDE.md's Architecture section) — so it falls back to a literal, greppable label. */
 export function principalIdentity(principal: Principal): string {
 	switch (principal.kind) {
 		case 'oauth':
@@ -51,8 +63,9 @@ export function principalIdentity(principal: Principal): string {
  *
  * Read-only by default (`readOnly: true`) — no INSERT/UPDATE/DELETE/DROP. A tool may set
  * `readOnly: false` only as an approved, scoped exception: today that's the domain
- * write-tools (`import_hoops_export`, `confirm_import`, `commit_schedule`) described in
- * CLAUDE.md's Domain section, each gated by its own scope and one of the two human
+ * write-tools in mcp/tools.ts (`import_hoops_export`, `confirm_import`, `commit_schedule`
+ * and the others marked `readOnly: false` there) described in CLAUDE.md's Domain
+ * section, each gated by its own scope and one of the two human
  * approval gates CLAUDE.md's non-negotiable design principles require — never a bare
  * database write with no approval step in front of it. See CLAUDE.md's Security
  * constraints section for the decision record.
@@ -71,12 +84,22 @@ export type McpToolDefinition<Shape extends z.ZodRawShape = z.ZodRawShape> = {
 	handler: (input: z.infer<z.ZodObject<Shape>>, principal: Principal) => Promise<unknown>;
 };
 
+/** The two HTTP entry points a route/server wires up for `/api/mcp`. */
 export type McpHandler = {
+	/** Authenticated liveness check: 200 `{ name, status: 'ready' }`, or 401. */
 	handleGet(request: Request): Promise<Response>;
+	/** The MCP protocol itself (tool list, tool calls), or 401. */
 	handlePost(request: Request): Promise<Response>;
 };
 
-/** Builds the two HTTP handlers for a given tool list. */
+/**
+ * Builds the two HTTP handlers for a given tool list. Called once at startup by
+ * src/mcp-server/index.ts and src/routes/api/mcp/+server.ts with `mcpTools`.
+ *
+ * Stateless: every POST authenticates again and gets a fresh server/transport
+ * (`sessionIdGenerator: undefined`), so a revoked token or scope stops working on the
+ * very next request.
+ */
 export function createMcpHandler(tools: readonly McpToolDefinition[]): McpHandler {
 	return {
 		async handleGet(request) {
@@ -131,11 +154,16 @@ function createServer(principal: Principal, tools: readonly McpToolDefinition[])
 	return server;
 }
 
+// The legacy static token is unrestricted by design (CLAUDE.md, Play 02 step 4); every
+// other principal must hold the exact scope. For OAuth, `scopes` is already the live
+// token ∩ active-grant intersection computed in authenticateOAuthToken().
 function hasScope(principal: Principal, scope: McpScope) {
 	return principal.kind === 'static' || principal.scopes.has(scope);
 }
 
-/** Tools register unconditionally now, so this is the only gate — see createServer(). */
+/** Tools register unconditionally now, so this is the only gate — see createServer().
+ *  Missing scope → an MCP error result naming the scope to ask for (the tool never runs);
+ *  otherwise runs the tool through toolResult(). */
 async function guardedToolResult(principal: Principal, requiredScope: McpScope, operation: () => Promise<unknown>) {
 	if (!hasScope(principal, requiredScope)) {
 		return {
@@ -159,6 +187,7 @@ async function guardedToolResult(principal: Principal, requiredScope: McpScope, 
  */
 export class McpUserError extends Error {}
 
+/** Runs a tool and wraps its return value as JSON text — the shape MCP clients expect. */
 async function toolResult(operation: () => Promise<unknown>) {
 	try {
 		const result = await operation();
@@ -174,6 +203,8 @@ async function toolResult(operation: () => Promise<unknown>) {
 	}
 }
 
+/** Works out who is calling from the bearer token, or null (→ 401). Order matters:
+ *  static token first, then agent tokens (by prefix), then OAuth access tokens. */
 async function authenticate(request: Request): Promise<Principal | null> {
 	const presented = bearerToken(request);
 	if (!presented) return null;
@@ -221,12 +252,15 @@ function matchesStaticToken(presented: string) {
 	const configuredToken = process.env.MCP_SERVER_TOKEN;
 	if (!configuredToken) return false;
 
+	// Constant-time comparison so response timing can't reveal how much of the token
+	// matched. timingSafeEqual throws on unequal lengths, hence the length check first.
 	const expected = Buffer.from(configuredToken);
 	const actual = Buffer.from(presented);
 	return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
 async function authenticateOAuthToken(presented: string): Promise<Principal | null> {
+	// Only the SHA-256 hash is stored, so a database leak doesn't leak usable tokens.
 	const tokenHash = createHash('sha256').update(presented).digest('hex');
 	const record = await prisma.mcpAccessToken.findUnique({ where: { tokenHash } });
 
@@ -249,9 +283,12 @@ async function authenticateOAuthToken(presented: string): Promise<Principal | nu
 		return null;
 	}
 
+	// Effective scope = what the token was issued with ∩ what the user is granted *right
+	// now*, so an admin revoking a grant takes effect without revoking the token.
 	const activeGrants = await getActiveScopes(record.userId);
 	const effectiveScopes = new Set(record.scope.filter((scope) => activeGrants.has(scope)));
 
+	// Fire-and-forget: a failed lastUsedAt write must never block or fail the request.
 	prisma.mcpAccessToken.update({ where: { id: record.id }, data: { lastUsedAt: new Date() } }).catch(() => {});
 
 	return { kind: 'oauth', userId: record.userId, scopes: effectiveScopes };

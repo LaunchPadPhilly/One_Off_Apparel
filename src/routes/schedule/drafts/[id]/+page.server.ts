@@ -1,7 +1,8 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import { requireScopePage } from '$lib/server/auth/guards';
 import { deleteDraft, getDraft } from '$lib/server/schedule/draft';
-import { checkFinisherPlacement, repackDraftDays } from '$lib/server/schedule/draftDependencies';
+import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
+import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
@@ -329,32 +330,39 @@ export const actions: Actions = {
 		// One transaction so the create + cascade + settle sequence can't leave a
 		// half-shifted day if any step fails mid-way through.
 		const durationMin = Math.max(15, Math.round(hours * 60));
-		const result = await prisma.$transaction(async (tx) => {
-			const created = await tx.scheduleAssignment.create({
-				data: {
-					lineItemId,
+		// A finisher that can't be settled is refused with a message, nothing saved.
+		let result;
+		try {
+			result = await prisma.$transaction(async (tx) => {
+				const created = await tx.scheduleAssignment.create({
+					data: {
+						lineItemId,
+						stationId: station.id,
+						date,
+						// Rewritten by cascadeInsert inside repackDraftDays; sequenceOrder gets
+						// renumbered from the sorted result.
+						sequenceOrder: 0,
+						startMinuteOfDay: startMinuteOfDay,
+						estimatedHours: hours,
+						status: ScheduleAssignmentStatus.PROPOSED,
+						proposedBy: user.email,
+						scheduleDraftId: params.id
+					}
+				});
+				const { peers, pushedCount } = await repackDraftDays(tx, params.id, {
+					kind: 'insert',
+					assignmentId: created.id,
 					stationId: station.id,
-					date,
-					// Rewritten by cascadeInsert inside repackDraftDays; sequenceOrder gets
-					// renumbered from the sorted result.
-					sequenceOrder: 0,
-					startMinuteOfDay: startMinuteOfDay,
-					estimatedHours: hours,
-					status: ScheduleAssignmentStatus.PROPOSED,
-					proposedBy: user.email,
-					scheduleDraftId: params.id
-				}
+					dayMs: date.getTime(),
+					targetStartMin: startMinuteOfDay,
+					durationMin
+				});
+				return { id: created.id, peers, pushedCount };
 			});
-			const { peers, pushedCount } = await repackDraftDays(tx, params.id, {
-				kind: 'insert',
-				assignmentId: created.id,
-				stationId: station.id,
-				dayMs: date.getTime(),
-				targetStartMin: startMinuteOfDay,
-				durationMin
-			});
-			return { id: created.id, peers, pushedCount };
-		});
+		} catch (err) {
+			if (err instanceof DraftPlacementError) return fail(409, { message: err.message });
+			throw err;
+		}
 		return { success: true as const, id: result.id, peers: result.peers, pushedCount: result.pushedCount };
 	},
 
@@ -379,6 +387,7 @@ export const actions: Actions = {
 			where: { id },
 			select: {
 				scheduleDraftId: true,
+				status: true,
 				stationId: true,
 				date: true,
 				lineItemId: true,
@@ -390,6 +399,10 @@ export const actions: Actions = {
 		});
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
+		// An approved job is on the live schedule; changing it here would skip the
+		// approval gate. Changes go through a new proposed plan instead.
+		if (existing.status !== ScheduleAssignmentStatus.PROPOSED)
+			return fail(409, { message: 'This job is already approved, so it can’t be changed here. Propose a new plan to move it.' });
 
 		const station = await findActiveStation(stationName);
 		if (!station) return fail(400, { message: 'That station no longer exists (it may have been archived in Settings → Stations). Reload the board.' });
@@ -403,34 +416,41 @@ export const actions: Actions = {
 		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, existing.lineItemId, date, Math.max(15, Math.round(existing.estimatedHours * 60)));
 		if (dependencyProblem) return fail(400, { message: dependencyProblem });
 
-		const result = await prisma.$transaction(async (tx) => {
-			// Persist the caller's intent (station/date/startMin). The cascade helper
-			// re-applies gap-preserving math server-authoritatively and rewrites this
-			// row plus any peers it shifts (see draftDependencies.ts).
-			await tx.scheduleAssignment.update({
-				where: { id },
-				data: {
-					stationId: station.id,
-					date,
-					startMinuteOfDay: startMinuteOfDay,
-					proposedBy: user.email
-				}
-			});
+		// A finisher that can't be settled is refused with a message, nothing saved.
+		let result;
+		try {
+			result = await prisma.$transaction(async (tx) => {
+				// Persist the caller's intent (station/date/startMin). The cascade helper
+				// re-applies gap-preserving math server-authoritatively and rewrites this
+				// row plus any peers it shifts (see draftDependencies.ts).
+				await tx.scheduleAssignment.update({
+					where: { id },
+					data: {
+						stationId: station.id,
+						date,
+						startMinuteOfDay: startMinuteOfDay,
+						proposedBy: user.email
+					}
+				});
 
-			// The planned crew was for the (station, day) it left (2026-09-28).
-			const changedSlot =
-				existing.stationId !== station.id || existing.date.getTime() !== date.getTime();
-			if (changedSlot) await tx.assignmentCrew.deleteMany({ where: { assignmentId: id } });
-			return repackDraftDays(tx, params.id, {
-				kind: 'move',
-				assignmentId: id,
-				oldStationId: existing.stationId,
-				oldDayMs: existing.date.getTime(),
-				newStationId: station.id,
-				newDayMs: date.getTime(),
-				targetStartMin: startMinuteOfDay
+				// The planned crew was for the (station, day) it left (2026-09-28).
+				const changedSlot =
+					existing.stationId !== station.id || existing.date.getTime() !== date.getTime();
+				if (changedSlot) await tx.assignmentCrew.deleteMany({ where: { assignmentId: id } });
+				return repackDraftDays(tx, params.id, {
+					kind: 'move',
+					assignmentId: id,
+					oldStationId: existing.stationId,
+					oldDayMs: existing.date.getTime(),
+					newStationId: station.id,
+					newDayMs: date.getTime(),
+					targetStartMin: startMinuteOfDay
+				});
 			});
-		});
+		} catch (err) {
+			if (err instanceof DraftPlacementError) return fail(409, { message: err.message });
+			throw err;
+		}
 
 		return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
 	},
@@ -444,22 +464,33 @@ export const actions: Actions = {
 		// Only allow removal of assignments belonging to this draft.
 		const existing = await prisma.scheduleAssignment.findUnique({
 			where: { id },
-			select: { scheduleDraftId: true, stationId: true, date: true }
+			select: { scheduleDraftId: true, status: true, stationId: true, date: true }
 		});
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
+		// An approved job is on the live schedule; changing it here would skip the
+		// approval gate. Changes go through a new proposed plan instead.
+		if (existing.status !== ScheduleAssignmentStatus.PROPOSED)
+			return fail(409, { message: 'This job is already approved, so it can’t be changed here. Propose a new plan to move it.' });
 
-		const result = await prisma.$transaction(async (tx) => {
-			const removed = await tx.scheduleAssignment.findUnique({ where: { id }, select: { estimatedHours: true, startMinuteOfDay: true } });
-			await tx.scheduleAssignment.delete({ where: { id } });
-			return repackDraftDays(tx, params.id, {
-				kind: 'remove',
-				oldStationId: existing.stationId,
-				oldDayMs: existing.date.getTime(),
-				removedStartMin: removed?.startMinuteOfDay ?? 0,
-				removedDurationMin: Math.max(15, Math.round((removed?.estimatedHours ?? 0) * 60))
+		// A finisher that can't be settled is refused with a message, nothing saved.
+		let result;
+		try {
+			result = await prisma.$transaction(async (tx) => {
+				const removed = await tx.scheduleAssignment.findUnique({ where: { id }, select: { estimatedHours: true, startMinuteOfDay: true } });
+				await tx.scheduleAssignment.delete({ where: { id } });
+				return repackDraftDays(tx, params.id, {
+					kind: 'remove',
+					oldStationId: existing.stationId,
+					oldDayMs: existing.date.getTime(),
+					removedStartMin: removed?.startMinuteOfDay ?? 0,
+					removedDurationMin: Math.max(15, Math.round((removed?.estimatedHours ?? 0) * 60))
+				});
 			});
-		});
+		} catch (err) {
+			if (err instanceof DraftPlacementError) return fail(409, { message: err.message });
+			throw err;
+		}
 		return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
 	},
 
@@ -484,6 +515,22 @@ export const actions: Actions = {
 			data: { displayTitle: nextTitle, colorHex: nextColor }
 		});
 		return { success: true as const };
+	},
+
+	// The second human approval gate, from the board (2026-10-05): approves every
+	// proposed job in this draft — the same commitDraft() the commit_schedule MCP tool
+	// uses, so moved jobs replace their old slots exactly as they do from chat.
+	approveDraft: async ({ params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		try {
+			const result = await commitDraft(params.id, user.email);
+			return { approved: true as const, approvedCount: result.assignments.length, replacedCount: result.replacedCount };
+		} catch (err) {
+			if (err instanceof CommitScheduleError) return fail(409, { message: err.message });
+			throw err;
+		}
 	},
 
 	deleteDraft: async ({ params, locals, url }) => {

@@ -17,7 +17,7 @@ read it before touching any order/schedule/line-item logic.
 
 **Build status:** schema (`prisma/schema.prisma`), the engine (`src/lib/server/engine/`),
 the Hoops import persistence layer (`src/lib/server/hoops/`), the schedule persistence
-layer (`src/lib/server/schedule/`), all six domain MCP tools (`src/lib/server/mcp/tools.ts`),
+layer (`src/lib/server/schedule/`), all twelve domain MCP tools (`src/lib/server/mcp/tools.ts`),
 and a first UI pass — Orders (`src/routes/orders/`, plus `/orders/archive`), an extended
 Schedule/Production board (`src/routes/schedule/`), and a minimal Reports page
 (`src/routes/reports/`) — are built and merged. Real Hoops PDF extraction now exists
@@ -90,8 +90,11 @@ exposed to end users through the MCP server this repo builds. Don't conflate the
 
 ## Environments
 
-Both are AWS ECS Fargate, both defined in Terraform, both running the same image SHA
-promoted from one to the other.
+Both are AWS ECS Fargate, both defined in Terraform. Each is deployed from its own
+branch (`uat` → UAT, `main` → production), building its own images — see CI/CD Pipeline.
+**No AWS infrastructure exists yet** (2026-10-05): only `infra/environments/example` is in
+the repo; `infra/environments/uat` and `production` are still to be written and applied
+(Plays 05–10), and both deploy workflows fail until they are.
 
 | | Production | UAT |
 |---|---|---|
@@ -599,11 +602,13 @@ wovens have no dependency and are placed like any other job. So:
 
 | tool | does |
 |---|---|
-| `import_hoops_export(file)` | reads the export, pulls out order info, returns `{ order_ids[], line_items[], confidence_flags[] }` |
+| `import_hoops_export(orders[])` | saves orders read from Hoops PDFs as `needs_review`; returns `{ order_ids[], line_items[], confidence_flags[] }`. Takes the already-read data, not the file: in Claude chat, chat Claude reads the dropped PDF using the same rules the Orders-page upload uses (`hoops/extractionRules.ts`, embedded in the tool description since 2026-10-05) |
 | `confirm_import(order_ids[], corrections?)` | locks the import in as real once a person has checked it |
 | `get_schedule(date_range, station_id?)` | looks up what's currently scheduled |
-| `propose_schedule(date_range)` | builds a suggested schedule, does not save it |
-| `commit_schedule(assignment_ids[], approved_by)` | makes a proposed schedule official, writes to `schedule_assignments` + `audit_log` |
+| `propose_schedule(date_range, replan_range?, reason?)` | builds a suggested schedule around the committed one and saves it as a draft on the board (never the live schedule); `replan_range` lets approved, not-started jobs in it move (rush order / someone out — see "Daily staffing part 2") |
+| `commit_schedule(draft_id \| assignment_ids[], approved_by)` | makes a proposed schedule official, writes to `schedule_assignments` + `audit_log`; each approved job replaces its old not-started slot |
+| `list_orders(status?, search?)` | *(2026-10-05)* orders with status, deadline, estimated hours and open-item count (read-only, `ORDERS_READ`) |
+| `get_order(hoops_order_id)` | *(2026-10-05)* one order in full: jobs with estimates, the open questions that block confirming it, import notes, schedule slots (read-only, `ORDERS_READ`) |
 | `simulate_change(change)` | checks "what if" (a rush order, a moved job) without actually changing anything |
 | `add_order_note(hoops_order_id, note)` | *(added 2026-09-18, not in the original design)* appends a dated, attributed note to an order — the way a note given in conversation reaches `Order.notes` (and from there the order's page and Reports) without the web form |
 | `get_staffing(from, to)` | *(2026-09-28)* the roster with certifications, who's out, who's pinned, and the crew per station/day on the approved schedule |
@@ -686,11 +691,25 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     stored in `WorkerUnavailability`), `set_worker_station` (pin for a day — `StaffingPin`;
     must be certified and not out). Their errors are `McpUserError`s, so a message like
     "Maria isn't certified on Embroidery" reaches Claude instead of the generic one.
-  Still **not built — part 2:** re-planning just the affected days after a change, and
-  approving that plan replacing the not-started approved jobs on those days only (client:
-  out one day changes that day; out for two weeks changes those weeks). Also still open
-  there: the engine doesn't yet subtract already-approved work from capacity, and
-  already-approved line items still appear in the backlog.
+  **Daily staffing part 2 / re-planning — built (2026-10-05).** Every engine run
+  (`propose_schedule`, the board's "Create automatic schedule", `simulate_change`) now
+  plans **around the committed schedule** (`schedule/committedWork.ts`'
+  `buildSchedulingRun`) instead of re-placing it: started work (IN_PROGRESS / COMPLETE)
+  never moves; approved, not-started jobs stay put and their hours come out of their
+  slot's capacity, unless they're dated inside the run's **release window**
+  (`propose_schedule`'s `replanFrom`/`replanTo`), in which case they go back into the
+  backlog and may move. A finisher waiting on a job that stays put is placed after its
+  end (`ExternalDependencyState`'s `{ endsAt }`). Client rules (2026-10-05): a **rush
+  order** may bump approved, not-started jobs (release = the whole window); when **someone
+  is out**, release only the days they're out — those jobs move to the next open slots by
+  due date, flagged at risk if they can't make it. With no release window nothing
+  already approved moves (the board button's behavior). **Approving replaces:**
+  `commitSchedule.ts` deletes each approved job's other not-started approved row (audit
+  `schedule_superseded`), refuses if the job has started since the plan was made, and
+  marks a draft `APPROVED` once nothing in it is still proposed. A released job the new
+  plan couldn't fit keeps its old slot and is reported as `kept_at_risk`. Simplification
+  still standing: staffing (`planStaffing`) spreads the remaining backlog's workload,
+  not the committed work's.
 
   - **Editable formulas — done (2026-09-28).** `/settings?screen=formulas` (admin
     only) exposes every per-station rate and factor as a plain number input —
@@ -748,9 +767,11 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   `proposeSchedule`, unchanged) — no LLM decides placements, per this file's
   non-negotiable "Claude never computes a schedule" rule — and lands its output in a
   brand-new `ScheduleDraft` (`scheduleDraftId` set on every row), a 4-week window
-  starting today. The MCP tool's own direct path (`proposeAndPersistSchedule.ts`) is
-  unchanged and still writes un-drafted `PROPOSED` rows with no `scheduleDraftId` — the
-  two coexist by design, not a duplication to clean up. Fixed a real gap while wiring
+  starting today. Since 2026-10-05 the `propose_schedule` MCP tool lands in a new draft
+  too (shared `proposeIntoDraft()` in `proposeAndPersistSchedule.ts`), so a plan proposed
+  in chat shows on the board; the draft page has an **Approve** button (`approveDraft` →
+  `commitDraft`, the same path as `commit_schedule`), and an approved job can no longer be
+  dragged or removed in its draft (propose a new plan instead). Fixed a real gap while wiring
   this in: the manual draft workspace's candidate-order list used to be every order not
   `COMPLETE` (including `NEEDS_REVIEW`, which hasn't passed the import-confirmation
   gate) — now `CONFIRMED` only. Deliberately NOT the full `fetchBacklog()` gate set
@@ -1021,10 +1042,16 @@ and one per environment copied from `environments/example`.
 
 ## CI/CD Pipeline
 
-`deploy.yml` on push to `main`: `build → deploy-uat → smoke-test-uat`, then **stops**.
-`deploy-production.yml` is `workflow_dispatch` only and promotes an already-built SHA,
-refusing any SHA not in ECR. Both images are built once and promoted unchanged. Do not
-chain production onto the push pipeline.
+Branch-per-environment (the workflows' own headers are authoritative):
+`deploy-uat.yml` runs on every push to `uat` (or by hand): `build → deploy-uat →
+smoke-test-uat`. `deploy.yml` runs on every push to `main`: `build → deploy-production`
+(+ smoke test). Each builds fresh web and MCP images from its own branch tip; there is no
+promote-by-SHA step any more — the required PR review on `uat` and `main` is the
+deliberate-promotion gate. Flow: feature branch → PR into `dev` → PR `dev` → `uat` (UAT
+testing) → PR into `main` (production). Both need repository Variables (`AWS_REGION`,
+`PROJECT_SLUG`, `PRIMARY_DOMAIN`, `ECS_CLUSTER[_UAT]`, `ECS_SERVICE_WEB[_UAT]`,
+`ECS_SERVICE_MCP[_UAT]`) and an `AWS_ROLE_ARN` secret in the matching GitHub
+Environment, all from Terraform outputs.
 
 In each environment: render both task definitions, run `prisma migrate deploy` as a
 **blocking one-off `run-task`** (nonzero exit fails the workflow), then roll out both
@@ -1072,7 +1099,7 @@ and one of CLAUDE.md's two human approval gates — never a bare write with noth
 of it. Rationale: "no separate write path" in the Domain section's "What this system is"
 implies one write path shared by chat and the production board, not two; splitting
 confirmation out to a UI-only action would contradict that. See
-`src/lib/server/mcp/tools.ts` for the six registered tools.
+`src/lib/server/mcp/tools.ts` for the registered tools (twelve as of 2026-10-05).
 
 ## Git and definition of done
 

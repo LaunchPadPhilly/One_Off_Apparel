@@ -1,3 +1,10 @@
+/**
+ * The database-reading half of every automatic engine run: it loads the backlog (which
+ * line items are ready to place) and the capacity (how many hours each station has each
+ * day, and who is staffing it). The engine itself (engine/proposeSchedule.ts) is pure and
+ * never touches the database — it only sees what this file hands it. Called by
+ * proposeAndPersistSchedule.ts, proposeIntoNewDraft.ts and simulateChange.ts.
+ */
 import { prisma } from '$lib/server/prisma';
 import {
 	LineItemStatus,
@@ -10,11 +17,13 @@ import { finishingDependencyRule } from '$lib/server/engine/finishingDependencie
 import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
 import type { DateRange } from './types';
 
+/** Midnight UTC today — the cutoff for "deadline already passed". Dates are stored as UTC days. */
 function startOfToday(): Date {
 	const now = new Date();
 	return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
+/** What fetchBacklog() returns: the jobs to place, plus the state of anything they wait on. */
 export interface SchedulingBacklog {
 	backlog: BacklogItem[];
 	/** Dependencies of backlog items that aren't themselves in the backlog. */
@@ -141,10 +150,12 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 	return { backlog, externalDependencies };
 }
 
+/** A Date as its "YYYY-MM-DD" UTC day. */
 function iso(date: Date): string {
 	return date.toISOString().slice(0, 10);
 }
 
+/** Every day from range.from to range.to inclusive, as "YYYY-MM-DD" strings. */
 function* enumerateDays(range: DateRange): Generator<string> {
 	const cursor = new Date(`${range.from}T00:00:00Z`);
 	const end = new Date(`${range.to}T00:00:00Z`);
@@ -192,6 +203,8 @@ export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
 		availableHrs: row.availableHrs
 	}));
 
+	// Fill every (station, day) that has no real row with the default, so a real row
+	// always wins and the default only covers gaps.
 	const existingKeys = new Set(realSlots.map((slot) => `${slot.stationId}__${iso(slot.date)}`));
 	const defaultSlots: CapacitySlot[] = [];
 	for (const station of stations) {
