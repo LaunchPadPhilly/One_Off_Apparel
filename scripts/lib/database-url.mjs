@@ -16,15 +16,23 @@ import { dirname, resolve } from 'node:path';
 const repoRoot = process.env.REPO_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 // pg-connection-string is what the application parses with, so it is the
-// authoritative validity check rather than a lookalike.
+// authoritative validity check rather than a lookalike. Try the standard
+// resolver first; fall back to the pnpm-hoisted location before giving up on a
+// WHATWG lookalike (which has no `password` field and silently breaks the
+// round-trip check).
 let parse;
+const _req = createRequire(`${repoRoot}/package.json`);
 try {
-	parse = createRequire(`${repoRoot}/package.json`)('pg-connection-string').parse;
+	parse = _req('pg-connection-string').parse;
 } catch {
-	parse = (s) => {
-		const u = new URL(s.replace(/^postgres(ql)?:/, 'https:'));
-		return { host: u.hostname, port: u.port, database: u.pathname.slice(1) };
-	};
+	try {
+		parse = _req(`${repoRoot}/node_modules/.pnpm/node_modules/pg-connection-string`).parse;
+	} catch {
+		parse = (s) => {
+			const u = new URL(s.replace(/^postgres(ql)?:/, 'https:'));
+			return { host: u.hostname, port: u.port, database: u.pathname.slice(1), password: decodeURIComponent((u.password || '')) };
+		};
+	}
 }
 const RESERVED = /[#?/@[\]:<>"{}|\\^`\s]/;
 const ENCODED = /%[0-9A-Fa-f]{2}/;
