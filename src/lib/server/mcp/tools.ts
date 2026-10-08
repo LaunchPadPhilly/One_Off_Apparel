@@ -3,11 +3,20 @@ import type { McpToolDefinition } from '$lib/server/mcp/handler';
 import { principalIdentity } from '$lib/server/mcp/handler';
 import { importHoopsExport } from '$lib/server/hoops/importHoopsExport';
 import { confirmImport } from '$lib/server/hoops/confirmImport';
+import { addOrderNote } from '$lib/server/hoops/addOrderNote';
 import { orderCandidateSchema, importCorrectionsSchema } from '$lib/server/hoops/types';
 import { getSchedule } from '$lib/server/schedule/getSchedule';
 import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersistSchedule';
 import { commitSchedule } from '$lib/server/schedule/commitSchedule';
 import { simulateChange, simulateChangeSchema } from '$lib/server/schedule/simulateChange';
+import {
+	getStaffing,
+	getStaffingSchema,
+	setWorkerAvailability,
+	setWorkerAvailabilitySchema,
+	setWorkerStation,
+	setWorkerStationSchema
+} from '$lib/server/schedule/staffing';
 
 /**
  * The tools this deployment exposes over MCP. Both entry points import this list
@@ -17,23 +26,25 @@ import { simulateChange, simulateChangeSchema } from '$lib/server/schedule/simul
  * Rules for every tool, enforced by review rather than by the type system:
  *  - Set `readOnly` truthfully (see McpToolDefinition in mcp/handler.ts). Read-only is
  *    the default expectation; `readOnly: false` is an approved, scoped exception for the
- *    three domain write-tools below (import_hoops_export, confirm_import,
- *    commit_schedule) — each sits behind its own scope and one of CLAUDE.md's two human
- *    approval gates, never a bare write. See CLAUDE.md's Security constraints section
- *    for the decision record.
+ *    write-tools below (import_hoops_export, confirm_import, add_order_note,
+ *    commit_schedule) — each sits behind its own scope, and the first three write to
+ *    data that's still human-editable/reversible afterward, never a bare irreversible
+ *    write. See CLAUDE.md's Security constraints section for the decision record.
  *  - Parameterized queries only. Prisma's query builder does this; `$queryRaw` must use
  *    tagged-template parameters, never string interpolation.
  *  - Validate input with the Zod shape; the handler receives the parsed object.
  *  - Never return secrets, raw upstream payloads, or another user's private data.
  *
- * These six are CLAUDE.md's "Domain MCP tools". import_hoops_export and confirm_import
- * are the persistence half of the Hoops import feature (src/lib/server/hoops/) — this
- * repo still has no file parser (no documented Hoops export format exists), so
- * import_hoops_export takes already-structured order/line-item data, not a raw file.
- * get_schedule/propose_schedule/commit_schedule/simulate_change wrap the deterministic
- * engine (src/lib/server/engine/) plus the schedule persistence layer
- * (src/lib/server/schedule/) — Claude never computes hours or a schedule itself, only
- * calls these.
+ * The first six are CLAUDE.md's "Domain MCP tools". import_hoops_export and
+ * confirm_import are the persistence half of the Hoops import feature
+ * (src/lib/server/hoops/) — this repo still has no file parser (no documented Hoops
+ * export format exists), so import_hoops_export takes already-structured order/line-item
+ * data, not a raw file. get_schedule/propose_schedule/commit_schedule/simulate_change
+ * wrap the deterministic engine (src/lib/server/engine/) plus the schedule persistence
+ * layer (src/lib/server/schedule/) — Claude never computes hours or a schedule itself,
+ * only calls these. add_order_note is a seventh, added later, so a note given in
+ * conversation reaches Order.notes (and from there, the order's page and Reports)
+ * without requiring the web form — same field, no separate write path.
  */
 
 // A plain `readonly McpToolDefinition[]` annotation on the array below would force every
@@ -80,10 +91,29 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		}
 	}),
 	defineTool({
+		name: 'add_order_note',
+		description:
+			"Adds a free-text note to an order — e.g. why a job ran late — so it shows up on the order's page and " +
+			'in Reports without anyone needing to open the web form. Appends a dated, attributed line rather than ' +
+			"overwriting; nothing infers this automatically. Example question: 'note that 100127 ran late because " +
+			"the vendor shipped blanks late' → { hoopsOrderId: '100127', note: 'Vendor shipped blanks late.' }. " +
+			'Returns { orderId, notes }.',
+		inputSchema: {
+			hoopsOrderId: z.string().min(1),
+			note: z.string().min(1)
+		},
+		requiredScope: 'IMPORT_WRITE',
+		readOnly: false,
+		handler: async ({ hoopsOrderId, note }, principal) => {
+			const updated = await addOrderNote(hoopsOrderId, note, principalIdentity(principal));
+			return { orderId: updated.id, notes: updated.notes };
+		}
+	}),
+	defineTool({
 		name: 'get_schedule',
 		description:
 			"Looks up what's currently scheduled (approved and beyond — not draft proposals) in a date range, " +
-			"optionally for one station. Example question: 'what's running at screen_print_auto next week?' → " +
+			"optionally for one station. Example question: 'what's running on Screen Print Auto 1 next week?' → " +
 			"{ from: '2026-09-15', to: '2026-09-19', stationId: '...' }. Returns { assignments }.",
 		inputSchema: {
 			from: z.iso.date(),
@@ -138,5 +168,46 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		requiredScope: 'SCHEDULE_READ',
 		readOnly: true,
 		handler: async ({ change }) => simulateChange(change)
+	}),
+	// ─── Daily staffing (2026-09-28) ───────────────────────────────────────────
+	// The deterministic engine picks each day's crew (engine/planStaffing.ts). These let
+	// a person tell Claude about organic changes — someone out, someone moved — which the
+	// next proposed schedule takes into account. None of them changes an approved
+	// schedule by itself; a new plan still has to be proposed and approved by a person.
+	defineTool({
+		name: 'get_staffing',
+		description:
+			"Shows who works where: the roster with each person's certified stations, who is out, who is pinned to a " +
+			"station, and the crew on each station/day of the approved schedule. Example question: 'who's on the " +
+			"autos Tuesday?' → { from: '2026-10-06', to: '2026-10-06' }. Returns { roster, out, pinned, approvedCrews }.",
+		inputSchema: getStaffingSchema.shape,
+		requiredScope: 'SCHEDULE_READ',
+		readOnly: true,
+		handler: async (input) => getStaffing(input)
+	}),
+	defineTool({
+		name: 'set_worker_availability',
+		description:
+			'Marks a person out (available: false) or back in (available: true) for one or more days, by name. ' +
+			'The next proposed schedule will not staff them on those days. Returns the approved jobs they were on ' +
+			'those days — tell the user, and offer to propose an updated schedule for them to approve. Only the ' +
+			"given days are affected. Example: 'Maria is out today' → { workerName: 'Maria', from: '<today>', to: " +
+			"'<today>', available: false, reason: 'sick' }.",
+		inputSchema: setWorkerAvailabilitySchema.shape,
+		requiredScope: 'SCHEDULE_WRITE',
+		readOnly: false,
+		handler: async (input, principal) => setWorkerAvailability(input, principalIdentity(principal))
+	}),
+	defineTool({
+		name: 'set_worker_station',
+		description:
+			'Pins a person to one station for one day, by name — the staffing plan keeps them there and places ' +
+			'everyone else around them. They must be certified on that station and not marked out. Omit ' +
+			"stationName (or pass null) to clear the pin. Example: 'put Jo on embroidery Thursday' → " +
+			"{ workerName: 'Jo', date: '2026-10-08', stationName: 'Embroidery' }.",
+		inputSchema: setWorkerStationSchema.shape,
+		requiredScope: 'SCHEDULE_WRITE',
+		readOnly: false,
+		handler: async (input, principal) => setWorkerStation(input, principalIdentity(principal))
 	})
 ];
