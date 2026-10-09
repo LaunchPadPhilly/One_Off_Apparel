@@ -3,14 +3,22 @@
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig, storageKeyPrefix } from '$lib/appConfig';
 	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments } from '$lib/schedule/shift';
-	import { computeInsertRank, insertAndRepack, repackOrdered } from '$lib/schedule/repackDay';
+	import { cascadeInsert, cascadeMove, cascadeRemove, type CascadeItem } from '$lib/schedule/repackDay';
 	import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 	import { isFinishingKind } from '$lib/schedule/stationKinds';
 	import { countScreens } from '$lib/schedule/screenCount';
 	import { deserialize } from '$app/forms';
 	import type { PageProps } from './$types';
 
-	let { data }: PageProps = $props();
+	let { data, form }: PageProps = $props();
+
+	// Proposed jobs still waiting for a person's yes — what Approve would make official.
+	const proposedCount = $derived(data.assignments.filter((a) => a.status === 'PROPOSED').length);
+
+	function confirmApprove(event: SubmitEvent) {
+		const message = `Approve ${proposedCount} job${proposedCount === 1 ? '' : 's'}? They go on the live schedule, and any job this plan moved leaves its old slot.`;
+		if (!confirm(message)) event.preventDefault();
+	}
 
 	let search = $state('');
 
@@ -527,20 +535,16 @@
 	}
 
 	/**
-	 * Repack a (date, station) day back-to-back from shift open, in the current
-	 * relative order. Called after any local edit (drop, move, remove) so the UI
-	 * reflects the auto-shift the server also performs — items sit adjacent, no
-	 * gaps, the way `packSequentialStarts` lays out the automatic engine's own
-	 * placements. `$lib/schedule/repackDay.ts` is the ONE source of truth for
-	 * this math; client and server import the same function.
+	 * Apply a cascade result (map of id → new startMin) to the local `placements`
+	 * array. Shared by all three mutation paths (move, insert, remove) so the local
+	 * update is consistent and the server's returned peer positions can override it
+	 * on any drift.
 	 */
-	function repackDayLocally(date: string, stationName: string) {
-		const dayPlacements = placementsForDay(date, stationName);
-		const packed = repackOrdered(dayPlacements);
-		const packedById = new Map(packed.map((p) => [p.id, p]));
+	function applyLocalStarts(newStarts: ReadonlyMap<string, number>) {
+		if (newStarts.size === 0) return;
 		placements = placements.map((p) => {
-			const next = packedById.get(p.id);
-			return next ? { ...p, startMin: next.startMin } : p;
+			const next = newStarts.get(p.id);
+			return next != null ? { ...p, startMin: next } : p;
 		});
 	}
 
@@ -614,6 +618,8 @@
 			JSON.stringify({ lineItemId, orderId, hours: hours ?? 1, expectedStation })
 		);
 		activeExpectedStation = expectedStation;
+		activeDurationMin = Math.max(15, Math.round((hours ?? 1) * 60));
+		activeMovingId = null;
 	}
 
 	function handlePlacementDragStart(event: DragEvent, placementId: string) {
@@ -627,22 +633,60 @@
 		const placement = placements.find((p) => p.id === placementId);
 		const lineItem = placement ? findLineItem(placement.lineItemId) : undefined;
 		activeExpectedStation = lineItem ? expectedStationFor(lineItem) : null;
+		activeDurationMin = placement?.durationMin ?? 60;
+		activeMovingId = placementId;
 	}
 
 	function handleDragEnd() {
 		activeExpectedStation = null;
+		activeDurationMin = 0;
+		activeMovingId = null;
+		dragPreview = null;
 	}
 
 	// Which station the currently-dragging line item is allowed on. Set on dragstart
 	// (from the sidebar or an existing placement) and cleared on dragend. Rows whose
 	// station doesn't match dim during the drag; drops onto a wrong row are refused.
 	let activeExpectedStation = $state<string | null>(null);
+	// The working duration and (for a move) the id of the currently-dragging item,
+	// captured on dragstart so the drop-target preview can render at the correct
+	// width and snap-out-of-overlap can exclude the moving item.
+	let activeDurationMin = $state<number>(0);
+	let activeMovingId = $state<string | null>(null);
 
 	// The drop-target highlight now needs to identify a (date, station) row —
 	// station tabs are gone, so a day shows every station stacked, and the user
 	// needs to see WHICH row they're dropping into. Single string key so a $state
 	// equality check flips one highlight at a time without extra bookkeeping.
 	let dragOverKey = $state<string | null>(null);
+	// Live preview of where a drop would land: which (date, station) track it's over,
+	// the snapped target startMin (15-min grid, snapped out of any overlapping peer's
+	// span the same way cascadeInsert/cascadeMove would), and the item's duration.
+	// Rendered as a translucent placeholder bar on the track — see below.
+	let dragPreview = $state<{ trackKey: string; startMin: number; durationMin: number } | null>(null);
+
+	/** Grid snap: 15-minute increments. Matches the resolution the shop plans in. */
+	const SNAP_MIN = 15;
+	function snapToGrid(minute: number): number {
+		return Math.round(minute / SNAP_MIN) * SNAP_MIN;
+	}
+
+	/** Same LEFT-half / RIGHT-half snap-out-of-overlap the cascade helpers apply, so the
+	 *  preview lines up with the real drop position. Excludes the moving item itself
+	 *  during a move (a placement dragging over its own span shouldn't be pushed by
+	 *  itself). */
+	function snapOutOfPeers(target: number, peers: readonly { id: string; startMin: number; durationMin: number }[], excludeId: string | null): number {
+		for (const p of peers) {
+			if (excludeId != null && p.id === excludeId) continue;
+			const end = wallClockEnd(p.startMin, p.durationMin);
+			if (target >= p.startMin && target < end) {
+				const mid = p.startMin + (end - p.startMin) / 2;
+				return target < mid ? p.startMin : end;
+			}
+		}
+		return target;
+	}
+
 	function trackKey(date: string, stationName: string): string {
 		return `${date}::${stationName}`;
 	}
@@ -660,15 +704,28 @@
 		// know (e.g. an uncategorized "Patch Install") so we don't restrict.
 		if (activeExpectedStation && activeExpectedStation !== kindOf(stationName)) {
 			event.dataTransfer!.dropEffect = 'none';
+			dragPreview = null;
 			return;
 		}
 		event.preventDefault();
 		event.dataTransfer!.dropEffect = 'move';
 		dragOverKey = trackKey(date, stationName);
+
+		// Compute the predicted drop position: cursor → wall-clock minute → snap to
+		// 15-min grid → snap out of any peer's span (same as the real drop).
+		const track = event.currentTarget as HTMLElement;
+		const rect = track.getBoundingClientRect();
+		const relative = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+		const rawMin = SHIFT_START_MIN + (relative / rect.width) * SHIFT_LENGTH_MIN;
+		const peers = placementsForDay(date, stationName);
+		const snapped = snapOutOfPeers(snapToGrid(rawMin), peers, activeMovingId);
+		const clamped = Math.max(SHIFT_START_MIN, Math.min(SHIFT_END_MIN - SNAP_MIN, snapped));
+		dragPreview = { trackKey: trackKey(date, stationName), startMin: clamped, durationMin: activeDurationMin || 60 };
 	}
 
 	function handleTrackDragLeave() {
 		dragOverKey = null;
+		dragPreview = null;
 	}
 
 	// Every mutation below applies optimistically to the $state array first (so
@@ -679,11 +736,15 @@
 		event.preventDefault();
 		dragOverKey = null;
 		activeExpectedStation = null;
+		dragPreview = null;
+		activeMovingId = null;
 		if (!event.dataTransfer) return;
 		const track = event.currentTarget as HTMLElement;
 		const rect = track.getBoundingClientRect();
 		const relative = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-		const dropMin = SHIFT_START_MIN + (relative / rect.width) * SHIFT_LENGTH_MIN;
+		// 15-min grid snap so the persisted position lines up with the drag-preview
+		// and with how the shop actually plans days (quarter-hour granularity).
+		const dropMin = snapToGrid(SHIFT_START_MIN + (relative / rect.width) * SHIFT_LENGTH_MIN);
 
 		// Moving an existing placement wins over adding a new one — some browsers
 		// leave stale getData from a prior transfer, so check payloads by priority.
@@ -715,38 +776,60 @@
 			const originStation = existing.stationName;
 			const stayedOnSameDay = originDate === date && originStation === stationName;
 
-			// Rank in the destination row, computed against peers EXCLUDING the
-			// moving item itself so a same-row nudge to the right gets a natural
-			// rank, not one biased by its own current position.
-			const destinationPeers = placementsForDay(date, stationName).filter(
-				(p) => p.id !== existing.id
-			);
-			const insertRank = computeInsertRank(dropMin, destinationPeers);
+			// The DROP point is now interpreted as a target wall-clock start (minutes
+			// from midnight), not a discrete rank — gap-preserving cascade (see
+			// $lib/schedule/repackDay.ts) needs an absolute time.
+			const targetStart = Math.round(dropMin);
 
-			// Optimistic: insert-and-repack the destination row with the moved item at
-			// its new rank. Explicit rank-based insertion is required for a same-row
-			// reorder — updating only (date, station) wouldn't change the item's own
-			// startMin, so a simple repack-in-place would leave it in its OLD queue
-			// slot regardless of where the user actually dropped it.
-			// A job moved to another station or day loses its planned crew (the server
-			// clears it too) — that crew was picked for the slot it left.
-			const movedItem: Placement = { ...existing, date, stationName, crew: stayedOnSameDay ? existing.crew : [] };
-			const destPacked = insertAndRepack(destinationPeers, movedItem, insertRank);
-			const destPackedById = new Map(destPacked.map((p) => [p.id, p]));
-			placements = placements
-				.filter((p) => p.id !== existing.id)
-				.map((p) => {
-					const next = destPackedById.get(p.id);
-					return next ? { ...p, startMin: next.startMin } : p;
-				})
-				.concat({ ...movedItem, startMin: destPackedById.get(existing.id)!.startMin });
-			if (!stayedOnSameDay) repackDayLocally(originDate, originStation);
+			// A job moved to another station or day loses its planned crew (handled
+			// in the cross-day branch below; the server clears it too). Same-day moves
+			// keep their crew.
+			if (stayedOnSameDay) {
+				// Same-row move: cascade shifts every peer AFTER the moving item by
+				// the same delta, so any gaps between them are preserved. Refused if
+				// the new start would collide with the predecessor, or push a peer
+				// past the shift end.
+				const sameDayPeers = placementsForDay(date, stationName);
+				const cascade = cascadeMove<CascadeItem & Placement>(sameDayPeers, existing.id, targetStart);
+				if ('conflict' in cascade) {
+					boardNotice = { text: cascade.conflict, tone: 'warn' };
+					return;
+				}
+				const newStarts = new Map(cascade.placements.map((p) => [p.id, p.startMin]));
+				applyLocalStarts(newStarts);
+			} else {
+				// Cross-row / cross-day move: origin day pulls forward (as if the item
+				// were removed there), destination day inserts at the drop time.
+				const originDayPeers = placementsForDay(originDate, originStation);
+				const removeCascade = cascadeRemove<CascadeItem & Placement>(originDayPeers, existing.id);
+				if ('conflict' in removeCascade) {
+					boardNotice = { text: removeCascade.conflict, tone: 'warn' };
+					return;
+				}
+				const destinationPeers = placementsForDay(date, stationName);
+				const insertCascade = cascadeInsert<CascadeItem & Placement>(destinationPeers, { ...existing, date, stationName }, targetStart);
+				if ('conflict' in insertCascade) {
+					boardNotice = { text: insertCascade.conflict, tone: 'warn' };
+					return;
+				}
+				const newStarts = new Map<string, number>();
+				for (const p of removeCascade.placements) newStarts.set(p.id, p.startMin);
+				for (const p of insertCascade.placements) newStarts.set(p.id, p.startMin);
+				placements = placements.map((p) => {
+					if (p.id === existing.id) {
+						const next = insertCascade.placements.find((q) => q.id === existing.id)!;
+						return { ...p, date, stationName, startMin: next.startMin, crew: [] };
+					}
+					const next = newStarts.get(p.id);
+					return next != null ? { ...p, startMin: next } : p;
+				});
+			}
 
 			const body = new FormData();
 			body.set('id', existing.id);
 			body.set('stationName', stationName);
 			body.set('date', date);
-			body.set('insertRank', String(insertRank));
+			body.set('startMinuteOfDay', String(targetStart));
 			const outcome = await postAction('moveAssignment', body);
 			if (!outcome.ok) {
 				placements = priorSnapshot;
@@ -777,10 +860,10 @@
 			return;
 		}
 		const durationMin = Math.max(15, Math.round((payload.hours || 1) * 60));
+		const targetStart = Math.round(dropMin);
 
 		const priorSnapshot = placements;
 		const destinationPeers = placementsForDay(date, stationName);
-		const insertRank = computeInsertRank(dropMin, destinationPeers);
 
 		// Optimistic: give it a temp id so it can be dragged again immediately;
 		// swap the temp id for the server-assigned one once the POST resolves.
@@ -791,25 +874,29 @@
 			orderId: payload.orderId,
 			date,
 			stationName,
-			startMin: 0, // rewritten by repackOrdered below
+			startMin: targetStart,
 			durationMin,
 			crew: []
 		};
-		const packedDay = insertAndRepack(destinationPeers, incoming, insertRank);
-		const packedById = new Map(packedDay.map((p) => [p.id, p]));
+		const cascade = cascadeInsert<CascadeItem & Placement>(destinationPeers, incoming, targetStart);
+		if ('conflict' in cascade) {
+			boardNotice = { text: cascade.conflict, tone: 'warn' };
+			return;
+		}
+		const startsById = new Map(cascade.placements.map((p) => [p.id, p.startMin]));
 		placements = [
 			...placements.map((p) => {
-				const next = packedById.get(p.id);
-				return next ? { ...p, startMin: next.startMin } : p;
+				const next = startsById.get(p.id);
+				return next != null ? { ...p, startMin: next } : p;
 			}),
-			{ ...incoming, startMin: packedById.get(tempId)!.startMin }
+			{ ...incoming, startMin: cascade.incomingStart ?? targetStart }
 		];
 
 		const body = new FormData();
 		body.set('lineItemId', payload.lineItemId);
 		body.set('stationName', stationName);
 		body.set('date', date);
-		body.set('insertRank', String(insertRank));
+		body.set('startMinuteOfDay', String(cascade.incomingStart ?? targetStart));
 		body.set('hours', String(durationMin / 60));
 		const outcome = await postAction('placeAssignment', body);
 		if (!outcome.ok || !outcome.id) {
@@ -826,9 +913,19 @@
 		if (!target) return;
 		const priorSnapshot = placements;
 
-		// Optimistic: drop the row locally, then close the gap by repacking the day.
-		placements = placements.filter((p) => p.id !== id);
-		repackDayLocally(target.date, target.stationName);
+		// Optimistic: pull-forward peers on this day by the removed item's duration
+		// (the user chose "close the gap" — see $lib/schedule/repackDay.ts).
+		const dayPeers = placementsForDay(target.date, target.stationName);
+		const cascade = cascadeRemove<CascadeItem & Placement>(dayPeers, id);
+		if ('conflict' in cascade) {
+			boardNotice = { text: cascade.conflict, tone: 'warn' };
+			return;
+		}
+		const startsById = new Map(cascade.placements.map((p) => [p.id, p.startMin]));
+		placements = placements.filter((p) => p.id !== id).map((p) => {
+			const next = startsById.get(p.id);
+			return next != null ? { ...p, startMin: next } : p;
+		});
 
 		if (id.startsWith('tmp:')) return; // never persisted, nothing to remove server-side
 		const body = new FormData();
@@ -872,6 +969,14 @@
 		</div>
 		<div class="header-actions">
 			<span class="badge">{data.draft.status}</span>
+			<!-- The second human approval gate from the board — same commit path as
+			     Claude's commit_schedule tool (commitSchedule.ts). Full-page POST so the
+			     page reloads with the approved state. -->
+			{#if proposedCount > 0}
+				<form method="POST" action="?/approveDraft" onsubmit={confirmApprove}>
+					<button type="submit" class="button">Approve {proposedCount} job{proposedCount === 1 ? '' : 's'}</button>
+				</form>
+			{/if}
 			<!-- Full-page form POST rather than a fetch: the delete action
 			     redirects to /schedule, and letting SvelteKit follow the redirect
 			     natively is simpler than reconstructing the navigation client-side.
@@ -882,6 +987,14 @@
 			</form>
 		</div>
 	</div>
+
+	{#if form && 'approved' in form && form.approved}
+		<p class="auto-propose-feedback">
+			Approved {form.approvedCount} job{form.approvedCount === 1 ? '' : 's'} — they're on the live schedule now{form.replacedCount > 0 ? `, replacing ${form.replacedCount} old slot${form.replacedCount === 1 ? '' : 's'}` : ''}.
+		</p>
+	{:else if form && 'message' in form && form.message}
+		<p class="auto-propose-feedback auto-propose-feedback--warn">{form.message}</p>
+	{/if}
 
 	<!-- One-time feedback right after "Create automatic schedule" — see
 	     proposeIntoNewDraft.ts / the ?placed=&atRisk= redirect. Not persisted; only
@@ -1022,7 +1135,7 @@
 									>
 										Edit
 									</button>
-									<span class="muted">Due {order.internalDueDate}</span>
+									<span class="muted">Due {order.deadline}{order.deadlineIsTight ? '' : ' (internal)'}</span>
 									<span class="hours-total">{formatHours(orderTotalHours(order))}</span>
 								</div>
 							</div>
@@ -1207,6 +1320,18 @@
 													<span class="bar__break-label">{brk.label}</span>
 												</div>
 											{/each}
+											<!-- Drop-target ghost: shows where the current drag would land, at the item's
+											     real width, snapped to the 15-minute grid. Same snap-out-of-overlap the
+											     drop itself applies, so what you see IS where it will go. -->
+											{#if dragPreview && dragPreview.trackKey === trackKey(date, station)}
+												<div
+													class="drop-preview"
+													style="left: {pctFromShiftStart(dragPreview.startMin)}%; width: {pctWidth(Math.max(15, dragPreview.durationMin))}%;"
+													aria-hidden="true"
+												>
+													<span class="drop-preview__time">{formatClock(dragPreview.startMin)}</span>
+												</div>
+											{/if}
 											{#each rowPlacements as placement (placement.id)}
 												{@const parent = findOrder(placement.orderId)}
 												{@const bg = orderColor(placement.orderId)}
@@ -2160,6 +2285,33 @@
 	.bar__track--drag {
 		outline: 2px dashed var(--brand-500);
 		outline-offset: 2px;
+	}
+
+	.drop-preview {
+		position: absolute;
+		top: 3px;
+		bottom: 3px;
+		background: color-mix(in srgb, var(--brand-500) 25%, transparent);
+		border: 1px dashed var(--brand-500);
+		border-radius: 3px;
+		pointer-events: none;
+		z-index: 2;
+		display: flex;
+		align-items: center;
+		justify-content: flex-start;
+		padding: 0 4px;
+		box-sizing: border-box;
+		overflow: hidden;
+	}
+
+	.drop-preview__time {
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--brand-700, var(--ink-900));
+		background: color-mix(in srgb, var(--surface, #fff) 80%, transparent);
+		padding: 1px 4px;
+		border-radius: 2px;
+		white-space: nowrap;
 	}
 
 	.placement {

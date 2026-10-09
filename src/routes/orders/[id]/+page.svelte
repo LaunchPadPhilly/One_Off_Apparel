@@ -5,30 +5,12 @@
 	import { pressable } from '$lib/actions/pressable.svelte';
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig } from '$lib/appConfig';
-	import { computeInternalDueDate } from '$lib/internalDueDate';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
 
 	// Which line item's estimate is being edited inline (2026-09-28), if any.
 	let editingEstimateId = $state<string | null>(null);
-
-	// Internal due date defaults to 14 days before external ship date (see
-	// internalDueDate.ts) but stays a real, independently editable field — a human
-	// reviewing the order can set it to whatever they want. This only re-suggests the
-	// default when the ship date changes AND the due date still matches the default for
-	// the *previous* ship date — so editing the ship date after someone has already
-	// deliberately overridden the due date doesn't clobber their override.
-	let externalShipDate = $state(data.order.externalShipDate);
-	let internalDueDate = $state(data.order.internalDueDate);
-
-	function onExternalShipDateChange(newValue: string) {
-		// Either date may be '' (an export with no Deadline, 2026-09-28) — computing from ''
-		// would throw "Invalid time value", so only compute from a real date.
-		const wasDefault = !internalDueDate || (externalShipDate !== '' && internalDueDate === computeInternalDueDate(externalShipDate));
-		externalShipDate = newValue;
-		if (wasDefault) internalDueDate = newValue ? computeInternalDueDate(newValue) : '';
-	}
 
 	// data.gaps (see orderGaps.ts, computed server-side and shared with the notes-box
 	// fill-in action so both read the exact same outstanding-gap logic) splits into two
@@ -200,20 +182,21 @@
 			>
 				<label>Customer <input name="customerName" value={data.order.customerName} autocomplete="off" /></label>
 				<label>
-					External ship date
-					<input
-						name="externalShipDate"
-						type="date"
-						value={externalShipDate}
-						onchange={(e) => onExternalShipDateChange(e.currentTarget.value)}
-					/>
+					Deadline
+					<input name="deadline" type="date" value={data.order.deadline} />
 				</label>
-				<!-- Defaults to 14 days before external ship date (see internalDueDate.ts /
-				     onExternalShipDateChange above) but stays a real, editable field — a
-				     person reviewing the order can set it to whatever they want. -->
+				<!-- Firmness of the deadline above. "Tight" is a firm customer commitment
+				     (behaves like a promised ship date — missing it means missing a customer
+				     promise). "Internal" is a target the shop is aiming at but hasn't
+				     committed to; the engine still schedules toward it, but an at-risk flag
+				     against it reads softer. Placement math is identical either way. -->
 				<label>
-					Internal due date
-					<input name="internalDueDate" type="date" bind:value={internalDueDate} title="Defaults to 14 days before external ship date; edit freely to override." />
+					Deadline type
+					<select name="deadlineIsTight">
+						<option value="true" selected={data.order.deadlineIsTight}>Tight — customer-committed</option>
+						<option value="false" selected={!data.order.deadlineIsTight}>Internal — loose target</option>
+					</select>
+					<input type="hidden" name="deadlineIsTightSubmitted" value="1" />
 				</label>
 				<label>
 					Blanks ordering
@@ -248,8 +231,7 @@
 			</details>
 		{:else}
 			<dl>
-				<div><dt>Ship date</dt><dd>{data.order.externalShipDate}</dd></div>
-				<div><dt>Due date</dt><dd>{data.order.internalDueDate}</dd></div>
+				<div><dt>Deadline</dt><dd>{data.order.deadline || 'not set'} <span class="muted">({data.order.deadlineIsTight ? 'tight' : 'internal'})</span></dd></div>
 				<div><dt>Blanks</dt><dd>{data.order.blankOrderingStatus}</dd></div>
 				<div><dt>Customer approval</dt><dd>{data.order.customerApprovalStatus}</dd></div>
 			</dl>
@@ -443,8 +425,9 @@
 						-->
 						{#if item.itemType === 'OTHER'}
 							<!-- NEW (2026-09-28): a job type the system doesn't model yet (e.g.
-							     Patch Install). The reviewer says which station it runs on and
-							     how long it takes; the schedule places it only on that station. -->
+							     Patch Install). The reviewer says which station it runs on; the
+							     schedule places it only on that station. Hours are entered in the
+							     universal override field further down (mandatory for this type). -->
 							<label>
 								Station
 								<select name="assignedStationId">
@@ -453,18 +436,6 @@
 										<option value={station.id} selected={item.assignedStationId === station.id}>{station.label}</option>
 									{/each}
 								</select>
-							</label>
-							<label>
-								Hours needed
-								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
-							</label>
-						{/if}
-						{#if item.decorationType === 'DTF' || item.decorationType === 'DTG'}
-							<!-- NEW (2026-09-23): DTF/DTG have no formula (time depends on the
-							     artwork), so the reviewer enters the hours; that's the estimate. -->
-							<label>
-								Hours needed
-								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
 							</label>
 						{/if}
 						{#if item.itemType === 'DECORATION'}
@@ -529,6 +500,16 @@
 									</select>
 								</label>
 							{/if}
+						{/if}
+						<!-- Reviewer-entered hours. Required for DTF/DTG/OTHER (no formula exists).
+						     For job types that DO have a formula, use the "edit estimate" button
+						     next to the badge above (writes to estimatedHoursOverride). -->
+						{#if item.itemType === 'OTHER' || item.decorationType === 'DTF' || item.decorationType === 'DTG'}
+							<label>
+								Hours needed
+								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
+							</label>
+							<input type="hidden" name="manualEstimatedHoursSubmitted" value="1" />
 						{/if}
 						<button class="button button--secondary" use:pressable type="submit">Save</button>
 					</form>

@@ -2,13 +2,19 @@ import { z } from 'zod';
 import { ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
 import { ArtworkApprovalStatus, BlankOrderingStatus, CustomerApprovalStatus } from '../../../../prisma/generated/prisma/enums';
 
+/*
+ * Zod schemas (runtime validation) and their TypeScript types for the Hoops import:
+ * what an extracted order looks like before it's saved (the *Candidate schemas), and
+ * what a reviewer may edit afterward (the *Correction schemas). Used by every file in
+ * this folder and by the import_hoops_export / confirm_import MCP tools.
+ */
+
 /**
  * Candidate data for one line item, as already extracted from a Hoops export — by
- * whatever does that extraction (today: Claude reading the file in conversation; see
- * CLAUDE.md's "Import confirmation" gate). This module only persists already-structured
- * candidates; it does not parse a file itself — there is no documented Hoops export
- * format anywhere in this repo to parse against (see CLAUDE.md's Known open items:
- * "PDF/export import accuracy has not been validated against a real Hoops export sample").
+ * whatever does that extraction (today: extractOrderFromPdf.ts for an uploaded PDF, or
+ * Claude reading the file in conversation via the import_hoops_export MCP tool; see
+ * CLAUDE.md's "Import confirmation" gate). importHoopsExport.ts only persists
+ * already-structured candidates; it does not parse a file itself.
  *
  * `localId` exists only to let a finishing row's `dependsOn` reference a sibling
  * decoration row *within this same call*, before either has a real database id.
@@ -35,7 +41,9 @@ export const lineItemCandidateBaseSchema = z.object({
 	// foldBagGarment to pick their formula. See prisma/schema.prisma.
 	matteSurface: z.enum(['FLAT', 'SPECIALTY']).nullish(),
 	foldBagGarment: z.enum(['SS_TEE', 'OTHER']).nullish(),
-	// NEW (2026-09-23): reviewer-entered hours for DTF/DTG, which have no formula.
+	// Reviewer-entered hours. Only used for DTF/DTG/OTHER (no formula) — never an
+	// override of a real formula; that's estimatedHoursOverride (corrections only, below).
+	// See LineItem.manualEstimatedHours in prisma/schema.prisma.
 	manualEstimatedHours: z.number().positive().max(200).nullish(),
 	// Another line item's `localId` in this same order candidate, or the literal
 	// "all_siblings" sentinel — never a real LineItem.id (none exist yet at import time).
@@ -52,6 +60,9 @@ export const lineItemCandidateBaseSchema = z.object({
 	reviewConfidence: z.number().min(0).max(1).nullish()
 });
 
+// The base schema plus cross-field rules (each item type sets only its own type
+// field). Kept separate from the base so the correction schema below can reuse the
+// plain field list without these rules.
 export const lineItemCandidateSchema = lineItemCandidateBaseSchema
 	.refine((item) => (item.itemType === 'DECORATION' ? item.decorationType != null : item.itemType === 'FINISHING' ? item.finishingStep != null : item.otherJobType != null), {
 		message: 'decorationType is required for DECORATION rows, finishingStep for FINISHING rows, otherJobType for OTHER rows'
@@ -75,10 +86,12 @@ export const orderCandidateSchema = z.object({
 	hoopsOrderId: z.string().min(1),
 	customerName: z.string().min(1),
 	// Null when the export has no Deadline (2026-09-28): the order still imports, and
-	// the order page asks for the ship date before it can be confirmed. Nothing about an
+	// the order page asks for the deadline before it can be confirmed. Nothing about an
 	// incomplete export should stop it reaching Orders for review.
-	externalShipDate: z.iso.date().nullable(),
-	internalDueDate: z.iso.date().nullable(),
+	deadline: z.iso.date().nullable(),
+	// Imported Hoops "Deadline" dates are firm customer commitments, so imports default
+	// tight. A reviewer can flip it to internal on the order page. See Order.deadlineIsTight.
+	deadlineIsTight: z.boolean().default(true),
 	importedBy: z.string().min(1),
 	// May be empty (2026-09-28): an order whose rows all failed to parse still imports,
 	// with each dropped row listed in confidenceFlags for the reviewer.
@@ -91,6 +104,7 @@ export const orderCandidateSchema = z.object({
 
 export type OrderCandidate = z.infer<typeof orderCandidateSchema>;
 
+/** The "all_siblings" dependsOn sentinel (fold & bag waits on every other line item), re-exported for the import code. */
 export const ALL_SIBLINGS = ALL_SIBLINGS_DEPENDENCY;
 
 // confirm_import's `corrections?` — field-level edits a human made while reviewing an
@@ -101,21 +115,18 @@ export const ALL_SIBLINGS = ALL_SIBLINGS_DEPENDENCY;
 export const orderCorrectionSchema = z
 	.object({
 		customerName: z.string().min(1),
-		// internalDueDate defaults to 14 days before externalShipDate (see
-		// internalDueDate.ts) whenever externalShipDate changes without an explicit
-		// internalDueDate alongside it — but a human reviewing the order can still
-		// override it directly; the default is a starting point, not a lock. See
-		// updateOrderFields.ts / confirmImport.ts for exactly how the two interact.
-		externalShipDate: z.iso.date(),
-		internalDueDate: z.iso.date(),
+		// The one date this order works to, plus whether it's a firm customer
+		// commitment (tight) or an internal target (loose). A correction can set or
+		// change the deadline but never clear it back to null. See
+		// updateOrderFields.ts for the shape it comes in as.
+		deadline: z.iso.date(),
+		deadlineIsTight: z.boolean(),
 		// Free-text, human-entered only — e.g. why a job ran late. See CLAUDE.md.
 		notes: z.string(),
-		// NEW: the pre-production approval gates buildBacklogAndCapacity.ts's
-		// fetchBacklog() requires (adopted from the schedule-creation-workflow branch).
-		// Not part of the Hoops import candidate — these aren't read off the export,
-		// they're set afterward as the shop actually orders blanks / gets customer
-		// sign-off. Without a way to set them, no order could ever reach the schedule
-		// backlog through the UI.
+		// The pre-production statuses (adopted from the schedule-creation-workflow
+		// branch). Not read off the export. Since 2026-10-02 the import assumes blanks
+		// ORDERED and customer APPROVED, and neither gates confirming or scheduling any
+		// more; they stay editable on the order page for the record.
 		blankOrderingStatus: z.enum(BlankOrderingStatus),
 		customerApprovalStatus: z.enum(CustomerApprovalStatus)
 	})
@@ -131,10 +142,10 @@ export const orderCorrectionSchema = z
 export const lineItemCorrectionSchema = lineItemCandidateBaseSchema
 	.omit({ localId: true, dependsOn: true })
 	.extend({
-		// NEW: same reasoning as Order.blankOrderingStatus/customerApprovalStatus above —
-		// the artwork-approval gate, but per decoration line item rather than per order.
-		// Null on finishing rows (checked by the caller, not enforced here — same pattern
-		// updateLineItemFields already uses for every other field).
+		// Same idea as Order.blankOrderingStatus/customerApprovalStatus above, but per
+		// decoration line item. No longer a gate (artwork is always considered approved,
+		// client decision 2026-09-28) — kept editable for the record.
+		// Null on finishing rows (not enforced here or in updateLineItemFields).
 		artworkApprovalStatus: z.enum(ArtworkApprovalStatus),
 		// NEW (2026-09-28): OTHER rows only — the station a reviewer says this job runs
 		// on. updateLineItemFields checks it's a real, active station.

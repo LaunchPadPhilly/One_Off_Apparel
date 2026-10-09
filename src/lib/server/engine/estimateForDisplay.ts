@@ -23,9 +23,10 @@ import type { EstimateHoursInput } from './types';
  *        - finishing (relabel, hang tags, fold & bag, matte, wovens): a flat
  *          minutes-per-garment rate × quantity (added 2026-09-23; wovens' rate is
  *          provisional — see estimateHours.ts).
- *      DTF and DTG have no formula; they throw MissingFormulaError and show up as
- *      "pending," not as a guessed number. So does a matte / fold & bag row whose
- *      matteSurface / foldBagGarment hasn't been set yet (MissingLineItemDataError).
+ *      DTF and DTG have no formula; until a reviewer enters their hours they throw
+ *      MissingLineItemDataError and show up as "pending," not as a guessed number. So
+ *      does a matte / fold & bag row whose matteSurface / foldBagGarment hasn't been
+ *      set yet. An unknown decoration type / finishing step throws MissingFormulaError.
  *   4. summarizeOrderEstimate() sums the line items that *could* be estimated into the
  *      order's "~Nh" total, and counts the rest as "+N pending." So an order total is
  *      a lower bound whenever any line item is pending.
@@ -44,11 +45,22 @@ import type { EstimateHoursInput } from './types';
  * *serialized* AtRiskFlag.reason string to work from — this helper gets the live Error
  * object straight from estimateHours(), so `instanceof` is available and preferred).
  */
+
+/**
+ * What a page renders for one line item's estimate. `ok: true` carries the rounded hours
+ * and station kind (plus override info); `ok: false` carries a category for the badge
+ * and the error message as `reason` (and, for missing data, the exact field to fill in).
+ */
 export type DisplayEstimate =
 	| { ok: true; hours: number; station: string; overridden: boolean; formulaHours: number | null }
 	| { ok: false; category: 'missing_formula'; reason: string }
 	| { ok: false; category: 'missing_data'; reason: string; field: MissingLineItemField };
 
+/**
+ * Estimates one line item for display (one-person hours — no crew size). Never throws
+ * for an estimation gap: MissingFormulaError / MissingLineItemDataError become
+ * `ok: false` results. Any other error is a real bug and is re-thrown.
+ */
 export function estimateForDisplay(item: EstimateHoursInput): DisplayEstimate {
 	try {
 		const result = estimateHours(item);
@@ -61,16 +73,19 @@ export function estimateForDisplay(item: EstimateHoursInput): DisplayEstimate {
 	}
 }
 
-/** Rolls a list of line items into one order-level summary: a total for whatever is
- *  currently estimable, plus how many line items aren't (yet). Line items already
- *  BLOCKED (unstarted finishing steps waiting on `depends_on`) aren't excluded here —
- *  the caller decides what to pass in; this function just sums whatever it's given. */
+/** An order's estimate roll-up: hours for the estimable line items, plus counts of
+ *  how many could and couldn't be estimated. */
 export interface OrderEstimateSummary {
 	totalHours: number;
 	estimableCount: number;
 	unestimableCount: number;
 }
 
+/** Rolls a list of line items into one order-level summary: a total for whatever is
+ *  currently estimable, plus how many line items aren't (yet). Line items already
+ *  BLOCKED (unstarted finishing steps waiting on `depends_on`) aren't excluded here —
+ *  the caller decides what to pass in; this function just sums whatever it's given.
+ *  The total is a lower bound whenever `unestimableCount > 0`. */
 export function summarizeOrderEstimate(lineItems: readonly EstimateHoursInput[]): OrderEstimateSummary {
 	let totalHours = 0;
 	let estimableCount = 0;

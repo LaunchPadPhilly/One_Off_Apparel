@@ -1,3 +1,11 @@
+/**
+ * propose_schedule: the deterministic engine that turns a backlog + capacity into a
+ * suggested schedule (no DB access; it only returns data). Called by
+ * proposeAndPersistSchedule.ts (the MCP tool), proposeIntoNewDraft.ts (automatic draft)
+ * and simulateChange.ts. Key rules: nothing is written here — only commit_schedule,
+ * after human approval, makes it real — and a job that can't be placed on time is
+ * flagged at risk with a reason, never dropped or placed late.
+ */
 import { SHIFT_END_MIN, SHIFT_START_MIN, skipBreak, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
 import { estimateHours, EstimationError } from './estimateHours';
 import type { AtRiskFlag, BacklogItem, CapacitySlot, ExternalDependencyState, ProposedAssignment, ProposeScheduleResult } from './types';
@@ -12,6 +20,7 @@ function batchFamilyKey(item: BacklogItem, stationName: string): string {
 	return [stationName, item.finishingStep ?? ''].join('|');
 }
 
+// One capacity slot per (station, UTC calendar day).
 function slotKey(stationId: string, date: Date): string {
 	return `${stationId}__${date.toISOString().slice(0, 10)}`;
 }
@@ -32,6 +41,8 @@ function laterOf(a: TimePoint, b: TimePoint): TimePoint {
  *  error prefixes. */
 export const DEPENDENCY_REASON_PREFIX = 'dependency: ';
 
+// Working state for one capacity slot while the engine fills it. `slot` is a copy, so
+// decrementing its availableHrs never mutates the caller's capacity array.
 interface SlotState {
 	slot: CapacitySlot;
 	// Next free wall-clock minute on this station's day (jobs pack back-to-back).
@@ -44,7 +55,7 @@ interface SlotState {
  * Builds a proposed schedule. Never writes to the live schedule — only
  * commit_schedule, called after human approval, does that (see CLAUDE.md).
  *
- * Due date (backlog item's `dueDate`, i.e. the order's internal_due_date) is the
+ * Due date (backlog item's `dueDate`, i.e. the order's `deadline` — see types.ts) is the
  * hard floor: jobs are placed earliest-due-date first, and only into a slot on or
  * before their due date. Within that constraint, a slot that already holds a
  * same-setup job is preferred over an earlier-but-unbatched one, so similar jobs
@@ -73,6 +84,13 @@ interface SlotState {
  * lookahead weighting (those need tuning parameters this repo has no source for),
  * only its core idea of preferring a batch-mate's slot. Revisit once there's real
  * capacity data to tune against.
+ *
+ * @param backlog jobs to place (dependencies already resolved into `dependsOnIds`).
+ * @param capacity open hours per (station, day), usually already staffed by planStaffing.
+ * @param externalDependencies state of dependency ids not in this backlog; an id in
+ *   neither is treated as not schedulable.
+ * @returns placements, at-risk flags and one human-readable reasoning line per job.
+ *   Never throws for an unestimable job (it's flagged); any other error is re-thrown.
  */
 export function proposeSchedule(
 	backlog: readonly BacklogItem[],
@@ -81,7 +99,9 @@ export function proposeSchedule(
 ): ProposeScheduleResult {
 	const slots = new Map<string, SlotState>();
 	for (const slot of capacity) {
-		slots.set(slotKey(slot.stationId, slot.date), { slot: { ...slot }, cursor: SHIFT_START_MIN, placedCount: 0, families: new Set() });
+		// A day with committed work kept in place starts its free time after that work.
+		const cursor = Math.max(SHIFT_START_MIN, slot.busyUntilMin ?? SHIFT_START_MIN);
+		slots.set(slotKey(slot.stationId, slot.date), { slot: { ...slot }, cursor, placedCount: slot.committedJobCount ?? 0, families: new Set() });
 	}
 
 	const assignments: ProposedAssignment[] = [];
@@ -95,7 +115,7 @@ export function proposeSchedule(
 	const unplaced = new Set<string>();
 
 	function flag(item: BacklogItem, requiredStation: string, reason: string) {
-		atRisk.push({ lineItemId: item.id, requiredStation, dueDate: item.dueDate, reason });
+		atRisk.push({ lineItemId: item.id, requiredStation, dueDate: item.dueDate, deadlineIsTight: item.deadlineIsTight, reason });
 		reasoning.push(`${item.id}: AT RISK — ${reason}`);
 		unplaced.add(item.id);
 	}
@@ -118,7 +138,13 @@ export function proposeSchedule(
 		const [item] = pending.splice(index, 1);
 		const dependsOnIds = item.dependsOnIds ?? [];
 
-		const blockedBy = dependsOnIds.filter((id) => unplaced.has(id) || (!inBacklog.has(id) && externalDependencies.get(id) !== 'complete'));
+		// A dependency outside this backlog is fine if it's done, or already on the
+		// committed schedule (then this job waits for its end time, below).
+		const externalOk = (id: string) => {
+			const state = externalDependencies.get(id);
+			return state === 'complete' || (typeof state === 'object' && state !== null);
+		};
+		const blockedBy = dependsOnIds.filter((id) => unplaced.has(id) || (!inBacklog.has(id) && !externalOk(id)));
 		if (blockedBy.length > 0) {
 			flag(
 				item,
@@ -146,7 +172,8 @@ export function proposeSchedule(
 		// placed in this run (dependencies already complete impose no constraint).
 		let earliest: TimePoint | null = null;
 		for (const id of dependsOnIds) {
-			const end = placedEnd.get(id);
+			const external = externalDependencies.get(id);
+			const end = placedEnd.get(id) ?? (typeof external === 'object' ? external.endsAt : undefined);
 			if (end) earliest = earliest ? laterOf(earliest, end) : end;
 		}
 
@@ -186,6 +213,8 @@ export function proposeSchedule(
 			if (earliest && dayMs === earliest.dayMs && workingMinutesUntilShiftEnd(start) < workingMin) continue;
 			candidates.push({ state, start, gapMin, hours });
 		}
+		// Prefer a slot that already holds a same-setup job (even on a later day); among
+		// equals, the earliest day wins.
 		candidates.sort((a, b) => {
 			const aBatched = a.state.families.has(family);
 			const bBatched = b.state.families.has(family);

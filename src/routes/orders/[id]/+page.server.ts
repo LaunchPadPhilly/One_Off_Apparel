@@ -47,7 +47,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// artwork approval, missing estimate data) and `infoNotes` (everything else — import
 	// flags, and estimate gaps with no backing field yet). Only `questions` are answerable
 	// via the notes box below; `infoNotes` are shown for awareness only. See orderGaps.ts.
-	const gaps = computeOrderGaps({ externalShipDate: order.externalShipDate, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags }, order.lineItems);
+	const gaps = computeOrderGaps({ deadline: order.deadline, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags }, order.lineItems);
 
 	return {
 		canEdit: hasGrantedScope(locals.user, 'IMPORT_WRITE'),
@@ -57,9 +57,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			id: order.id,
 			hoopsOrderId: order.hoopsOrderId,
 			customerName: order.customerName,
-			// '' when the export had no Deadline (2026-09-28) — the page asks for it.
-			externalShipDate: order.externalShipDate?.toISOString().slice(0, 10) ?? '',
-			internalDueDate: order.internalDueDate?.toISOString().slice(0, 10) ?? '',
+			// '' when the export had no Deadline — the page asks for it.
+			deadline: order.deadline?.toISOString().slice(0, 10) ?? '',
+			deadlineIsTight: order.deadlineIsTight,
 			status: order.status,
 			importedBy: order.importedBy,
 			notes: order.notes,
@@ -154,10 +154,17 @@ export const actions: Actions = {
 	updateOrder: async ({ params, request, locals, url }) => {
 		const user = requireScopePage(locals.user, 'IMPORT_WRITE', url.pathname);
 		const data = await request.formData();
-		const patch: Record<string, string> = {};
-		for (const key of ['customerName', 'externalShipDate', 'internalDueDate', 'blankOrderingStatus', 'customerApprovalStatus']) {
+		const patch: Record<string, string | boolean> = {};
+		for (const key of ['customerName', 'deadline', 'blankOrderingStatus', 'customerApprovalStatus']) {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = value.trim();
+		}
+		// deadlineIsTight is a checkbox: absent form value = false. Only apply it when
+		// the form actually sent the field marker (so a partial patch that omits the
+		// checkbox entirely — e.g. the notes-only production-notes form below — doesn't
+		// silently reset it).
+		if (data.has('deadlineIsTightSubmitted')) {
+			patch.deadlineIsTight = data.get('deadlineIsTight') === 'true';
 		}
 		// notes may be intentionally cleared, unlike the other fields above.
 		const notes = data.get('notes');
@@ -204,9 +211,20 @@ export const actions: Actions = {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = value.trim();
 		}
-		for (const key of ['quantity', 'inkColorCount', 'screens', 'stitchCount', 'manualEstimatedHours']) {
+		for (const key of ['quantity', 'inkColorCount', 'screens', 'stitchCount']) {
 			const value = data.get(key);
 			if (typeof value === 'string' && value.trim()) patch[key] = Number(value);
+		}
+		// manualEstimatedHours (2026-09-28) is special: an empty input MUST clear the
+		// value, since that's how an admin removes an override to fall back to the engine
+		// estimate. A hidden `manualEstimatedHoursSubmitted` marker tells this action
+		// "the input was on the form and might be intentionally blank," so a form that
+		// never rendered the input at all (e.g. a form for a job type where the field
+		// doesn't apply) can't accidentally clear it.
+		if (data.has('manualEstimatedHoursSubmitted')) {
+			const raw = data.get('manualEstimatedHours');
+			const value = typeof raw === 'string' ? raw.trim() : '';
+			patch.manualEstimatedHours = value ? Number(value) : null;
 		}
 
 		try {

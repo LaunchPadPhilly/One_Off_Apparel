@@ -5,8 +5,8 @@ import type { MissingLineItemField } from '$lib/server/engine/estimateHours';
 /**
  * What's outstanding on an order, split into two kinds:
  *
- * - `questions`: gaps that map to a real, settable field (an order-level approval gate,
- *   or a specific line item's artwork-approval / missing estimate data). Each one names
+ * - `questions`: gaps that map to a real, settable field (today: a missing order
+ *   deadline, or a specific line item's missing estimate data). Each one names
  *   its exact target field, so an answer — whether typed by hand into the per-item edit
  *   form, or extracted from a reviewer's free-text note by fillNeedsAttentionFromNotes —
  *   can be applied precisely rather than guessed from prose.
@@ -14,30 +14,39 @@ import type { MissingLineItemField } from '$lib/server/engine/estimateHours';
  *   no backing field at all yet (a station with no formula — see CLAUDE.md's Known open
  *   items). No note can resolve these; they're surfaced for awareness only.
  *
- * Shared by the order page's load (to render "Needs attention") and
+ * Shared by the order page's load (to render "Needs attention"),
  * fillNeedsAttentionFromNotes.ts (to build the exact question set Claude is allowed to
- * answer, and to apply its answers to the right field) — one source of truth for what
- * counts as an outstanding gap.
+ * answer, and to apply its answers to the right field), the draft board, and — through
+ * orderReadiness.ts — the confirm gate and the Orders list: one source of truth for what
+ * counts as an outstanding gap. Pure function: no database access.
+ */
+
+/**
+ * One answerable gap. `key` is stable per gap (used to match an answer back to it);
+ * `target` names the exact field an answer is written to. The blanks / customer /
+ * artwork targets are kept in the type but no longer produced (2026-09-28 / 2026-10-02).
  */
 export interface OrderGapQuestion {
 	key: string;
 	question: string;
 	target:
-		| { level: 'order'; field: 'externalShipDate' | 'blankOrderingStatus' | 'customerApprovalStatus' }
+		| { level: 'order'; field: 'deadline' | 'blankOrderingStatus' | 'customerApprovalStatus' }
 		| { level: 'lineItem'; lineItemId: string; field: 'artworkApprovalStatus' | MissingLineItemField };
 }
 
+/** Something to show the reviewer that no answer can resolve (an import flag, a missing formula). */
 export interface OrderInfoNote {
 	key: string;
 	text: string;
 }
 
+/** computeOrderGaps()' result. */
 export interface OrderGaps {
 	questions: OrderGapQuestion[];
 	infoNotes: OrderInfoNote[];
 	/**
 	 * NEW (2026-09-23): how many things stop this order from being valid — every
-	 * question above (approvals, artwork, missing estimate data) plus every line item
+	 * question above (deadline, missing estimate data) plus every line item
 	 * with no formula at all. Import-time flags don't count (they're context). Zero
 	 * means ready: confirmImport.ts refuses to confirm while this is > 0, and a
 	 * CONFIRMED order with this > 0 is shown as "Needs re-review".
@@ -45,6 +54,7 @@ export interface OrderGaps {
 	blockingCount: number;
 }
 
+/** The line item fields computeOrderGaps() reads — a Prisma LineItem row satisfies it. */
 export interface OrderGapLineItem extends EstimateHoursInput {
 	id: string;
 	design: string;
@@ -52,22 +62,30 @@ export interface OrderGapLineItem extends EstimateHoursInput {
 	artworkApprovalStatus?: string | null;
 }
 
-// A handful of import-time flags describe a concern this codebase has since resolved
-// structurally (internalDueDate used to be an independent, ambiguous field extracted
-// from the same single "Deadline" date — see internalDueDate.ts / CLAUDE.md's Known open
-// items). Orders imported before that fix still carry the old flag text in their audit
-// log; there's no way to tell "this note is now stale" from free text in general, but
-// this one specific, resolved concern is safe to filter by pattern rather than leaving it
-// permanently displayed as if it were still an open question.
+// Old import-time flags describe a concern this codebase has since resolved structurally
+// (internalDueDate used to be extracted independently from the same single "Deadline"
+// date, and later — briefly — computed from it deterministically; both are gone now,
+// see the 2026-09-28 deadline-tightness change). Orders imported before those fixes
+// still carry the old flag text in their audit log; there's no way to tell "this note is
+// now stale" from free text in general, but these one-off resolved concerns are safe to
+// filter by pattern rather than leaving them permanently displayed as open questions.
 function isResolvedImportFlag(flag: string): boolean {
 	const lower = flag.toLowerCase();
-	return lower.includes('internalduedate') && /\b(single|same) date\b/.test(lower);
+	return lower.includes('internalduedate') || lower.includes('internal due date');
 }
 
+/**
+ * Works out everything outstanding on one order (see the file comment above).
+ *
+ * @param order - the order's deadline and status fields, plus its import-time flags
+ *                (from the latest import audit entry; pass [] when they don't matter)
+ * @param lineItems - every line item on the order
+ * @returns questions, info notes, and the blocking count confirmImport.ts checks
+ */
 export function computeOrderGaps(
-	// externalShipDate is required (not optional) on purpose: an order with no ship date
-	// must always come back with that question, so no caller can forget to pass it.
-	order: { externalShipDate: Date | string | null; blankOrderingStatus: string; customerApprovalStatus: string; importFlags: readonly string[] },
+	// deadline is required (not optional) on purpose: an order with no deadline must
+	// always come back with that question, so no caller can forget to pass it.
+	order: { deadline: Date | string | null; blankOrderingStatus: string; customerApprovalStatus: string; importFlags: readonly string[] },
 	lineItems: readonly OrderGapLineItem[]
 ): OrderGaps {
 	const questions: OrderGapQuestion[] = [];
@@ -75,33 +93,20 @@ export function computeOrderGaps(
 		.filter((flag) => !isResolvedImportFlag(flag))
 		.map((flag, i) => ({ key: `import-flag:${i}`, text: flag }));
 
-	// NEW (2026-09-28): an export with no Deadline imports with no ship date.
-	if (!order.externalShipDate) {
+	// An export with no Deadline imports with no deadline set.
+	if (!order.deadline) {
 		questions.push({
-			key: 'ship-date',
-			question: 'What is the ship date (deadline) for this order? The export didn’t have one.',
-			target: { level: 'order', field: 'externalShipDate' }
+			key: 'deadline',
+			question: 'What is the deadline for this order? The export didn’t have one.',
+			target: { level: 'order', field: 'deadline' }
 		});
 	}
-	if (order.blankOrderingStatus !== 'RECEIVED') {
-		questions.push({
-			key: 'blanks',
-			question: 'Have blanks for this order been ordered, and have they arrived yet?',
-			target: { level: 'order', field: 'blankOrderingStatus' }
-		});
-	}
-	if (order.customerApprovalStatus !== 'APPROVED') {
-		questions.push({
-			key: 'customer-approval',
-			question: 'Has the customer approved this order yet?',
-			target: { level: 'order', field: 'customerApprovalStatus' }
-		});
-	}
+	// No blanks or customer-approval question (2026-10-02): blanks are always assumed
+	// ordered and the customer's approval assumed — the work doesn't wait on either.
 
 	// Two line items easily share the exact same missing-formula reason (e.g. two
 	// "Matte Finish" rows, same station, same "no formula yet" message) — counted by
-	// exact reason text instead of one bullet per line item, same reasoning as the
-	// grouped display already used for questions below.
+	// exact reason text instead of one bullet per line item.
 	const missingFormulaByReason = new Map<string, { count: number; firstDesign: string }>();
 
 	for (const item of lineItems) {
@@ -141,6 +146,7 @@ export function describeBlockers(blockingCount: number): string {
 	return `${blockingCount} open item${blockingCount === 1 ? '' : 's'} to resolve (see Needs attention)`;
 }
 
+/** The reviewer-facing question for one missing line item field. */
 function fieldQuestion(field: MissingLineItemField, item: OrderGapLineItem): string {
 	const design = item.design;
 	switch (field) {

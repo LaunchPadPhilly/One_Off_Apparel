@@ -1,7 +1,7 @@
 import { env } from '$env/dynamic/private';
 import Anthropic from '@anthropic-ai/sdk';
 import { orderCandidateSchema, lineItemCandidateSchema, type OrderCandidate } from './types';
-import { computeInternalDueDate } from '$lib/internalDueDate';
+import { HOOPS_EXTRACTION_RULES } from './extractionRules';
 
 /**
  * There is no deterministic Hoops export parser — CLAUDE.md's Known open items are
@@ -13,10 +13,21 @@ import { computeInternalDueDate } from '$lib/internalDueDate';
  * guaranteed-correct parser. Every extraction includes reviewConfidence per line item
  * and order-level confidenceFlags; the human confirmation gate (confirm_import) is not
  * optional scaffolding here, it's load-bearing.
+ *
+ * Called from the Orders page's PDF upload action (src/routes/orders/+page.server.ts);
+ * its output is then saved by importHoopsExport.ts. This file never writes to the
+ * database itself.
  */
 
+// Which Claude model reads the PDF. Real per-import cost — see CLAUDE.md's Known open
+// items ("PDF extraction cost/model choice not confirmed with the client").
 const MODEL = 'claude-sonnet-5';
 
+/**
+ * Thrown for any expected extraction failure (no API key, API call failed, the answer
+ * was cut off or unusable, no Job number). Its message is written for the person who
+ * uploaded the file; `cause` keeps the underlying error for debugging.
+ */
 export class PdfExtractionError extends Error {
 	constructor(
 		message: string,
@@ -31,6 +42,10 @@ export class PdfExtractionError extends Error {
 // support doesn't need to round-trip the zod refinements (itemType-conditional
 // exclusivity, etc.); those are re-validated by orderCandidateSchema.parse() below
 // once the tool call returns. Keep the two in sync by hand if the schema changes.
+//
+// The `description` strings below are instructions Claude reads when filling in each
+// field — changing their wording changes extraction behavior, so treat an edit to them
+// like a code change (re-test against the sample Hoops PDFs).
 const extractionTool: Anthropic.Tool = {
 	name: 'emit_extracted_order',
 	description: "Emit the one order this Hoops export PDF describes, in this system's canonical shape.",
@@ -39,10 +54,10 @@ const extractionTool: Anthropic.Tool = {
 		properties: {
 			hoopsOrderId: { type: 'string', description: 'The "Job <number>" identifier, e.g. "100127".' },
 			customerName: { type: 'string' },
-			externalShipDate: {
+			deadline: {
 				type: 'string',
 				description:
-					'ISO date YYYY-MM-DD. Use the "Deadline" date. If the export has no Deadline, return an empty string — never substitute another date such as the job creation "Date". Do not emit an internal due date — this system computes it deterministically as 14 days before this date; never guess or duplicate it yourself.'
+					'ISO date YYYY-MM-DD. Use the "Deadline" date. If the export has no Deadline, return an empty string — never substitute another date such as the job creation "Date". This system stores exactly one date per order; there is no separate "internal" or "external" date any more.'
 			},
 			confidenceFlags: {
 				type: 'array',
@@ -73,6 +88,18 @@ const extractionTool: Anthropic.Tool = {
 							enum: ['FLAT', 'SPECIALTY', null],
 							description: 'MATTE rows only, and only if the export clearly says whether the matte goes on a flat or specialty surface. Otherwise null and note it in confidenceFlags — never guess.'
 						},
+						garmentStyle: {
+							type: ['string', 'null'],
+							enum: ['FLAT', 'CAP', null],
+							description:
+								'DECORATION rows only: the garment this decoration goes on, from its blank/garment block. CAP for headwear (cap, hat, snapback, trucker, visor, beanie); FLAT for everything else (tees, polos, hoodies, jackets, bags...). Null for finishing rows.'
+						},
+						capConstruction: {
+							type: ['string', 'null'],
+							enum: ['STRUCTURED', 'UNSTRUCTURED', null],
+							description:
+								'Only when garmentStyle is CAP: STRUCTURED or UNSTRUCTURED if the product name or description says so (e.g. "Structured Snapback", "Unstructured Dad Hat"). Null otherwise.'
+						},
 						foldBagGarment: {
 							type: ['string', 'null'],
 							enum: ['SS_TEE', 'OTHER', null],
@@ -90,7 +117,7 @@ const extractionTool: Anthropic.Tool = {
 								'From an inline hint like "(Thin - ...)" or "(Fleece/Bulky)" when present. If the product has no such hint (e.g. headwear), there is no correct value yet — default to "THIN" and you MUST add a confidenceFlags entry naming this line item and saying no weight-class signal existed.'
 						},
 						apparelColor: { type: 'string' },
-						inkColorCount: { type: ['integer', 'null'], description: 'From "N Color Screen Print" or similar. Null if not applicable.' },
+						inkColorCount: { type: ['integer', 'null'], description: 'From "N Color Screen Print" or similar. If no count is stated, count the colors listed in the decoration row "Color(s)" column (e.g. "White thread" = 1, "109c Yellow, White" = 2). Null only if not applicable or the colors are not listed.' },
 						decorationColors: {
 							type: ['string', 'null'],
 							description:
@@ -109,22 +136,30 @@ const extractionTool: Anthropic.Tool = {
 				}
 			}
 		},
-		required: ['hoopsOrderId', 'customerName', 'externalShipDate', 'lineItems']
+		required: ['hoopsOrderId', 'customerName', 'deadline', 'lineItems']
 	}
 };
 
+// The instructions sent to Claude with every PDF. Like the tool descriptions above,
+// this is behavior, not documentation: re-test against the sample Hoops PDFs after any
+// wording change. The rules it states (finishing dependencies, garment style, etc.) are
+// also enforced in code after extraction — this just keeps Claude's output consistent.
 const SYSTEM_PROMPT = `You extract structured order data from a "Job" PDF exported from Hoops, a shop-management tool this apparel decorator uses. Each PDF describes exactly one job/order. Read it carefully:
 
-- The "Job <number>" line is the order identifier.
-- The job details table is organized into repeating groups: one blank/garment block (Code, Name/Description, Vendor, Color, Size, Quantity rows — one row per size) followed by one or more decoration/finishing rows (Name/Description, Vendor, Position, Color(s), Size, Quantity). Each decoration or finishing row is its own line item, sharing the same order — NOT one line item per garment/size row.
-- A matte finishing row depends on the decoration it finishes within the same garment group — wire dependsOn to that decoration's localId. Fold & bag always waits on everything ("all_siblings"). Relabel, hang tags and wovens wait on nothing — leave their dependsOn null. (The system enforces these rules itself; this just keeps your output consistent with them.)
-- Never invent a value you cannot support from the text. When something doesn't fit the schema (an unmapped treatment type, a missing signal, an ambiguous position), say so in confidenceFlags rather than guessing silently. This system's whole design assumes a human reviews everything you extract before it becomes real — your job is to make what you're unsure about visible, not to be right about everything.
-- If a treatment is real production work but has no matching decorationType or finishingStep (e.g. "Patch Install" — it's neither screen print/embroidery/DTF/DTG nor matte/relabel/fold&bag/hang tag/wovens), include it as itemType "OTHER" with otherJobType set to its name as written (e.g. "Patch Install"), decorationType and finishingStep null, and note it in confidenceFlags. Never force it into a type it isn't; a reviewer will assign its station and hours.
-- Rows that aren't production work on garments — administrative fees (digitizing fee, ink color change) and supply/material lines (e.g. "75 units of patches", leftover patches for the customer) — are never line items. Leave them out and mention them in confidenceFlags.
-- If there is no "Deadline", return an empty externalShipDate and say so in confidenceFlags. Never use another date instead.
+${HOOPS_EXTRACTION_RULES}
 
 Call emit_extracted_order exactly once with everything you found.`;
 
+/**
+ * Sends one Hoops "Job" PDF to Claude and returns the order it describes, validated
+ * against orderCandidateSchema, plus every confidence flag (Claude's own, and any added
+ * here for dropped rows or missing fields). Does not save anything.
+ *
+ * @param pdfBase64 - the PDF file's bytes, base64-encoded
+ * @param filename - the uploaded file's name; used in messages, and as a fallback
+ *                   source for the Job number ("Job 100157 - …")
+ * @throws PdfExtractionError when the order can't be extracted at all (see the class)
+ */
 export async function extractOrderFromPdf(pdfBase64: string, filename: string): Promise<OrderCandidate & { confidenceFlags: string[] }> {
 	const apiKey = env.ANTHROPIC_API_KEY;
 	if (!apiKey) throw new PdfExtractionError('ANTHROPIC_API_KEY is required for PDF import extraction');
@@ -170,11 +205,10 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 	const importedBy = 'claude';
 	const confidenceFlags = [...((raw.confidenceFlags as string[] | undefined) ?? [])];
 
-	// Validate line items individually rather than all-or-nothing: a model that ignores
-	// the "leave unmapped treatments out entirely" instruction and includes one anyway
-	// (e.g. "Patch Install" with no decorationType) should lose that one line item, not
-	// the whole order. See CLAUDE.md's Known open items — this happened for real on
-	// Job 100113.
+	// Validate line items individually rather than all-or-nothing: one row that doesn't
+	// fit the schema (e.g. "Patch Install" sent with no decorationType and no OTHER type,
+	// which happened for real on Job 100113 before OTHER existed) should lose that one
+	// line item, with a flag saying so, not the whole order.
 	const rawLineItems = Array.isArray(raw.lineItems) ? raw.lineItems : [];
 	const lineItems = [];
 	for (const [index, item] of rawLineItems.entries()) {
@@ -191,12 +225,12 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 
 	// Nothing incomplete should stop an order reaching Orders for review (2026-09-28).
 	// Some exports have no "Deadline" (e.g. Job 100160 only has its creation "Date"):
-	// import with no ship date, and the order page asks for it. (Computing a due date
+	// import with no deadline, and the order page asks for it. (Computing a due date
 	// from a non-ISO string used to crash the whole import with "Invalid time value".)
-	const rawShipDate = typeof raw.externalShipDate === 'string' ? raw.externalShipDate.trim() : '';
-	const shipDate = isIsoDate(rawShipDate) ? rawShipDate : null;
-	if (!shipDate) {
-		confidenceFlags.push(`No Deadline date could be read from the export${rawShipDate ? ` (read "${rawShipDate}")` : ''} — enter the ship date on the order page.`);
+	const rawDeadline = typeof raw.deadline === 'string' ? raw.deadline.trim() : '';
+	const deadline = isIsoDate(rawDeadline) ? rawDeadline : null;
+	if (!deadline) {
+		confidenceFlags.push(`No Deadline date could be read from the export${rawDeadline ? ` (read "${rawDeadline}")` : ''} — enter the deadline on the order page.`);
 	}
 
 	// Same idea for the two identifying fields: fall back rather than refuse. The job
@@ -211,15 +245,14 @@ export async function extractOrderFromPdf(pdfBase64: string, filename: string): 
 	}
 
 	try {
-		// internalDueDate is never asked of the model (see extractionTool above) — it's
-		// always computed from externalShipDate, per CLAUDE.md's resolved lead-time policy.
-		const internalDueDate = shipDate ? computeInternalDueDate(shipDate) : null;
-		const validated = orderCandidateSchema.parse({ ...raw, hoopsOrderId, customerName, externalShipDate: shipDate, internalDueDate, importedBy, lineItems });
+		// Imported Hoops "Deadline" dates are firm customer commitments, so imports
+		// default deadlineIsTight = true. A reviewer flips to loose on the order page.
+		const validated = orderCandidateSchema.parse({ ...raw, hoopsOrderId, customerName, deadline, deadlineIsTight: true, importedBy, lineItems });
 		return { ...validated, confidenceFlags };
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
-		// Include why line items were dropped — otherwise an order that loses every line
-		// item just reports "expected array to have >=1 items" with no hint of the cause.
+		// Include why line items were dropped — otherwise the bare zod error gives no hint
+		// that some rows were already thrown out before this final check.
 		const dropped = confidenceFlags.filter((flag) => flag.startsWith('Excluded "'));
 		throw new PdfExtractionError(
 			`"${filename}" extracted but failed schema validation even after dropping bad line items: ${detail}${dropped.length ? ` — dropped: ${dropped.join(' | ')}` : ''}`,

@@ -1,13 +1,13 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import { requireScopePage } from '$lib/server/auth/guards';
 import { deleteDraft, getDraft } from '$lib/server/schedule/draft';
-import { checkFinisherPlacement, repackDraftDays } from '$lib/server/schedule/draftDependencies';
+import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
+import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
-import type { Prisma } from '../../../../../prisma/generated/prisma/client';
 import {
 	OrderStatus,
 	ScheduleAssignmentStatus
@@ -66,57 +66,14 @@ function stationMismatchMessage(
 }
 
 /**
- * Repacking a (draft, station, date) queue back-to-back from shift open lives in
- * $lib/server/schedule/draftDependencies.ts (repackDraftDays) — the same packed-queue
- * layout as before, using $lib/schedule/repackDay.ts, plus one rule: a finisher is held
- * until the job(s) it depends on end, and finishers elsewhere in the draft are re-settled
- * when a print moves (2026-09-23). Scope stays this draft only — committed rows and
- * other drafts' rows are never touched.
+ * Server-authoritative gap-preserving cascade + dependency-hold settling lives in
+ * $lib/server/schedule/draftDependencies.ts (repackDraftDays). The client applies
+ * the same math from $lib/schedule/repackDay.ts optimistically; the server re-runs
+ * it inside a transaction so a hand-crafted POST or a client on a stale layout
+ * can't slip through, and layers finisher-hold enforcement on top (a print moving
+ * later re-settles the finishers waiting on it). Scope stays this draft only —
+ * committed rows and other drafts' rows are never touched.
  */
-
-/**
- * Stage-a-new-row's sequenceOrder value: the client passes `insertRank` (the 0-N
- * position they want the new/moved item to end up at), and we hand the row that
- * exact integer, then bump every peer at rank >= insertRank by 1 to make room.
- * repackDay then normalizes the whole day to 0..N-1 and writes startMinuteOfDay.
- */
-async function makeRoomAtRank(
-	tx: Prisma.TransactionClient,
-	draftId: string,
-	stationId: string,
-	date: Date,
-	insertRank: number,
-	excludeId?: string
-): Promise<void> {
-	const peers = await tx.scheduleAssignment.findMany({
-		where: {
-			scheduleDraftId: draftId,
-			stationId,
-			date,
-			...(excludeId ? { id: { not: excludeId } } : {})
-		},
-		orderBy: [{ sequenceOrder: 'asc' }, { startMinuteOfDay: 'asc' }],
-		select: { id: true }
-	});
-	const clamped = Math.max(0, Math.min(peers.length, insertRank));
-	// Two-pass renumber so the (draftId, stationId, date, sequenceOrder) unique
-	// constraint — if one is ever added — can't collide mid-update. Even without
-	// a unique constraint, this keeps the intermediate state readable: everyone
-	// at rank >= clamped moves to a high offset first, then we compact.
-	const OFFSET = 10_000;
-	for (let i = clamped; i < peers.length; i++) {
-		await tx.scheduleAssignment.update({
-			where: { id: peers[i].id },
-			data: { sequenceOrder: OFFSET + i + 1 }
-		});
-	}
-	for (let i = clamped; i < peers.length; i++) {
-		await tx.scheduleAssignment.update({
-			where: { id: peers[i].id },
-			data: { sequenceOrder: i + 1 }
-		});
-	}
-}
 
 /**
  * The draft detail view carries the sidebar (candidate orders + line items with
@@ -153,9 +110,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		// candidate here, not just left unplaced by the automatic engine; see
 		// placeAssignment below for the matching server-side write-path check.
 		prisma.order.findMany({
-			where: { status: OrderStatus.CONFIRMED, internalDueDate: { gte: startOfToday() } },
+			where: { status: OrderStatus.CONFIRMED, deadline: { gte: startOfToday() } },
 			include: { lineItems: { orderBy: { id: 'asc' } } },
-			orderBy: [{ internalDueDate: 'asc' }, { createdAt: 'desc' }]
+			orderBy: [{ deadline: 'asc' }, { createdAt: 'desc' }]
 		}),
 		prisma.station.findMany({
 			where: { archivedAt: null },
@@ -230,14 +187,14 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			customerName: order.customerName,
 			displayTitle: order.displayTitle,
 			colorHex: order.colorHex,
-			// Never null: the candidate query's internalDueDate filter excludes orders with no date.
-			internalDueDate: iso(order.internalDueDate!),
-			externalShipDate: order.externalShipDate ? iso(order.externalShipDate) : '',
+			// Never null: the candidate query's deadline filter excludes orders with no date.
+			deadline: iso(order.deadline!),
+			deadlineIsTight: order.deadlineIsTight,
 			status: order.status,
-			// NEW (2026-09-23): open items (orderGaps.ts) — a confirmed order with any is
-			// flagged "Needs re-review" on its card, linking to the order page to fix it.
+			// Open items (orderGaps.ts) — a confirmed order with any is flagged "Needs
+			// re-review" on its card, linking to the order page to fix it.
 			blockingCount: computeOrderGaps(
-				{ externalShipDate: order.externalShipDate, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
+				{ deadline: order.deadline, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
 				order.lineItems
 			).blockingCount,
 			lineItems: order.lineItems.map((item) => ({
@@ -316,19 +273,18 @@ export const actions: Actions = {
 		const stationName = form.get('stationName');
 		const date = toDate(form.get('date'));
 		const hours = parseFloat10(form.get('hours'));
-		// `insertRank` is the 0-N position the client wants the new item at within the
-		// day's queue (derived from where the user dropped it, midpoint-compared to
-		// existing peers — see computeInsertRank in $lib/schedule/repackDay.ts). The
-		// server then makes room at that rank and repacks the whole day back-to-back
-		// from shift open, so `startMinuteOfDay` no longer comes from the client — it
-		// is always the packed layout math over the ordered queue.
-		const insertRank = parseInt10(form.get('insertRank')) ?? 0;
+		// `startMinuteOfDay` is the exact wall-clock minute the client wants this new
+		// item to start at, from the drop position (2026-09-28 rewrite — gap-preserving
+		// cascade). Any peer that would be overlapped is pushed later, and every peer
+		// behind IT shifts by the same delta so their gaps stay intact.
+		const startMinuteOfDay = parseInt10(form.get('startMinuteOfDay'));
 
 		if (typeof lineItemId !== 'string' || !lineItemId) return fail(400, { message: 'lineItemId required' });
 		if (typeof stationName !== 'string' || !stationName) return fail(400, { message: 'stationName required' });
 		if (!date) return fail(400, { message: 'date required (YYYY-MM-DD)' });
 		if (hours === null || hours <= 0 || hours > 24)
 			return fail(400, { message: 'hours out of range' });
+		if (startMinuteOfDay === null) return fail(400, { message: 'startMinuteOfDay required' });
 
 		// Server-side enforcement of the same CONFIRMED-only + not-yet-overdue rules the
 		// candidate sidebar already filters by (see load() above) — that filter only
@@ -342,18 +298,18 @@ export const actions: Actions = {
 				assignedStationId: true,
 				decorationType: true,
 				finishingStep: true,
-				order: { select: { status: true, internalDueDate: true } }
+				order: { select: { status: true, deadline: true } }
 			}
 		});
 		if (!lineItem) return fail(404, { message: 'Line item not found' });
 		if (lineItem.order.status !== OrderStatus.CONFIRMED) {
 			return fail(400, { message: `This line item's order is ${lineItem.order.status}, not CONFIRMED — it can't be placed yet.` });
 		}
-		if (!lineItem.order.internalDueDate) {
-			return fail(400, { message: "This order has no ship date yet — set it on the order page before scheduling." });
+		if (!lineItem.order.deadline) {
+			return fail(400, { message: "This order has no deadline yet — set it on the order page before scheduling." });
 		}
-		if (lineItem.order.internalDueDate.getTime() < startOfToday().getTime()) {
-			return fail(400, { message: "This order's due date has already passed — it can't be scheduled until the due date is corrected." });
+		if (lineItem.order.deadline.getTime() < startOfToday().getTime()) {
+			return fail(400, { message: "This order's deadline has already passed — it can't be scheduled until the deadline is corrected." });
 		}
 
 		const station = await findActiveStation(stationName);
@@ -371,29 +327,42 @@ export const actions: Actions = {
 		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, lineItemId, date, Math.max(15, Math.round(hours * 60)));
 		if (dependencyProblem) return fail(400, { message: dependencyProblem });
 
-		// One transaction so a make-room-then-insert-then-repack sequence can't leave
-		// a half-shifted day if any step fails mid-way through.
-		const result = await prisma.$transaction(async (tx) => {
-			await makeRoomAtRank(tx, params.id, station.id, date, insertRank);
-			const created = await tx.scheduleAssignment.create({
-				data: {
-					lineItemId,
+		// One transaction so the create + cascade + settle sequence can't leave a
+		// half-shifted day if any step fails mid-way through.
+		const durationMin = Math.max(15, Math.round(hours * 60));
+		// A finisher that can't be settled is refused with a message, nothing saved.
+		let result;
+		try {
+			result = await prisma.$transaction(async (tx) => {
+				const created = await tx.scheduleAssignment.create({
+					data: {
+						lineItemId,
+						stationId: station.id,
+						date,
+						// Rewritten by cascadeInsert inside repackDraftDays; sequenceOrder gets
+						// renumbered from the sorted result.
+						sequenceOrder: 0,
+						startMinuteOfDay: startMinuteOfDay,
+						estimatedHours: hours,
+						status: ScheduleAssignmentStatus.PROPOSED,
+						proposedBy: user.email,
+						scheduleDraftId: params.id
+					}
+				});
+				const { peers, pushedCount } = await repackDraftDays(tx, params.id, {
+					kind: 'insert',
+					assignmentId: created.id,
 					stationId: station.id,
-					date,
-					sequenceOrder: insertRank,
-					// Filled in by repackDay's normalize pass below; a valid placeholder
-					// so the NOT NULL constraint wouldn't be an obstacle if one existed
-					// (this field is Int?, but we always write it).
-					startMinuteOfDay: 8 * 60,
-					estimatedHours: hours,
-					status: ScheduleAssignmentStatus.PROPOSED,
-					proposedBy: user.email,
-					scheduleDraftId: params.id
-				}
+					dayMs: date.getTime(),
+					targetStartMin: startMinuteOfDay,
+					durationMin
+				});
+				return { id: created.id, peers, pushedCount };
 			});
-			const { peers, pushedCount } = await repackDraftDays(tx, params.id, [{ stationId: station.id, date }]);
-			return { id: created.id, peers, pushedCount };
-		});
+		} catch (err) {
+			if (err instanceof DraftPlacementError) return fail(409, { message: err.message });
+			throw err;
+		}
 		return { success: true as const, id: result.id, peers: result.peers, pushedCount: result.pushedCount };
 	},
 
@@ -403,11 +372,12 @@ export const actions: Actions = {
 		const id = form.get('id');
 		const stationName = form.get('stationName');
 		const date = toDate(form.get('date'));
-		const insertRank = parseInt10(form.get('insertRank')) ?? 0;
+		const startMinuteOfDay = parseInt10(form.get('startMinuteOfDay'));
 
 		if (typeof id !== 'string' || !id) return fail(400, { message: 'id required' });
 		if (typeof stationName !== 'string' || !stationName) return fail(400, { message: 'stationName required' });
 		if (!date) return fail(400, { message: 'date required (YYYY-MM-DD)' });
+		if (startMinuteOfDay === null) return fail(400, { message: 'startMinuteOfDay required' });
 
 		// Belongs-to-this-draft check: prevent a client from re-parenting an
 		// assignment from a different draft (or a committed one) through this
@@ -417,6 +387,7 @@ export const actions: Actions = {
 			where: { id },
 			select: {
 				scheduleDraftId: true,
+				status: true,
 				stationId: true,
 				date: true,
 				lineItemId: true,
@@ -428,6 +399,10 @@ export const actions: Actions = {
 		});
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
+		// An approved job is on the live schedule; changing it here would skip the
+		// approval gate. Changes go through a new proposed plan instead.
+		if (existing.status !== ScheduleAssignmentStatus.PROPOSED)
+			return fail(409, { message: 'This job is already approved, so it can’t be changed here. Propose a new plan to move it.' });
 
 		const station = await findActiveStation(stationName);
 		if (!station) return fail(400, { message: 'That station no longer exists (it may have been archived in Settings → Stations). Reload the board.' });
@@ -441,33 +416,41 @@ export const actions: Actions = {
 		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, existing.lineItemId, date, Math.max(15, Math.round(existing.estimatedHours * 60)));
 		if (dependencyProblem) return fail(400, { message: dependencyProblem });
 
-		const result = await prisma.$transaction(async (tx) => {
-			// Make room at the new rank first (excluding the moving row itself, in case
-			// it's already in the same day — otherwise we'd shift it against itself).
-			await makeRoomAtRank(tx, params.id, station.id, date, insertRank, id);
+		// A finisher that can't be settled is refused with a message, nothing saved.
+		let result;
+		try {
+			result = await prisma.$transaction(async (tx) => {
+				// Persist the caller's intent (station/date/startMin). The cascade helper
+				// re-applies gap-preserving math server-authoritatively and rewrites this
+				// row plus any peers it shifts (see draftDependencies.ts).
+				await tx.scheduleAssignment.update({
+					where: { id },
+					data: {
+						stationId: station.id,
+						date,
+						startMinuteOfDay: startMinuteOfDay,
+						proposedBy: user.email
+					}
+				});
 
-			await tx.scheduleAssignment.update({
-				where: { id },
-				data: {
-					stationId: station.id,
-					date,
-					sequenceOrder: insertRank,
-					proposedBy: user.email
-				}
+				// The planned crew was for the (station, day) it left (2026-09-28).
+				const changedSlot =
+					existing.stationId !== station.id || existing.date.getTime() !== date.getTime();
+				if (changedSlot) await tx.assignmentCrew.deleteMany({ where: { assignmentId: id } });
+				return repackDraftDays(tx, params.id, {
+					kind: 'move',
+					assignmentId: id,
+					oldStationId: existing.stationId,
+					oldDayMs: existing.date.getTime(),
+					newStationId: station.id,
+					newDayMs: date.getTime(),
+					targetStartMin: startMinuteOfDay
+				});
 			});
-
-			// Repack the destination day. If the row moved to a DIFFERENT (station, date),
-			// also repack the origin day so the peers it left behind close the gap. Moving
-			// a print later also re-settles its finishers (draftDependencies.ts).
-			const changedSlot =
-				existing.stationId !== station.id || iso(existing.date) !== iso(date);
-			// The planned crew was for the (station, day) it left (2026-09-28).
-			if (changedSlot) await tx.assignmentCrew.deleteMany({ where: { assignmentId: id } });
-			return repackDraftDays(tx, params.id, [
-				{ stationId: station.id, date },
-				...(changedSlot ? [{ stationId: existing.stationId, date: existing.date }] : [])
-			]);
-		});
+		} catch (err) {
+			if (err instanceof DraftPlacementError) return fail(409, { message: err.message });
+			throw err;
+		}
 
 		return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
 	},
@@ -481,15 +464,33 @@ export const actions: Actions = {
 		// Only allow removal of assignments belonging to this draft.
 		const existing = await prisma.scheduleAssignment.findUnique({
 			where: { id },
-			select: { scheduleDraftId: true, stationId: true, date: true }
+			select: { scheduleDraftId: true, status: true, stationId: true, date: true }
 		});
 		if (!existing || existing.scheduleDraftId !== params.id)
 			return fail(404, { message: 'Assignment not in this draft' });
+		// An approved job is on the live schedule; changing it here would skip the
+		// approval gate. Changes go through a new proposed plan instead.
+		if (existing.status !== ScheduleAssignmentStatus.PROPOSED)
+			return fail(409, { message: 'This job is already approved, so it can’t be changed here. Propose a new plan to move it.' });
 
-		const result = await prisma.$transaction(async (tx) => {
-			await tx.scheduleAssignment.delete({ where: { id } });
-			return repackDraftDays(tx, params.id, [{ stationId: existing.stationId, date: existing.date }]);
-		});
+		// A finisher that can't be settled is refused with a message, nothing saved.
+		let result;
+		try {
+			result = await prisma.$transaction(async (tx) => {
+				const removed = await tx.scheduleAssignment.findUnique({ where: { id }, select: { estimatedHours: true, startMinuteOfDay: true } });
+				await tx.scheduleAssignment.delete({ where: { id } });
+				return repackDraftDays(tx, params.id, {
+					kind: 'remove',
+					oldStationId: existing.stationId,
+					oldDayMs: existing.date.getTime(),
+					removedStartMin: removed?.startMinuteOfDay ?? 0,
+					removedDurationMin: Math.max(15, Math.round((removed?.estimatedHours ?? 0) * 60))
+				});
+			});
+		} catch (err) {
+			if (err instanceof DraftPlacementError) return fail(409, { message: err.message });
+			throw err;
+		}
 		return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
 	},
 
@@ -514,6 +515,22 @@ export const actions: Actions = {
 			data: { displayTitle: nextTitle, colorHex: nextColor }
 		});
 		return { success: true as const };
+	},
+
+	// The second human approval gate, from the board (2026-10-05): approves every
+	// proposed job in this draft — the same commitDraft() the commit_schedule MCP tool
+	// uses, so moved jobs replace their old slots exactly as they do from chat.
+	approveDraft: async ({ params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		try {
+			const result = await commitDraft(params.id, user.email);
+			return { approved: true as const, approvedCount: result.assignments.length, replacedCount: result.replacedCount };
+		} catch (err) {
+			if (err instanceof CommitScheduleError) return fail(409, { message: err.message });
+			throw err;
+		}
 	},
 
 	deleteDraft: async ({ params, locals, url }) => {

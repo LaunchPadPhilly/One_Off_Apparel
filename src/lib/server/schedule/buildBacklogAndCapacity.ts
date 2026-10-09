@@ -1,7 +1,12 @@
+/**
+ * The database-reading half of every automatic engine run: it loads the backlog (which
+ * line items are ready to place) and the capacity (how many hours each station has each
+ * day, and who is staffing it). The engine itself (engine/proposeSchedule.ts) is pure and
+ * never touches the database — it only sees what this file hands it. Called by
+ * proposeAndPersistSchedule.ts, proposeIntoNewDraft.ts and simulateChange.ts.
+ */
 import { prisma } from '$lib/server/prisma';
 import {
-	BlankOrderingStatus,
-	CustomerApprovalStatus,
 	LineItemStatus,
 	LineItemType,
 	OrderStatus
@@ -12,11 +17,13 @@ import { finishingDependencyRule } from '$lib/server/engine/finishingDependencie
 import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
 import type { DateRange } from './types';
 
+/** Midnight UTC today — the cutoff for "deadline already passed". Dates are stored as UTC days. */
 function startOfToday(): Date {
 	const now = new Date();
 	return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
+/** What fetchBacklog() returns: the jobs to place, plus the state of anything they wait on. */
 export interface SchedulingBacklog {
 	backlog: BacklogItem[];
 	/** Dependencies of backlog items that aren't themselves in the backlog. */
@@ -31,15 +38,16 @@ export interface SchedulingBacklog {
  *      wait on — see proposeSchedule.ts. Being on the schedule doesn't unlock them on
  *      the floor; startAssignment.ts still refuses to Start a BLOCKED line item.)
  *   2. Order.status is CONFIRMED (import confirmation gate passed)
- *   3. Order.blankOrderingStatus is RECEIVED (garments are in hand)
- *   4. Order.customerApprovalStatus is APPROVED (customer signed off)
+ *   3–4. (Removed 2026-10-02: blanks are always assumed ordered and customer approval
+ *      assumed, so neither gates scheduling.)
  *   5. (Removed 2026-09-28: artwork approval is no longer a gate — the client always
  *      considers artwork done.)
- *   6. Order.internalDueDate is today or later (2026-09-22 decision: an order whose due
- *      date has already passed is excluded from scheduling entirely — not placed with a
- *      "past due" flag, not even offered as a candidate — until its due date is
- *      corrected. See CLAUDE.md's engine section for why this replaced an earlier
- *      "place it anyway, flagged" attempt.)
+ *   6. Order.deadline is today or later (2026-09-22 decision, retained across the
+ *      2026-09-28 one-date rewrite: an order whose deadline has already passed is
+ *      excluded from scheduling entirely — not placed with a "past due" flag, not
+ *      even offered as a candidate — until its deadline is corrected. Loose internal
+ *      deadlines are gated the same way; the tightness flag changes how at-risk reads
+ *      to a human, not whether the order enters the backlog.)
  *
  * These gates limit scheduling, not estimates — estimateHours is a pure function that
  * runs independently of approval status (e.g. at import review time).
@@ -62,12 +70,10 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			],
 			order: {
 				status: OrderStatus.CONFIRMED,
-				blankOrderingStatus: BlankOrderingStatus.RECEIVED,
-				customerApprovalStatus: CustomerApprovalStatus.APPROVED,
-				internalDueDate: { gte: startOfToday() }
+				deadline: { gte: startOfToday() }
 			}
 		},
-		include: { order: { select: { internalDueDate: true } } },
+		include: { order: { select: { deadline: true, deadlineIsTight: true } } },
 		distinct: ['id']
 	});
 
@@ -119,6 +125,7 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			decorationType: item.decorationType,
 			finishingStep: item.finishingStep,
 			inkColorCount: item.inkColorCount,
+			decorationColors: item.decorationColors,
 			screens: item.screens,
 			stitchCount: item.stitchCount,
 			quantity: item.quantity,
@@ -131,9 +138,10 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			otherJobType: item.otherJobType,
 			assignedStationId: item.assignedStationId,
 			estimatedHoursOverride: item.estimatedHoursOverride,
-			// Never null here: the `internalDueDate: { gte: … }` filter above excludes orders
-			// with no ship date yet (they can't be confirmed without one anyway).
-			dueDate: item.order.internalDueDate!,
+			// Never null here: the `deadline: { gte: … }` filter above excludes orders
+			// with no deadline yet (they can't be confirmed without one anyway).
+			dueDate: item.order.deadline!,
+			deadlineIsTight: item.order.deadlineIsTight,
 			dependsOnIds
 		};
 		return backlogItem;
@@ -142,10 +150,12 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 	return { backlog, externalDependencies };
 }
 
+/** A Date as its "YYYY-MM-DD" UTC day. */
 function iso(date: Date): string {
 	return date.toISOString().slice(0, 10);
 }
 
+/** Every day from range.from to range.to inclusive, as "YYYY-MM-DD" strings. */
 function* enumerateDays(range: DateRange): Generator<string> {
 	const cursor = new Date(`${range.from}T00:00:00Z`);
 	const end = new Date(`${range.to}T00:00:00Z`);
@@ -193,6 +203,8 @@ export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
 		availableHrs: row.availableHrs
 	}));
 
+	// Fill every (station, day) that has no real row with the default, so a real row
+	// always wins and the default only covers gaps.
 	const existingKeys = new Set(realSlots.map((slot) => `${slot.stationId}__${iso(slot.date)}`));
 	const defaultSlots: CapacitySlot[] = [];
 	for (const station of stations) {

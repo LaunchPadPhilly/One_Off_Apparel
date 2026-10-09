@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import type { McpToolDefinition } from '$lib/server/mcp/handler';
+import type { McpToolDefinition, Principal } from '$lib/server/mcp/handler';
+import { prisma } from '$lib/server/prisma';
 import { principalIdentity } from '$lib/server/mcp/handler';
 import { importHoopsExport } from '$lib/server/hoops/importHoopsExport';
 import { confirmImport } from '$lib/server/hoops/confirmImport';
@@ -7,7 +8,9 @@ import { addOrderNote } from '$lib/server/hoops/addOrderNote';
 import { orderCandidateSchema, importCorrectionsSchema } from '$lib/server/hoops/types';
 import { getSchedule } from '$lib/server/schedule/getSchedule';
 import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersistSchedule';
-import { commitSchedule } from '$lib/server/schedule/commitSchedule';
+import { commitDraft, commitSchedule, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
+import { HOOPS_EXTRACTION_RULES } from '$lib/server/hoops/extractionRules';
+import { getOrder, getOrderSchema, listOrders, listOrdersSchema } from '$lib/server/hoops/orderLookup';
 import { simulateChange, simulateChangeSchema } from '$lib/server/schedule/simulateChange';
 import {
 	getStaffing,
@@ -27,24 +30,31 @@ import {
  *  - Set `readOnly` truthfully (see McpToolDefinition in mcp/handler.ts). Read-only is
  *    the default expectation; `readOnly: false` is an approved, scoped exception for the
  *    write-tools below (import_hoops_export, confirm_import, add_order_note,
- *    commit_schedule) — each sits behind its own scope, and the first three write to
- *    data that's still human-editable/reversible afterward, never a bare irreversible
- *    write. See CLAUDE.md's Security constraints section for the decision record.
+ *    propose_schedule, commit_schedule, set_worker_availability, set_worker_station) —
+ *    each sits behind its own scope (IMPORT_WRITE or SCHEDULE_WRITE). All but
+ *    commit_schedule write data that's still human-editable/reversible afterward or is
+ *    only a draft; commit_schedule is itself the human schedule-approval gate. Never a
+ *    bare irreversible write. See CLAUDE.md's Security constraints section for the
+ *    decision record.
+ *  - The `description` strings are sent to Claude verbatim as the tool descriptions —
+ *    they are prompt text, not documentation. Change them deliberately, and connected
+ *    clients only see the change after they reconnect.
  *  - Parameterized queries only. Prisma's query builder does this; `$queryRaw` must use
  *    tagged-template parameters, never string interpolation.
  *  - Validate input with the Zod shape; the handler receives the parsed object.
  *  - Never return secrets, raw upstream payloads, or another user's private data.
  *
- * The first six are CLAUDE.md's "Domain MCP tools". import_hoops_export and
+ * These are the tools in CLAUDE.md's "Domain MCP tools" table. import_hoops_export and
  * confirm_import are the persistence half of the Hoops import feature
- * (src/lib/server/hoops/) — this repo still has no file parser (no documented Hoops
- * export format exists), so import_hoops_export takes already-structured order/line-item
- * data, not a raw file. get_schedule/propose_schedule/commit_schedule/simulate_change
+ * (src/lib/server/hoops/). import_hoops_export takes already-structured order/line-item
+ * data, not a raw file — the web upload's PDF extraction (hoops/extractOrderFromPdf.ts)
+ * is not exposed over MCP. get_schedule/propose_schedule/commit_schedule/simulate_change
  * wrap the deterministic engine (src/lib/server/engine/) plus the schedule persistence
  * layer (src/lib/server/schedule/) — Claude never computes hours or a schedule itself,
- * only calls these. add_order_note is a seventh, added later, so a note given in
- * conversation reaches Order.notes (and from there, the order's page and Reports)
- * without requiring the web form — same field, no separate write path.
+ * only calls these. add_order_note (added 2026-09-18) lets a note given in
+ * conversation reach Order.notes (and from there, the order's page and Reports)
+ * without requiring the web form — same field, no separate write path. The three
+ * staffing tools (2026-09-28) are documented at their section below.
  */
 
 // A plain `readonly McpToolDefinition[]` annotation on the array below would force every
@@ -52,20 +62,42 @@ import {
 // an effectively untyped record — defeating the point of a per-tool Zod inputSchema. This
 // identity helper lets each tool literal be checked against its own inputSchema's inferred
 // shape first, then only widens to the common McpToolDefinition afterward.
+/**
+ * Who approved, for commit_schedule (2026-10-05). A person signed in through Claude
+ * (OAuth) is recorded as their own account, whatever name the call passes — so the
+ * schedule-approval gate's audit trail can't be pointed at someone else. A shared token
+ * (agent or legacy) has no person behind it, so the given name is kept but marked with
+ * the token it came through.
+ */
+async function approverFor(principal: Principal, givenName: string | undefined): Promise<string> {
+	if (principal.kind === 'oauth') {
+		const user = await prisma.user.findUnique({ where: { id: principal.userId }, select: { email: true } });
+		return user?.email ?? principal.userId;
+	}
+	if (!givenName) throw new CommitScheduleError('Say who approved this plan (approvedBy).');
+	return `${givenName} (via ${principalIdentity(principal)})`;
+}
+
 function defineTool<Shape extends z.ZodRawShape>(tool: McpToolDefinition<Shape>): McpToolDefinition {
 	return tool as unknown as McpToolDefinition;
 }
 
+/** Every tool this MCP server registers. Each tool's `principal` argument (when used)
+ *  only feeds principalIdentity() for attribution — the scope check already happened in
+ *  handler.ts before the handler runs. */
 export const mcpTools: readonly McpToolDefinition[] = [
 	defineTool({
 		name: 'import_hoops_export',
 		description:
-			'Persists already-extracted Hoops order/line-item data as needs_review orders and line items ' +
-			'(finishing rows start blocked). Does not parse a file — there is no documented Hoops export format ' +
-			"in this repo, so extraction (reading the export) happens in conversation; this tool's input is the " +
-			'already-structured result of that. Nothing here is schedulable until confirm_import locks it in. ' +
-			"Example question: 'import these three orders I just read from the export' → { orders: [...] }. " +
-			'Returns { orderIds, lineItems, confidenceFlags }.',
+			'Saves orders read from Hoops "Job" PDFs as needs_review orders. When someone drops a PDF into the chat, ' +
+			'read it yourself and send what you read here, one entry per PDF; this tool does not take the file. ' +
+			"Nothing here is schedulable until a person confirms it (confirm_import). Afterwards, call get_order to " +
+			"see the order's open questions, ask the person, and confirm. If it's a rush, then call " +
+			'propose_schedule with replanFrom/replanTo so not-started jobs can move to make room. ' +
+			"Example: 'here's a rush order' + PDF → { orders: [{ hoopsOrderId: '100157', ... }] }. " +
+			'Returns { orderIds, lineItems, confidenceFlags }.' +
+			'\n\nHow to read a Hoops Job PDF:\n' +
+			HOOPS_EXTRACTION_RULES,
 		inputSchema: {
 			orders: z.array(orderCandidateSchema).min(1)
 		},
@@ -127,33 +159,60 @@ export const mcpTools: readonly McpToolDefinition[] = [
 	defineTool({
 		name: 'propose_schedule',
 		description:
-			'Builds a suggested schedule for the confirmed, needs_review backlog against open capacity in a date ' +
-			'range, using the deterministic engine (due date is the hard floor, similar-setup jobs batch together, ' +
-			"jobs that can't hit their due date are flagged at_risk, never silently dropped). Persists the result " +
-			'as draft (status: proposed) assignments, not the live schedule — nothing is real until commit_schedule ' +
-			"approves it. Example question: 'propose next week's schedule' → { from: '2026-09-15', to: '2026-09-19' }. " +
-			'Returns { assignments, atRisk, reasoning }.',
+			'Builds a suggested schedule with the deterministic engine and saves it as a draft on the board ' +
+			'(Schedule page) — it does not change the live schedule. Started work never moves, and by default nothing ' +
+			'already approved moves either: only new work is placed around it. Pass replanFrom/replanTo to let ' +
+			'approved, not-started jobs dated in that window move: for a rush order use the whole from–to window; ' +
+			'when someone is out use just the days they are out (their jobs move to the next open slots, by due ' +
+			'date). Due date is the hard floor; jobs that cannot make it are flagged at risk, never dropped. Show the ' +
+			'person `changes` (new / moved / kept_at_risk) and `atRisk`, and link `draftPath`; nothing is real until ' +
+			"they approve it (commit_schedule with the draftId, or Approve on the board). At most 28 days. Example: " +
+			"'Maria is out Tuesday, fix the schedule' → { from: '2026-10-06', to: '2026-11-02', replanFrom: " +
+			"'2026-10-06', replanTo: '2026-10-06', reason: 'Maria out Tue' }. Returns { draftId, draftPath, " +
+			'assignmentIds, placedCount, atRisk, changes, reasoning }.',
 		inputSchema: {
 			from: z.iso.date(),
-			to: z.iso.date()
+			to: z.iso.date(),
+			// Approved, not-started jobs dated in this window may move. Omit both to move nothing.
+			replanFrom: z.iso.date().optional(),
+			replanTo: z.iso.date().optional(),
+			// A few words on why, used as the draft's name on the board (e.g. "Rush 100157").
+			reason: z.string().max(80).optional()
 		},
 		requiredScope: 'SCHEDULE_WRITE',
 		readOnly: false,
-		handler: async ({ from, to }, principal) => proposeAndPersistSchedule({ from, to }, principalIdentity(principal))
+		handler: async ({ from, to, replanFrom, replanTo, reason }, principal) => {
+			if ((replanFrom === undefined) !== (replanTo === undefined)) {
+				throw new CommitScheduleError('Give both replanFrom and replanTo, or neither.');
+			}
+			const release = replanFrom && replanTo ? { from: replanFrom, to: replanTo } : null;
+			return proposeAndPersistSchedule({ from, to }, principalIdentity(principal), release, reason);
+		}
 	}),
 	defineTool({
 		name: 'commit_schedule',
 		description:
-			'Makes a proposed schedule official — the second human approval gate. Flips the given proposed ' +
-			"assignments to approved. Example question: 'approve those' → { assignmentIds: [...], approvedBy: 'jeff' }. " +
-			'Returns { assignments }.',
+			'Makes a proposed schedule official — the second human approval gate. Only call it after the person has ' +
+			'clearly said to approve. Pass the draftId from propose_schedule to approve the whole plan, or ' +
+			'assignmentIds to approve some of it. Each approved job replaces its old not-started slot, so a moved ' +
+			"job is never on the schedule twice. Refused if a job in the plan has started since. Example: 'approve " +
+			"it' → { draftId: '...' }. The approver is recorded as the signed-in person. Returns { assignments, replacedCount }.",
 		inputSchema: {
-			assignmentIds: z.array(z.string()).min(1),
-			approvedBy: z.string().min(1)
+			draftId: z.string().min(1).optional(),
+			assignmentIds: z.array(z.string()).min(1).optional(),
+			// Who approved. Ignored for people signed in through Claude (their own account
+			// is recorded); required when calling with a shared token.
+			approvedBy: z.string().min(1).optional()
 		},
 		requiredScope: 'SCHEDULE_WRITE',
 		readOnly: false,
-		handler: async ({ assignmentIds, approvedBy }) => ({ assignments: await commitSchedule(assignmentIds, approvedBy) })
+		handler: async ({ draftId, assignmentIds, approvedBy }, principal) => {
+			if ((draftId === undefined) === (assignmentIds === undefined)) {
+				throw new CommitScheduleError('Give either a draftId or assignmentIds (not both).');
+			}
+			const approver = await approverFor(principal, approvedBy);
+			return draftId ? commitDraft(draftId, approver) : commitSchedule(assignmentIds ?? [], approver);
+		}
 	}),
 	defineTool({
 		name: 'simulate_change',
@@ -168,6 +227,34 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		requiredScope: 'SCHEDULE_READ',
 		readOnly: true,
 		handler: async ({ change }) => simulateChange(change)
+	}),
+	// ─── Order lookups (2026-10-05) ────────────────────────────────────────────
+	// Read-only, so Claude can walk someone through an order in chat: what's open,
+	// what's missing, what's scheduled (hoops/orderLookup.ts).
+	defineTool({
+		name: 'list_orders',
+		description:
+			'Lists orders with what each still needs: status, deadline, number of jobs, estimated hours, how many open ' +
+			'items block confirming it, and needsReReview (confirmed but no longer valid). By default only orders still ' +
+			"in play; filter by status or search by job number / customer. Example: 'what still needs review?' → " +
+			"{ status: 'needs_review' }. Returns { orders }.",
+		inputSchema: listOrdersSchema.shape,
+		requiredScope: 'ORDERS_READ',
+		readOnly: true,
+		handler: async (input) => listOrders(listOrdersSchema.parse(input))
+	}),
+	defineTool({
+		name: 'get_order',
+		description:
+			'One order in full, by Hoops job number: its jobs (lineItemId, type, quantity, hour estimate or what the ' +
+			'estimate is missing), the openQuestions a person must answer before it can be confirmed (each names the ' +
+			'field it answers, for confirm_import corrections), import notes, and where its jobs are scheduled. ' +
+			"Ask the person the open questions in plain words; don't guess answers. Example: 'what's missing on " +
+			"100157?' → { hoopsOrderId: '100157' }.",
+		inputSchema: getOrderSchema.shape,
+		requiredScope: 'ORDERS_READ',
+		readOnly: true,
+		handler: async (input) => getOrder(input)
 	}),
 	// ─── Daily staffing (2026-09-28) ───────────────────────────────────────────
 	// The deterministic engine picks each day's crew (engine/planStaffing.ts). These let
@@ -190,7 +277,8 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		description:
 			'Marks a person out (available: false) or back in (available: true) for one or more days, by name. ' +
 			'The next proposed schedule will not staff them on those days. Returns the approved jobs they were on ' +
-			'those days — tell the user, and offer to propose an updated schedule for them to approve. Only the ' +
+			'those days — tell the user, and offer to fix the schedule: propose_schedule with replanFrom/replanTo set ' +
+			'to exactly the days they are out, so only the jobs on those days move. Only the ' +
 			"given days are affected. Example: 'Maria is out today' → { workerName: 'Maria', from: '<today>', to: " +
 			"'<today>', available: false, reason: 'sick' }.",
 		inputSchema: setWorkerAvailabilitySchema.shape,

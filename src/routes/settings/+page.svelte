@@ -3,6 +3,7 @@
 	import { replaceState } from '$app/navigation';
 	import StationsScreen from '$lib/components/settings/StationsScreen.svelte';
 	import PeopleScreen from '$lib/components/settings/PeopleScreen.svelte';
+	import FormulasScreen from '$lib/components/settings/FormulasScreen.svelte';
 	import { fly, fade } from 'svelte/transition';
 	import TabBar from '$lib/components/ui/TabBar.svelte';
 	import { pressable } from '$lib/actions/pressable.svelte';
@@ -18,13 +19,16 @@
 	const SCREENS = [
 		{ key: 'general', label: 'General' },
 		{ key: 'stations', label: 'Stations' },
-		{ key: 'people', label: 'People' }
+		{ key: 'people', label: 'People' },
+		{ key: 'formulas', label: 'Formulas' }
 	] as const;
 	type Screen = (typeof SCREENS)[number]['key'];
 
 	function initialScreen(): Screen {
 		const requested = page.url.searchParams.get('screen');
-		return data.shopConfig && (requested === 'stations' || requested === 'people') ? requested : 'general';
+		if (data.shopConfig && (requested === 'stations' || requested === 'people')) return requested;
+		if (data.formulaConfig && requested === 'formulas') return 'formulas';
+		return 'general';
 	}
 	let activeScreen = $state<Screen>(initialScreen());
 
@@ -129,11 +133,11 @@
 	<span class="eyebrow">Settings</span>
 	<h1>Settings</h1>
 	<p class="muted">
-		Your account details, access, and display preferences{#if data.shopConfig}, plus the shop's stations and
-			people{/if}.
+		Your account details, access, and display preferences{#if data.shopConfig}, plus the shop's stations,
+			people, and formulas{/if}.
 	</p>
 
-	{#if data.shopConfig}
+	{#if data.shopConfig || data.formulaConfig}
 		<TabBar screens={SCREENS} active={activeScreen} onchange={setScreen} />
 	{/if}
 
@@ -153,6 +157,14 @@
 			kindOptions={data.shopConfig.stationKindOptions}
 			notice={form?.screen === 'people' && 'notice' in form ? (form.notice ?? null) : null}
 			message={form?.screen === 'people' && 'message' in form ? (form.message ?? null) : null}
+		/>
+	{:else if activeScreen === 'formulas' && data.formulaConfig}
+		<FormulasScreen
+			formulas={data.formulaConfig.current}
+			defaults={data.formulaConfig.defaults}
+			stationsByKind={data.formulaConfig.stationsByKind}
+			notice={form?.screen === 'formulas' && 'notice' in form ? (form.notice ?? null) : null}
+			message={form?.screen === 'formulas' && 'message' in form ? (form.message ?? null) : null}
 		/>
 	{:else}
 	<section class="card">

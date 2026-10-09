@@ -1,3 +1,9 @@
+/**
+ * Edit / remove a single PROPOSED schedule assignment (the Schedule page's "Edit" and
+ * "Remove" buttons). Key rule: APPROVED-or-later rows can't be changed here. Note: as of
+ * 2026-10-05 nothing imports this module (the drafts workspace has its own actions in
+ * routes/schedule/drafts/[id]/+page.server.ts) — check for a caller before relying on it.
+ */
 import { prisma } from '$lib/server/prisma';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 
@@ -6,6 +12,10 @@ import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/en
  * approval. Only ever touches PROPOSED rows: once commit_schedule approves an
  * assignment it's the live schedule, and this system's non-negotiable design
  * principles say only a human approval step (not a silent edit) changes that.
+ *
+ * @param patch - the new stationId and/or date ("YYYY-MM-DD"); omitted fields stay as they are
+ * @returns the updated row
+ * @throws Error if the assignment doesn't exist or isn't PROPOSED
  */
 export async function reassignProposedAssignment(
 	assignmentId: string,
@@ -39,6 +49,8 @@ export async function reassignProposedAssignment(
  * The Schedule page's "remove" action. Only PROPOSED rows can be removed — deleting one
  * returns its line item to the backlog (LineItem.status is untouched by this, so the
  * next propose_schedule run picks it back up); it never deletes the LineItem itself.
+ *
+ * @throws Error if the assignment doesn't exist or isn't PROPOSED
  */
 export async function removeProposedAssignment(assignmentId: string, actor: string) {
 	return prisma.$transaction(async (tx) => {

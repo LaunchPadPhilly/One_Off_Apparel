@@ -4,8 +4,15 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { createMcpHandler } from '$lib/server/mcp/handler';
 import { mcpTools } from '$lib/server/mcp/tools';
 import { mcpServerName } from '$lib/appConfig';
+import { maybeRefreshFormulas, reloadFormulas } from '$lib/server/engine/formulaSettings';
 
 const mcp = createMcpHandler(mcpTools);
+
+// The estimate formulas admins edit at Settings → Formulas live in the database. The web
+// app loads them in hooks.server.ts; this process has to do the same, or every estimate
+// Claude sees would use the built-in default rates. Never throws (keeps the defaults if
+// the database isn't reachable yet); each request below refreshes them once stale.
+void reloadFormulas();
 
 const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? '0.0.0.0';
@@ -65,6 +72,7 @@ const server = createServer((req, res) => {
 				return;
 			}
 
+			maybeRefreshFormulas();
 			const webRequest = await toWebRequest(req);
 			const webResponse =
 				req.method === 'GET' ? await mcp.handleGet(webRequest) : await mcp.handlePost(webRequest);
