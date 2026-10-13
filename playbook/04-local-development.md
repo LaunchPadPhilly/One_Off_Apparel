@@ -37,7 +37,7 @@ Edit `.env.local` and set, using these exact local values where shown:
 | `INITIAL_ADMIN_EMAIL` | your Workspace email, exact case, in an allowed domain |
 | `MCP_PUBLIC_URL` | `http://localhost:3001/api/mcp` |
 | `MCP_OAUTH_ISSUER_URL` | `http://localhost:5173` |
-| `MCP_OAUTH_SCOPES` | `data:read reports:read` |
+| `MCP_OAUTH_SCOPES` | `data:read reports:read schedule:read schedule:write import:write orders:read` (every scope; leaving it out lists all of them too) |
 | `PORT` / `HOST` | `3001` / `0.0.0.0` (required by `pnpm run test` even though code has defaults) |
 
 Leave `MCP_SERVER_TOKEN`, `RESEND_API_KEY`, `EMAIL_FROM` commented out.

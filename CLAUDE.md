@@ -92,13 +92,15 @@ exposed to end users through the MCP server this repo builds. Don't conflate the
 
 Both are AWS ECS Fargate, both defined in Terraform. Each is deployed from its own
 branch (`uat` → UAT, `main` → production), building its own images — see CI/CD Pipeline.
-**No AWS infrastructure exists yet** (2026-10-05): only `infra/environments/example` is in
-the repo; `infra/environments/uat` and `production` are still to be written and applied
-(Plays 05–10), and both deploy workflows fail until they are.
+**UAT is live** (2026-10-09) at `https://ooa-uat.launchpadinc.org`: Plays 05–11 done,
+services running on the build from PR #38 (activation pinned in PR #39), Claude chat
+connected through the MCP connector. **Production is not provisioned yet** (Play 12):
+there is no `infra/environments/production`, and `deploy.yml`'s push trigger is commented
+out until there is.
 
 | | Production | UAT |
 |---|---|---|
-| URL | `https://ooa.launchpadphilly.org` | `https://uat.ooa.launchpadphilly.org` |
+| URL | not provisioned (the workflow derives `<PROJECT_SLUG>.<PRIMARY_DOMAIN>` unless `PROD_DOMAIN` is set) | `https://ooa-uat.launchpadinc.org` |
 | Cluster | `ooa-cluster` | `ooa-uat-cluster` |
 | Services | `ooa-web`, `ooa-mcp` | `ooa-uat-web`, `ooa-uat-mcp` |
 | Secret | `prod/ooa/app` | `uat/ooa/app` |
@@ -1044,8 +1046,10 @@ and one per environment copied from `environments/example`.
 
 Branch-per-environment (the workflows' own headers are authoritative):
 `deploy-uat.yml` runs on every push to `uat` (or by hand): `build → deploy-uat →
-smoke-test-uat`. `deploy.yml` runs on every push to `main`: `build → deploy-production`
-(+ smoke test). Each builds fresh web and MCP images from its own branch tip; there is no
+smoke-test-uat`. `deploy.yml` (`build → deploy-production` + smoke test) is meant to run on
+every push to `main`, but its push trigger is **commented out** until production exists —
+it can only be run by hand for now. UAT's URL is `<PROJECT_SLUG>-uat.<PRIMARY_DOMAIN>`
+unless the `UAT_DOMAIN` Variable overrides it. Each builds fresh web and MCP images from its own branch tip; there is no
 promote-by-SHA step any more — the required PR review on `uat` and `main` is the
 deliberate-promotion gate. Flow: feature branch → PR into `dev` → PR `dev` → `uat` (UAT
 testing) → PR into `main` (production). Both need repository Variables (`AWS_REGION`,
