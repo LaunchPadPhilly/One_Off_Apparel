@@ -52,7 +52,10 @@ env:
   UAT_CLUSTER: ${{ vars.ECS_CLUSTER_UAT }}
   UAT_WEB_SERVICE: ${{ vars.ECS_SERVICE_WEB_UAT }}
   UAT_MCP_SERVICE: ${{ vars.ECS_SERVICE_MCP_UAT }}
-  UAT_URL: https://uat.${{ vars.PRIMARY_DOMAIN }}
+  # UAT lives on ${PROJECT_SLUG}-uat.${PRIMARY_DOMAIN} to match the production
+  # pattern of ${PROJECT_SLUG}.${PRIMARY_DOMAIN}. If a project needs a different
+  # UAT hostname, override by setting the UAT_DOMAIN repository Variable.
+  UAT_URL: https://${{ vars.UAT_DOMAIN || format('{0}-uat.{1}', vars.PROJECT_SLUG, vars.PRIMARY_DOMAIN) }}
 
 jobs:
   # ---------------------------------------------------------------- 1. build

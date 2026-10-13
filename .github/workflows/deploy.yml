@@ -35,8 +35,11 @@ name: Deploy
 # environment the job declares.
 
 on:
-  push:
-    branches: [main]
+  # Production AWS infrastructure is not yet provisioned. Keep this workflow
+  # dormant until it is, so main merges don't fire a guaranteed-failure deploy.
+  # Re-enable by uncommenting the push trigger once Production is live.
+  # push:
+  #   branches: [main]
   workflow_dispatch: {}
 
 concurrency:
@@ -59,7 +62,9 @@ env:
   PROD_CLUSTER: ${{ vars.ECS_CLUSTER }}
   PROD_WEB_SERVICE: ${{ vars.ECS_SERVICE_WEB }}
   PROD_MCP_SERVICE: ${{ vars.ECS_SERVICE_MCP }}
-  PROD_URL: https://${{ vars.PRIMARY_DOMAIN }}
+  # Prod lives on ${PROJECT_SLUG}.${PRIMARY_DOMAIN}. If a project needs a
+  # different production hostname, override by setting PROD_DOMAIN.
+  PROD_URL: https://${{ vars.PROD_DOMAIN || format('{0}.{1}', vars.PROJECT_SLUG, vars.PRIMARY_DOMAIN) }}
 
 jobs:
   # ---------------------------------------------------------------- 1. build
