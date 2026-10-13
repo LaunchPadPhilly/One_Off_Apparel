@@ -9,6 +9,7 @@ import { orderCandidateSchema, importCorrectionsSchema } from '$lib/server/hoops
 import { getSchedule } from '$lib/server/schedule/getSchedule';
 import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersistSchedule';
 import { commitDraft, commitSchedule, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
+import { unapproveDraft, unapproveSchedule, UnapproveScheduleError } from '$lib/server/schedule/unapproveSchedule';
 import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
 import { HOOPS_EXTRACTION_RULES } from '$lib/server/hoops/extractionRules';
 import { getOrder, getOrderSchema, listOrders, listOrdersSchema } from '$lib/server/hoops/orderLookup';
@@ -31,7 +32,8 @@ import {
  *  - Set `readOnly` truthfully (see McpToolDefinition in mcp/handler.ts). Read-only is
  *    the default expectation; `readOnly: false` is an approved, scoped exception for the
  *    write-tools below (import_hoops_export, confirm_import, add_order_note,
- *    propose_schedule, move_assignment, commit_schedule, set_worker_availability, set_worker_station) —
+ *    propose_schedule, move_assignment, commit_schedule, unapprove_schedule,
+ *    set_worker_availability, set_worker_station) —
  *    each sits behind its own scope (IMPORT_WRITE or SCHEDULE_WRITE). All but
  *    commit_schedule write data that's still human-editable/reversible afterward or is
  *    only a draft; commit_schedule is itself the human schedule-approval gate. Never a
@@ -213,6 +215,34 @@ export const mcpTools: readonly McpToolDefinition[] = [
 			}
 			const approver = await approverFor(principal, approvedBy);
 			return draftId ? commitDraft(draftId, approver) : commitSchedule(assignmentIds ?? [], approver);
+		}
+	}),
+	defineTool({
+		name: 'unapprove_schedule',
+		description:
+			"Reverses commit_schedule — flips APPROVED jobs back to PROPOSED so they can be moved with " +
+			"move_assignment or re-approved after edits. The recovery path when a plan was approved too early " +
+			"and someone wants to adjust it without re-running propose_schedule. Only approved, not-started jobs " +
+			"can be unapproved; a job that has already started (IN_PROGRESS) or finished (COMPLETE) is refused — " +
+			"those have already happened on the floor and must not be rewound. Pass draftId to unapprove every " +
+			"approved, not-started job in one draft (its status rolls back from APPROVED to DRAFT so the board " +
+			"treats it as editable again), or assignmentIds to unapprove a specific set. Known limit: commit " +
+			"deletes a job's prior approved slot when it supersedes it, and those deleted slots are not restored " +
+			"here — the unapproved rows return as PROPOSED on their own; re-propose if the prior slot mattered. " +
+			"Example: 'actually, unapprove that whole plan I just approved' → { draftId: '...' }. Returns " +
+			"{ assignments, draftsReopened, skipped? }.",
+		inputSchema: {
+			draftId: z.string().min(1).optional(),
+			assignmentIds: z.array(z.string()).min(1).optional()
+		},
+		requiredScope: 'SCHEDULE_WRITE',
+		readOnly: false,
+		handler: async ({ draftId, assignmentIds }, principal) => {
+			if ((draftId === undefined) === (assignmentIds === undefined)) {
+				throw new UnapproveScheduleError('Give either a draftId or assignmentIds (not both).');
+			}
+			const actor = principalIdentity(principal);
+			return draftId ? unapproveDraft(draftId, actor) : unapproveSchedule(assignmentIds ?? [], actor);
 		}
 	}),
 	defineTool({
