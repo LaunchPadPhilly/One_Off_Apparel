@@ -15,6 +15,7 @@ import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, 
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
+import { fetchOrderGaps } from '$lib/server/hoops/orderReadiness';
 import type { DateRange } from './types';
 
 /** Midnight UTC today — the cutoff for "deadline already passed". Dates are stored as UTC days. */
@@ -48,6 +49,8 @@ export interface SchedulingBacklog {
  *      even offered as a candidate — until its deadline is corrected. Loose internal
  *      deadlines are gated the same way; the tightness flag changes how at-risk reads
  *      to a human, not whether the order enters the backlog.)
+ *   7. (2026-10-13) The order has no open items (orderGaps.ts) — a confirmed order
+ *      that "Needs re-review" is left out whole until someone fixes it.
  *
  * These gates limit scheduling, not estimates — estimateHours is a pure function that
  * runs independently of approval status (e.g. at import review time).
@@ -59,7 +62,7 @@ export interface SchedulingBacklog {
  * not schedulable, so its dependents get flagged at risk rather than placed early).
  */
 export async function fetchBacklog(): Promise<SchedulingBacklog> {
-	const lineItems = await prisma.lineItem.findMany({
+	const candidateItems = await prisma.lineItem.findMany({
 		where: {
 			OR: [
 				{ itemType: LineItemType.DECORATION, status: LineItemStatus.NEEDS_REVIEW },
@@ -76,6 +79,12 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 		include: { order: { select: { deadline: true, deadlineIsTight: true } } },
 		distinct: ['id']
 	});
+
+	// An order with open items ("Needs re-review" — e.g. a job missing its stitch count)
+	// is left out entirely (2026-10-13): none of its jobs are planned until someone fixes
+	// it on the Orders page, so no plan ever holds half of a broken order.
+	const gapsByOrder = await fetchOrderGaps([...new Set(candidateItems.map((item) => item.orderId))]);
+	const lineItems = candidateItems.filter((item) => (gapsByOrder.get(item.orderId)?.blockingCount ?? 0) === 0);
 
 	// Every line item on the orders involved, for resolving "all_siblings" and for the
 	// state of dependencies that didn't make it into the backlog.

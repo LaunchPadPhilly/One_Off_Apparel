@@ -200,6 +200,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				{ deadline: order.deadline, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
 				order.lineItems
 			).blockingCount,
+			// Left off the last automatic plan for lack of room (2026-10-13) — kept off the
+			// board until a plan fits it; the red flag and reason show on the Orders pages.
+			scheduleFlagged: order.scheduleFlagReason !== null,
 			lineItems: order.lineItems.map((item) => ({
 				id: item.id,
 				design: item.design,

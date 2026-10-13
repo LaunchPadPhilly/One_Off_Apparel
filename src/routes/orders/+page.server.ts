@@ -70,7 +70,9 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			status: order.status,
 			lineItemCount: order.lineItems.length,
 			estimate: summarizeOrderEstimate(order.lineItems),
-			blockingCount: gapsByOrder.get(order.id)?.blockingCount ?? 0
+			blockingCount: gapsByOrder.get(order.id)?.blockingCount ?? 0,
+			// Why the last automatic plan left this order off (2026-10-13); null = it fit.
+			scheduleFlagReason: order.scheduleFlagReason
 		}))
 	};
 };

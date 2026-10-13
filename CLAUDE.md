@@ -712,6 +712,21 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   plan couldn't fit keeps its old slot and is reported as `kept_at_risk`. Simplification
   still standing: staffing (`planStaffing`) spreads the remaining backlog's workload,
   not the committed work's.
+  **Only schedulable orders reach a schedule (client, 2026-10-13 — least work for the
+  user).** (1) `fetchBacklog()` leaves out every job of an order that "Needs re-review"
+  (open items in `computeOrderGaps`). (2) Every automatic plan (`proposeIntoDraft` — the
+  board button and `propose_schedule`) is **all-or-nothing per order**
+  (`planWholeOrders`): if any job of an order can't be placed, the least urgent partly
+  placed order is dropped and the engine re-runs, so no plan holds half an order and
+  the freed time goes to the rest. (3) A dropped order gets `Order.scheduleFlagReason` /
+  `scheduleFlaggedAt` (migration `order_schedule_flag`) in plain words ("Not enough open
+  Screen print time before Oct 13…"), shown as a red **"Couldn't be scheduled"** flag on
+  the Orders list and order page (and `couldNotSchedule` in `list_orders`/`get_order`);
+  the next plan that fits the order clears it. "Needs re-review" is red too. (4) The
+  draft board's sidebar hides all three kinds (re-review, nothing estimable, flagged) —
+  the Orders page is the one place to deal with them; `placeAssignment` refuses
+  re-review and unestimable jobs server-side. This also answers the Reports open item
+  in part: the at-risk outcome of the latest plan is now persisted per order.
 
   - **Editable formulas — done (2026-09-28).** `/settings?screen=formulas` (admin
     only) exposes every per-station rate and factor as a plain number input —

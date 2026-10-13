@@ -539,12 +539,13 @@
 		filteredOrders.filter(isSchedulable).sort((a, b) => Number(isFullyPlaced(a)) - Number(isFullyPlaced(b)))
 	);
 
-	// Orders that can't be scheduled yet (2026-10-13) stay out of the sidebar: one with
-	// open items ("Needs re-review"), or one with no job the engine can estimate. They're
-	// listed with links above the sidebar instead, so they aren't forgotten. The server
-	// refuses placing them too (placeAssignment). `data.orders` itself is left whole —
-	// the board still labels any of their jobs already placed.
-	let blockedOrders = $derived(data.orders.filter((order) => !isSchedulable(order)));
+	// Orders that can't be scheduled (2026-10-13) stay off the board entirely: one with
+	// open items ("Needs re-review"), one with no job the engine can estimate, or one the
+	// last automatic plan couldn't fit. They get a red flag on the Orders pages instead —
+	// that's the one place to deal with them. The server refuses placing the first two
+	// (placeAssignment). `data.orders` itself is left whole, so any of their jobs already
+	// on the board keep their labels.
+	let blockedCount = $derived(data.orders.filter((order) => !isSchedulable(order)).length);
 
 	/** The jobs the sidebar offers: ones with an estimate, plus any already on the board. */
 	function schedulableItems(order: (typeof data.orders)[number]) {
@@ -552,7 +553,7 @@
 	}
 
 	function isSchedulable(order: (typeof data.orders)[number]): boolean {
-		return order.blockingCount === 0 && schedulableItems(order).length > 0;
+		return order.blockingCount === 0 && !order.scheduleFlagged && schedulableItems(order).length > 0;
 	}
 
 	function isFullyPlaced(order: (typeof data.orders)[number]): boolean {
@@ -1072,7 +1073,7 @@
 			<div class="tray__head">
 				<h2>Orders</h2>
 				<div class="tray__head-actions">
-					<span class="muted">{trayOrders.length} of {data.orders.length - blockedOrders.length}</span>
+					<span class="muted">{trayOrders.length} of {data.orders.length - blockedCount}</span>
 					{#if data.orders.length > 1}
 						<button
 							type="button"
@@ -1091,13 +1092,6 @@
 				placeholder="Search customer, job, design…"
 				aria-label="Filter orders"
 			/>
-			{#if blockedOrders.length > 0}
-				<p class="tray__blocked">
-					{blockedOrders.length} order{blockedOrders.length === 1 ? " can't" : "s can't"} be scheduled yet —
-					{#each blockedOrders as blocked, index (blocked.id)}<a href="/orders/{blocked.id}" title={blocked.blockingCount > 0 ? `${blocked.blockingCount} open item${blocked.blockingCount === 1 ? '' : 's'}` : 'No job can be estimated yet'}>#{blocked.hoopsOrderId}</a>{index < blockedOrders.length - 1 ? ', ' : ''}{/each}.
-					Fix {blockedOrders.length === 1 ? 'it' : 'them'} on the order page.
-				</p>
-			{/if}
 			<div class="tray__list" role="list">
 				{#each trayOrders as order (order.id)}
 					{@const color = orderColor(order.id)}
@@ -1716,13 +1710,6 @@
 
 	.tray__bulk:hover {
 		color: var(--brand-500);
-	}
-
-	.tray__blocked {
-		margin: 0 0 var(--space-2);
-		font-size: 0.8rem;
-		line-height: 1.4;
-		opacity: 0.8;
 	}
 
 	.tray__search {
