@@ -6,6 +6,7 @@ import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$l
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
+import { fetchOrderGaps } from '$lib/server/hoops/orderReadiness';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 import {
@@ -296,6 +297,7 @@ export const actions: Actions = {
 		const lineItem = await prisma.lineItem.findUnique({
 			where: { id: lineItemId },
 			select: {
+				orderId: true,
 				itemType: true,
 				assignedStationId: true,
 				decorationType: true,
@@ -312,6 +314,17 @@ export const actions: Actions = {
 		}
 		if (lineItem.order.deadline.getTime() < startOfToday().getTime()) {
 			return fail(400, { message: "This order's deadline has already passed — it can't be scheduled until the deadline is corrected." });
+		}
+		// Same rule the sidebar applies (2026-10-13): an order with open items ("Needs
+		// re-review") or a job the engine can't estimate isn't schedulable yet.
+		const gaps = (await fetchOrderGaps([lineItem.orderId])).get(lineItem.orderId);
+		if (gaps && gaps.blockingCount > 0) {
+			return fail(400, { message: 'This order needs re-review — fix its open items on the order page before scheduling it.' });
+		}
+		const fullItem = await prisma.lineItem.findUniqueOrThrow({ where: { id: lineItemId } });
+		const itemEstimate = estimateForDisplay(fullItem);
+		if (!itemEstimate.ok) {
+			return fail(400, { message: `This job can't be scheduled yet: ${itemEstimate.reason}` });
 		}
 
 		const station = await findActiveStation(stationName);

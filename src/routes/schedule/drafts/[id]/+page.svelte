@@ -536,11 +536,27 @@
 	// group the original order is kept (Array.prototype.sort is stable). Updates live as
 	// jobs are dropped on or removed from the board.
 	let trayOrders = $derived(
-		[...filteredOrders].sort((a, b) => Number(isFullyPlaced(a)) - Number(isFullyPlaced(b)))
+		filteredOrders.filter(isSchedulable).sort((a, b) => Number(isFullyPlaced(a)) - Number(isFullyPlaced(b)))
 	);
 
+	// Orders that can't be scheduled yet (2026-10-13) stay out of the sidebar: one with
+	// open items ("Needs re-review"), or one with no job the engine can estimate. They're
+	// listed with links above the sidebar instead, so they aren't forgotten. The server
+	// refuses placing them too (placeAssignment). `data.orders` itself is left whole —
+	// the board still labels any of their jobs already placed.
+	let blockedOrders = $derived(data.orders.filter((order) => !isSchedulable(order)));
+
+	/** The jobs the sidebar offers: ones with an estimate, plus any already on the board. */
+	function schedulableItems(order: (typeof data.orders)[number]) {
+		return order.lineItems.filter((item) => item.estimate.ok || placedLineItemIds.has(item.id));
+	}
+
+	function isSchedulable(order: (typeof data.orders)[number]): boolean {
+		return order.blockingCount === 0 && schedulableItems(order).length > 0;
+	}
+
 	function isFullyPlaced(order: (typeof data.orders)[number]): boolean {
-		return order.lineItems.every((item) => placedLineItemIds.has(item.id));
+		return schedulableItems(order).every((item) => placedLineItemIds.has(item.id));
 	}
 
 	function placementsForDay(date: string, stationName: string): Placement[] {
@@ -1056,7 +1072,7 @@
 			<div class="tray__head">
 				<h2>Orders</h2>
 				<div class="tray__head-actions">
-					<span class="muted">{filteredOrders.length} of {data.orders.length}</span>
+					<span class="muted">{trayOrders.length} of {data.orders.length - blockedOrders.length}</span>
 					{#if data.orders.length > 1}
 						<button
 							type="button"
@@ -1075,6 +1091,13 @@
 				placeholder="Search customer, job, design…"
 				aria-label="Filter orders"
 			/>
+			{#if blockedOrders.length > 0}
+				<p class="tray__blocked">
+					{blockedOrders.length} order{blockedOrders.length === 1 ? " can't" : "s can't"} be scheduled yet —
+					{#each blockedOrders as blocked, index (blocked.id)}<a href="/orders/{blocked.id}" title={blocked.blockingCount > 0 ? `${blocked.blockingCount} open item${blocked.blockingCount === 1 ? '' : 's'}` : 'No job can be estimated yet'}>#{blocked.hoopsOrderId}</a>{index < blockedOrders.length - 1 ? ', ' : ''}{/each}.
+					Fix {blockedOrders.length === 1 ? 'it' : 'them'} on the order page.
+				</p>
+			{/if}
 			<div class="tray__list" role="list">
 				{#each trayOrders as order (order.id)}
 					{@const color = orderColor(order.id)}
@@ -1172,7 +1195,7 @@
 							</div>
 							{#if !collapsed}
 							<ul class="line-items" id="order-items-{order.id}">
-								{#each order.lineItems as item (item.id)}
+								{#each schedulableItems(order) as item (item.id)}
 									{@const hours = estimateHours(item.estimate)}
 									{@const err = estimateError(item.estimate)}
 									{@const stationName = estimateStation(item.estimate)}
@@ -1693,6 +1716,13 @@
 
 	.tray__bulk:hover {
 		color: var(--brand-500);
+	}
+
+	.tray__blocked {
+		margin: 0 0 var(--space-2);
+		font-size: 0.8rem;
+		line-height: 1.4;
+		opacity: 0.8;
 	}
 
 	.tray__search {
