@@ -3,6 +3,7 @@ import { requireScopePage } from '$lib/server/auth/guards';
 import { deleteDraft, getDraft } from '$lib/server/schedule/draft';
 import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
+import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
@@ -371,88 +372,36 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const id = form.get('id');
 		const stationName = form.get('stationName');
-		const date = toDate(form.get('date'));
+		const dateValue = form.get('date');
 		const startMinuteOfDay = parseInt10(form.get('startMinuteOfDay'));
 
 		if (typeof id !== 'string' || !id) return fail(400, { message: 'id required' });
 		if (typeof stationName !== 'string' || !stationName) return fail(400, { message: 'stationName required' });
-		if (!date) return fail(400, { message: 'date required (YYYY-MM-DD)' });
+		if (typeof dateValue !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateValue))
+			return fail(400, { message: 'date required (YYYY-MM-DD)' });
 		if (startMinuteOfDay === null) return fail(400, { message: 'startMinuteOfDay required' });
 
-		// Belongs-to-this-draft check: prevent a client from re-parenting an
-		// assignment from a different draft (or a committed one) through this
-		// endpoint. A stronger authz check comes with the committed vs draft
-		// separation, but this covers the current UI.
-		const existing = await prisma.scheduleAssignment.findUnique({
-			where: { id },
-			select: {
-				scheduleDraftId: true,
-				status: true,
-				stationId: true,
-				date: true,
-				lineItemId: true,
-				estimatedHours: true,
-				lineItem: {
-					select: { itemType: true, decorationType: true, finishingStep: true, assignedStationId: true }
-				}
-			}
-		});
-		if (!existing || existing.scheduleDraftId !== params.id)
-			return fail(404, { message: 'Assignment not in this draft' });
-		// An approved job is on the live schedule; changing it here would skip the
-		// approval gate. Changes go through a new proposed plan instead.
-		if (existing.status !== ScheduleAssignmentStatus.PROPOSED)
-			return fail(409, { message: 'This job is already approved, so it can’t be changed here. Propose a new plan to move it.' });
-
-		const station = await findActiveStation(stationName);
-		if (!station) return fail(400, { message: 'That station no longer exists (it may have been archived in Settings → Stations). Reload the board.' });
-
-		// Row restriction on move — same rule as placeAssignment above. Prevents a
-		// placed embroidery block from being dragged onto a finishing row (or vice
-		// versa) via a hand-crafted POST.
-		const mismatch = stationMismatchMessage(existing.lineItem, station);
-		if (mismatch) return fail(400, { message: mismatch });
-
-		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, existing.lineItemId, date, Math.max(15, Math.round(existing.estimatedHours * 60)));
-		if (dependencyProblem) return fail(400, { message: dependencyProblem });
-
-		// A finisher that can't be settled is refused with a message, nothing saved.
-		let result;
 		try {
-			result = await prisma.$transaction(async (tx) => {
-				// Persist the caller's intent (station/date/startMin). The cascade helper
-				// re-applies gap-preserving math server-authoritatively and rewrites this
-				// row plus any peers it shifts (see draftDependencies.ts).
-				await tx.scheduleAssignment.update({
-					where: { id },
-					data: {
-						stationId: station.id,
-						date,
-						startMinuteOfDay: startMinuteOfDay,
-						proposedBy: user.email
-					}
-				});
-
-				// The planned crew was for the (station, day) it left (2026-09-28).
-				const changedSlot =
-					existing.stationId !== station.id || existing.date.getTime() !== date.getTime();
-				if (changedSlot) await tx.assignmentCrew.deleteMany({ where: { assignmentId: id } });
-				return repackDraftDays(tx, params.id, {
-					kind: 'move',
+			const result = await moveDraftAssignment(
+				{
+					draftId: params.id,
 					assignmentId: id,
-					oldStationId: existing.stationId,
-					oldDayMs: existing.date.getTime(),
-					newStationId: station.id,
-					newDayMs: date.getTime(),
-					targetStartMin: startMinuteOfDay
-				});
-			});
+					stationName,
+					date: dateValue,
+					startMinuteOfDay
+				},
+				user.email
+			);
+			return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
 		} catch (err) {
-			if (err instanceof DraftPlacementError) return fail(409, { message: err.message });
+			if (err instanceof MoveDraftAssignmentError) {
+				// 409 keeps parity with the previous responses for post-check refusals; the
+				// shape mismatch messages still go through here too — the client cares about
+				// the message, not the status code.
+				return fail(409, { message: err.message });
+			}
 			throw err;
 		}
-
-		return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
 	},
 
 	removeAssignment: async ({ request, params, locals, url }) => {

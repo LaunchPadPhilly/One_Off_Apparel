@@ -9,6 +9,7 @@ import { orderCandidateSchema, importCorrectionsSchema } from '$lib/server/hoops
 import { getSchedule } from '$lib/server/schedule/getSchedule';
 import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersistSchedule';
 import { commitDraft, commitSchedule, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
+import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
 import { HOOPS_EXTRACTION_RULES } from '$lib/server/hoops/extractionRules';
 import { getOrder, getOrderSchema, listOrders, listOrdersSchema } from '$lib/server/hoops/orderLookup';
 import { simulateChange, simulateChangeSchema } from '$lib/server/schedule/simulateChange';
@@ -30,7 +31,7 @@ import {
  *  - Set `readOnly` truthfully (see McpToolDefinition in mcp/handler.ts). Read-only is
  *    the default expectation; `readOnly: false` is an approved, scoped exception for the
  *    write-tools below (import_hoops_export, confirm_import, add_order_note,
- *    propose_schedule, commit_schedule, set_worker_availability, set_worker_station) —
+ *    propose_schedule, move_assignment, commit_schedule, set_worker_availability, set_worker_station) —
  *    each sits behind its own scope (IMPORT_WRITE or SCHEDULE_WRITE). All but
  *    commit_schedule write data that's still human-editable/reversible afterward or is
  *    only a draft; commit_schedule is itself the human schedule-approval gate. Never a
@@ -212,6 +213,44 @@ export const mcpTools: readonly McpToolDefinition[] = [
 			}
 			const approver = await approverFor(principal, approvedBy);
 			return draftId ? commitDraft(draftId, approver) : commitSchedule(assignmentIds ?? [], approver);
+		}
+	}),
+	defineTool({
+		name: 'move_assignment',
+		description:
+			"Moves one proposed job inside a draft schedule — changes its station, its day, " +
+			"or its start time without touching the live schedule. Only PROPOSED rows inside the " +
+			"named draft can move; an already-approved job is refused with a clear message (make " +
+			"a new proposal to move it). Row-kind restrictions still apply: a screen-print job " +
+			"only lands on a screen-print station, embroidery on an embroidery station, and so " +
+			"on — both the manual and auto presses share the screen-print kind, so manual↔auto " +
+			"moves are allowed. `stationName` is the station's internal name (as returned by " +
+			"propose_schedule's `changes[].to.station`). `date` is YYYY-MM-DD. `startMinuteOfDay` " +
+			"is optional — minutes from midnight (e.g. 480 = 8:00 AM); when omitted the " +
+			"assignment keeps its current start minute. Peers in the day cascade to preserve " +
+			"gaps the same way a drag-and-drop would. The move is written to the draft only; it " +
+			"becomes live when commit_schedule approves it. Example: 'move that assignment to " +
+			"Screen Print Auto 2 at 10:00 on 2026-10-14' → { draftId: '...', assignmentId: " +
+			"'...', stationName: 'screen_print_auto_2', date: '2026-10-14', startMinuteOfDay: " +
+			"600 }. Returns { id, peers, pushedCount }.",
+		inputSchema: {
+			draftId: z.string().min(1),
+			assignmentId: z.string().min(1),
+			stationName: z.string().min(1),
+			date: z.iso.date(),
+			// Optional: keep the current start when omitted — Claude rarely has an exact
+			// wall-clock minute from the conversation and shouldn't have to guess one.
+			startMinuteOfDay: z.number().int().min(0).max(24 * 60).optional()
+		},
+		requiredScope: 'SCHEDULE_WRITE',
+		readOnly: false,
+		handler: async (input, principal) => {
+			try {
+				return await moveDraftAssignment(input, principalIdentity(principal));
+			} catch (err) {
+				if (err instanceof MoveDraftAssignmentError) throw new Error(err.message);
+				throw err;
+			}
 		}
 	}),
 	defineTool({

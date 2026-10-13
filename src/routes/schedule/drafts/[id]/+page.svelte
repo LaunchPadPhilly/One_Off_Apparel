@@ -698,18 +698,24 @@
 			!types?.includes('application/x-placement')
 		)
 			return;
-		// Refuse the drop at the browser level when the row's station doesn't match
-		// the dragging item's expected station — the not-allowed cursor appears and
-		// ondrop never fires. `activeExpectedStation === null` means we don't yet
-		// know (e.g. an uncategorized "Patch Install") so we don't restrict.
-		if (activeExpectedStation && activeExpectedStation !== kindOf(stationName)) {
-			event.dataTransfer!.dropEffect = 'none';
-			dragPreview = null;
-			return;
-		}
+		// Row-mismatch no longer refuses the drop at the browser level — a silent
+		// not-allowed cursor was indistinguishable from the drag just not registering,
+		// so a drop on a wrong row (e.g. a stale manual-vs-auto station kind) looked
+		// like nothing happened. We still dim the row visually (see `isBlocked` on the
+		// track), but we let the drop event fire; handleTrackDrop then surfaces the
+		// reason through `boardNotice`.
 		event.preventDefault();
 		event.dataTransfer!.dropEffect = 'move';
 		dragOverKey = trackKey(date, stationName);
+
+		// On a row whose kind doesn't match the dragging item, we still allow the drop
+		// (so the drop handler can surface the reason); but we skip the
+		// "where it will land" preview — it would be a lie, the drop is going to be
+		// refused the moment it fires.
+		if (activeExpectedStation && activeExpectedStation !== kindOf(stationName)) {
+			dragPreview = null;
+			return;
+		}
 
 		// Compute the predicted drop position: cursor → wall-clock minute → snap to
 		// 15-min grid → snap out of any peer's span (same as the real drop).
