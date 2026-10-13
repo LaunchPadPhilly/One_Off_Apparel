@@ -1,6 +1,6 @@
 import { error, fail, redirect } from '@sveltejs/kit';
-import { requireScopePage } from '$lib/server/auth/guards';
-import { deleteDraft, getDraft } from '$lib/server/schedule/draft';
+import { isAdmin, requireScopePage } from '$lib/server/auth/guards';
+import { deleteDraft, getDraft, renameDraft, renameDraftSchema } from '$lib/server/schedule/draft';
 import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
 import { prisma } from '$lib/server/prisma';
@@ -169,6 +169,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 
 	return {
 		autoProposeFeedback,
+		// Renaming a draft is admin-only (2026-10-13); the action re-checks this.
+		canRename: isAdmin(locals.user),
 		draft: {
 			id: draft.id,
 			name: draft.name,
@@ -531,6 +533,20 @@ export const actions: Actions = {
 			if (err instanceof CommitScheduleError) return fail(409, { message: err.message });
 			throw err;
 		}
+	},
+
+	// Rename a draft — admins only (2026-10-13). Checked here on the server, not just by
+	// hiding the button, so a non-admin can't rename by posting the form directly.
+	renameDraft: async ({ request, params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		if (!isAdmin(user)) return fail(403, { message: 'Only admins can rename a schedule.' });
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		const form = await request.formData();
+		const parsed = renameDraftSchema.safeParse({ name: form.get('name') });
+		if (!parsed.success) return fail(400, { message: parsed.error.issues[0]?.message ?? 'Invalid name' });
+		await renameDraft(params.id, parsed.data.name, user.email);
+		return { renamed: true as const };
 	},
 
 	deleteDraft: async ({ params, locals, url }) => {
