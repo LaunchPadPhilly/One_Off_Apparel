@@ -79,7 +79,7 @@ export async function buildSchedulingRun(range: DateRange, release: DateRange | 
 			status: { in: COMMITTED },
 			OR: [{ lineItemId: { in: [...relevantIds] } }, { date: { gte: new Date(range.from), lte: new Date(range.to) } }]
 		},
-		select: { id: true, lineItemId: true, stationId: true, date: true, startMinuteOfDay: true, estimatedHours: true, status: true, startedAt: true, crew: { select: { workerId: true } } }
+		select: { id: true, lineItemId: true, stationId: true, date: true, startMinuteOfDay: true, estimatedHours: true, status: true, startedAt: true, station: { select: { kind: true } }, crew: { select: { workerId: true, isMain: true } } }
 	});
 
 	const released: ReleasedAssignment[] = [];
@@ -127,7 +127,11 @@ export async function buildSchedulingRun(range: DateRange, release: DateRange | 
 		fixedBySlot.set(key, entry);
 	}
 	// People crewing work that stays put stay on that station that day.
-	const staffed = await fetchStaffedCapacity(range, backlog, fixedRows.filter((row) => inRange(row.date, range)));
+	const staffed = await fetchStaffedCapacity(
+		range,
+		backlog,
+		fixedRows.filter((row) => inRange(row.date, range)).map((row) => ({ ...row, stationKind: row.station.kind }))
+	);
 	const capacity = staffed.map((slot) => {
 		const fixed = fixedBySlot.get(dayKey(slot.stationId, slot.date));
 		if (!fixed) return slot;

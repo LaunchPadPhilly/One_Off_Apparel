@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '$lib/server/prisma';
 import { McpUserError } from '$lib/server/mcp/handler';
 import { isPressKind } from '$lib/schedule/stationKinds';
+import { pressSafeCrew } from '$lib/schedule/people';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 
 /**
@@ -66,7 +67,7 @@ const iso = (date: Date) => date.toISOString().slice(0, 10);
 async function findWorker(name: string) {
 	const workers = await prisma.worker.findMany({
 		where: { archivedAt: null },
-		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
+		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, isMain: true } } }
 	});
 	const lower = name.toLowerCase();
 	const exact = workers.filter((w) => w.name.toLowerCase() === lower);
@@ -78,7 +79,7 @@ async function findWorker(name: string) {
 
 /** An active station by its label (case-insensitive), else a unique partial match. Throws a StaffingError on no match or an ambiguous one. */
 async function findStation(name: string) {
-	const stations = await prisma.station.findMany({ where: { archivedAt: null }, select: { id: true, label: true } });
+	const stations = await prisma.station.findMany({ where: { archivedAt: null }, select: { id: true, label: true, kind: true } });
 	const lower = name.toLowerCase();
 	const exact = stations.filter((s) => s.label.toLowerCase() === lower);
 	const matches = exact.length ? exact : stations.filter((s) => s.label.toLowerCase().includes(lower));
@@ -109,22 +110,21 @@ export async function getStaffing(input: z.infer<typeof getStaffingSchema>) {
 		prisma.staffingPin.findMany({ where: { date: { gte: from, lte: to } }, select: { date: true, worker: { select: { name: true } }, station: { select: { label: true } } } }),
 		prisma.scheduleAssignment.findMany({
 			where: { date: { gte: from, lte: to }, status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] } },
-			select: { date: true, station: { select: { label: true } }, crew: { select: { isMain: true, worker: { select: { name: true } } } } }
+			select: { date: true, station: { select: { label: true, kind: true } }, crew: { select: { isMain: true, worker: { select: { name: true } } } } }
 		})
 	]);
 
 	// One crew per (day, station), merged across that station's jobs that day — "|" keys
 	// are split back apart below.
-	const crews = new Map<string, Set<string>>();
-	const mains = new Map<string, string>();
+	const crews = new Map<string, { isPress: boolean; members: Map<string, { name: string; isMain: boolean }> }>();
 	for (const a of assignments) {
 		const key = `${iso(a.date)}|${a.station.label}`;
-		const set = crews.get(key) ?? new Set<string>();
+		const entry = crews.get(key) ?? { isPress: isPressKind(a.station.kind), members: new Map() };
 		for (const member of a.crew) {
-			set.add(member.worker.name);
-			if (member.isMain) mains.set(key, member.worker.name);
+			const name = member.worker.name;
+			entry.members.set(name, { name, isMain: member.isMain || Boolean(entry.members.get(name)?.isMain) });
 		}
-		crews.set(key, set);
+		crews.set(key, entry);
 	}
 
 	return {
@@ -139,10 +139,21 @@ export async function getStaffing(input: z.infer<typeof getStaffingSchema>) {
 		out: out.map((o) => ({ date: iso(o.date), name: o.worker.name, reason: o.reason })),
 		pinned: pins.map((p) => ({ date: iso(p.date), name: p.worker.name, station: p.station.label })),
 		approvedCrews: [...crews.entries()]
-			.map(([key, names]) => {
+			.map(([key, { isPress, members }]) => {
 				const [date, station] = key.split('|');
-				// main: the press's main printer (null off-press); everyone else on a press is a catch.
-				return { date, station, crew: [...names].sort(), main: mains.get(key) ?? null };
+				// A press crew is its main first, then the catches who assist them. There's no
+				// catch without a main (client, 2026-10-14): a press crew with no main is
+				// reported empty, with a note.
+				const crew = pressSafeCrew([...members.values()], isPress);
+				const main = isPress ? (crew[0]?.name ?? null) : null;
+				return {
+					date,
+					station,
+					main,
+					...(isPress ? { catches: crew.slice(1).map((m) => m.name) } : {}),
+					crew: crew.map((m) => m.name),
+					...(isPress && !main ? { note: 'No main printer on this press, so nobody can run it — re-plan this day.' } : {})
+				};
 			})
 			.sort((a, b) => a.date.localeCompare(b.date) || a.station.localeCompare(b.station))
 	};
@@ -221,7 +232,16 @@ export async function setWorkerStation(input: z.infer<typeof setWorkerStationSch
 	const worker = await findWorker(input.workerName);
 	const station = input.stationName ? await findStation(input.stationName) : null;
 	await prisma.$transaction((tx) => pinWorker(tx, { workerId: worker.id, date: input.date, stationId: station?.id ?? null }, actor));
-	return { name: worker.name, date: input.date, station: station?.label ?? null };
+	// A catch only assists a main (client, 2026-10-14), so say what happens without one.
+	const catchOnly = station && isPressKind(station.kind) && !worker.certifications.some((c) => c.stationId === station.id && c.isMain);
+	return {
+		name: worker.name,
+		date: input.date,
+		station: station?.label ?? null,
+		...(catchOnly
+			? { note: `${worker.name} can only catch on ${station.label}, so they work there only if a main printer is on it that day; otherwise the plan puts them elsewhere.` }
+			: {})
+	};
 }
 
 type Tx = Pick<typeof prisma, 'worker' | 'station' | 'workerUnavailability' | 'staffingPin' | 'domainAuditLog'>;
