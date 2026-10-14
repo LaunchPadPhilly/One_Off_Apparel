@@ -253,7 +253,8 @@ export function proposeSchedule(
 			sequenceOrder: state.placedCount,
 			startMinuteOfDay: start,
 			estimatedHours: hours,
-			crewWorkerIds: state.slot.crewWorkerIds ?? []
+			crewWorkerIds: state.slot.crewWorkerIds ?? [],
+			mainWorkerId: state.slot.mainWorkerId ?? null
 		});
 		reasoning.push(
 			`${item.id}: placed at "${state.slot.stationName}" on ${state.slot.date.toISOString().slice(0, 10)} (slot #${state.placedCount}, ${hours.toFixed(2)}h${state.slot.crewWorkerIds?.length ? `, crew of ${state.slot.crewWorkerIds.length}` : ''})` +

@@ -12,7 +12,7 @@ import {
 	OrderStatus
 } from '../../../../prisma/generated/prisma/enums';
 import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
-import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { DEFAULT_STATION_DAY_HOURS, isWeekendDay } from '$lib/schedule/defaultCapacity';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
 import type { DateRange } from './types';
@@ -210,7 +210,7 @@ export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
 	for (const station of stations) {
 		for (const day of enumerateDays(range)) {
 			const key = `${station.id}__${day}`;
-			if (existingKeys.has(key)) continue;
+			if (existingKeys.has(key) || isWeekendDay(day)) continue; // no default weekend work
 			defaultSlots.push({ stationId: station.id, stationName: station.name, stationKind: station.kind, date: new Date(`${day}T00:00:00Z`), availableHrs: DEFAULT_STATION_DAY_HOURS });
 		}
 	}
@@ -229,13 +229,17 @@ export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInp
 	const [workers, unavailability, pins] = await Promise.all([
 		prisma.worker.findMany({
 			where: { archivedAt: null },
-			select: { id: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
+			select: { id: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, isMain: true } } }
 		}),
 		prisma.workerUnavailability.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true } }),
 		prisma.staffingPin.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true, stationId: true } })
 	]);
 	return {
-		workers: workers.map((worker) => ({ id: worker.id, stationIds: worker.certifications.map((cert) => cert.stationId) })),
+		workers: workers.map((worker) => ({
+			id: worker.id,
+			stationIds: worker.certifications.map((cert) => cert.stationId),
+			mainStationIds: worker.certifications.filter((cert) => cert.isMain).map((cert) => cert.stationId)
+		})),
 		unavailable: new Set(unavailability.map((row) => staffingKey(row.workerId, row.date))),
 		pins: new Map(pins.map((row) => [staffingKey(row.workerId, row.date), row.stationId]))
 	};

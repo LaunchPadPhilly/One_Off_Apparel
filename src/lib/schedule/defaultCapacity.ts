@@ -14,13 +14,20 @@ import { WORKING_HOURS } from './shift';
  * engine actually schedules against can never quietly diverge into two conventions.
  *
  * This is a real, visible business assumption, not an invented fact: every active
- * station is treated as open every single day of a draft's window (including
- * weekends, matching the timeline's existing display convention) until someone enters
- * real capacity data. A real CapacityCalendar row always overrides this default the
- * moment one exists for that (station, day).
+ * station is treated as open every weekday of a draft's window until someone enters
+ * real capacity data. Weekends are closed (client, 2026-10-14: the shop doesn't work
+ * weekends) — the default never opens a Saturday or Sunday, and the draft board hides
+ * them. A real CapacityCalendar row always overrides this default the moment one
+ * exists for that (station, day), weekend or not.
  *
  * Which stations exist is no longer a hard-coded list here (2026-09-25): admins manage
  * Station rows at /settings?screen=stations, and each station's formula comes from its
  * `kind` (see stationKinds.ts).
  */
 export const DEFAULT_STATION_DAY_HOURS = WORKING_HOURS;
+
+/** Saturday or Sunday, for a "YYYY-MM-DD" day — the shop doesn't work weekends (2026-10-14). */
+export function isWeekendDay(isoDay: string): boolean {
+	const weekday = new Date(`${isoDay}T00:00:00Z`).getUTCDay();
+	return weekday === 0 || weekday === 6;
+}
