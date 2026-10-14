@@ -19,11 +19,17 @@ import type { BacklogItem, CapacitySlot } from './types';
  *   catches (1 for shirts, 2 when the press's work is mostly hoodies — the BULKY
  *   weight class) before leftovers go anywhere, and no more than that: spare people
  *   go to other stations or stay free (a human can still pin extras onto a press).
- *   Catches speed up the run like any crew. Main-capable people are kept off catch
- *   and non-press work while someone else can do it, so they stay free to open a press.
+ *   Any catch halves the whole press job (estimateHours); a second catch doesn't halve
+ *   it again. Main-capable people are kept off catch and non-press work while someone
+ *   else can do it, so they stay free to open a press.
  * - Every other station with work waiting gets at least one person — the station whose
- *   certified people are scarcest is filled first, and it takes the least-flexible
- *   (fewest-certifications) person, keeping flexible people free for elsewhere.
+ *   certified people are scarcest is filled first (re-counted after each placement; a
+ *   press first on a tie, so a lone main opens the press instead of leaving its catches
+ *   idle), and it takes the least-flexible (fewest-certifications) person, keeping
+ *   flexible people free for elsewhere.
+ * - Someone already crewing committed (approved / started) work that day comes in as
+ *   pinned to that station (withCommittedCrew), so a new plan never puts them on a
+ *   second station that day.
  * - Everyone left over goes where one more person saves the most time: the station
  *   with the largest crew-divisible workload per person (a station whose time barely
  *   shrinks with more people, like embroidery's machine sewing, draws few extras).
@@ -70,6 +76,25 @@ export interface StaffingInputs {
  *  its UTC calendar day, matching how the engine keys capacity days. */
 export function staffingKey(workerId: string, date: Date | string): string {
 	return `${workerId}|${typeof date === 'string' ? date : date.toISOString().slice(0, 10)}`;
+}
+
+/**
+ * `inputs` plus everyone crewing committed work, pinned to that work's station for its
+ * day, so a new plan keeps them there (one person, one station a day). A human pin for
+ * the same person and day wins.
+ */
+export function withCommittedCrew(
+	inputs: StaffingInputs,
+	rows: readonly { stationId: string; date: Date; crew: readonly { workerId: string }[] }[]
+): StaffingInputs {
+	const pins = new Map(inputs.pins);
+	for (const row of rows) {
+		for (const { workerId } of row.crew) {
+			const key = staffingKey(workerId, row.date);
+			if (!pins.has(key)) pins.set(key, row.stationId);
+		}
+	}
+	return { ...inputs, pins };
 }
 
 /** Waiting work on one station, in one-person hours. */
@@ -201,15 +226,25 @@ export function planStaffingForLoads(loads: ReadonlyMap<string, StationLoad>, ca
 			return [...people.filter((w) => !canMain(w)), ...people.filter(canMain)];
 		};
 
-		// 2. Every station with work gets its lead, scarcest station first.
-		const needsLead = [...stationIdsToday].filter((id) => hasWork(id) && !isOpen(id));
-		needsLead.sort(
-			(a, b) => eligibleLeads(a).length - eligibleLeads(b).length || (loads.get(b)?.total ?? 0) - (loads.get(a)?.total ?? 0) || a.localeCompare(b)
-		);
-		for (const stationId of needsLead) {
+		// 2. Every station with work gets its lead, scarcest station first. Scarcity is
+		//    re-counted after each placement, since taking someone changes who's left. On a
+		//    tie a press goes first: opening it also puts its catches to work, where the
+		//    other station would take the only main and leave them idle.
+		const needsLead = new Set([...stationIdsToday].filter((id) => hasWork(id) && !isOpen(id)));
+		while (needsLead.size) {
+			const ranked = [...needsLead]
+				.map((id) => ({ id, count: eligibleLeads(id).length }))
+				.sort(
+					(a, b) =>
+						a.count - b.count ||
+						Number(isPress.get(b.id)) - Number(isPress.get(a.id)) ||
+						(loads.get(b.id)?.total ?? 0) - (loads.get(a.id)?.total ?? 0) ||
+						a.id.localeCompare(b.id)
+				);
+			const { id: stationId } = ranked.find((r) => r.count > 0) ?? ranked[0];
+			needsLead.delete(stationId);
 			const person = eligibleLeads(stationId)[0];
-			if (!person) continue; // nobody who can lead it is in today — this station stays closed
-			place(person, stationId);
+			if (person) place(person, stationId); // else nobody who can lead it is in today — it stays closed
 		}
 
 		// 3. Running presses get their ideal catches one round at a time, busiest press

@@ -723,8 +723,12 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   - **Engine picks people** — `engine/planStaffing.ts`, deterministic. One person works
     one station for the whole day; only certified people, never someone marked out;
     human pins kept; every station with work gets ≥1 person (scarcest station first,
-    least-flexible person first); everyone else goes where one more person saves the
-    most crew-divisible time. A station nobody is on that day has no capacity. No roster
+    least-flexible person first, re-counted after each placement; a press first on a tie
+    so a lone main opens it rather than leaving its catches idle); everyone else goes
+    where one more person saves the most crew-divisible time. Anyone crewing committed
+    work (approved/started) that day stays on that station (`withCommittedCrew`, used by
+    every engine run and the board's crew re-plan), so nobody is planned onto two
+    stations in one day; a human pin still wins. A station nobody is on that day has no capacity. No roster
     at all = the old behavior (one unnamed person, every station open). Simplification:
     workload is the whole backlog spread evenly over the window, not re-planned per day.
     `fetchStaffedCapacity()` is what every engine run (automatic draft, propose_schedule,

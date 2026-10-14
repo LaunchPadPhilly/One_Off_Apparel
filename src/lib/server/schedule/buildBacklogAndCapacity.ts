@@ -14,7 +14,7 @@ import {
 import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
 import { DEFAULT_STATION_DAY_HOURS, isWeekendDay } from '$lib/schedule/defaultCapacity';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
-import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
+import { planStaffing, staffingKey, withCommittedCrew, type StaffingInputs } from '$lib/server/engine/planStaffing';
 import type { DateRange } from './types';
 
 /** Midnight UTC today — the cutoff for "deadline already passed". Dates are stored as UTC days. */
@@ -248,9 +248,14 @@ export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInp
 /**
  * fetchCapacity() with each (station, day) staffed by planStaffing — the capacity every
  * engine run should use (2026-09-28). Slots with nobody on them are dropped; with no
- * roster at all it's the same as fetchCapacity().
+ * roster at all it's the same as fetchCapacity(). `committedCrew` is the committed work
+ * staying put in this run: its crew stays on its station that day (withCommittedCrew).
  */
-export async function fetchStaffedCapacity(range: DateRange, backlog: readonly BacklogItem[]): Promise<CapacitySlot[]> {
+export async function fetchStaffedCapacity(
+	range: DateRange,
+	backlog: readonly BacklogItem[],
+	committedCrew: Parameters<typeof withCommittedCrew>[1] = []
+): Promise<CapacitySlot[]> {
 	const [capacity, inputs] = await Promise.all([fetchCapacity(range), fetchStaffingInputs(range)]);
-	return planStaffing(backlog, capacity, inputs);
+	return planStaffing(backlog, capacity, withCommittedCrew(inputs, committedCrew));
 }
