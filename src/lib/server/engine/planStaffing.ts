@@ -1,3 +1,4 @@
+import { PRINTED_RELABEL_KIND, PRINTING_PRESS_KIND } from '$lib/schedule/stationKinds';
 import { estimateHours, EstimationError } from './estimateHours';
 import type { BacklogItem, CapacitySlot } from './types';
 
@@ -115,6 +116,23 @@ export function planStaffing(backlog: readonly BacklogItem[], capacity: readonly
 	// Least flexible first, so flexible people stay free for where they're needed most.
 	const workersInOrder = [...inputs.workers].sort((a, b) => a.stationIds.length - b.stationIds.length || byId(a, b));
 
+	// Relabel-needs-press rule (CLAUDE.md Change 2 / 2026-10-14): Relabel is done BY the
+	// press operator between press runs, so a candidate for a Printed Relabel station
+	// must also be certified on at least one Screen Print (press) station. The engine
+	// enforces this at crew-selection time; set_worker_station and the People form
+	// enforce it on the write path.
+	const stationKindById = new Map<string, string>();
+	const pressStationIds = new Set<string>();
+	for (const slot of capacity) {
+		stationKindById.set(slot.stationId, slot.stationKind);
+		if (slot.stationKind === PRINTING_PRESS_KIND) pressStationIds.add(slot.stationId);
+	}
+	const pressQualified = new Set<string>(
+		inputs.workers.filter((w) => w.stationIds.some((id) => pressStationIds.has(id))).map((w) => w.id)
+	);
+	const workerAllowedForStation = (workerId: string, stationId: string) =>
+		stationKindById.get(stationId) === PRINTED_RELABEL_KIND ? pressQualified.has(workerId) : true;
+
 	const slotsByDay = new Map<string, CapacitySlot[]>();
 	for (const slot of capacity) {
 		const day = slot.date.toISOString().slice(0, 10);
@@ -130,16 +148,19 @@ export function planStaffing(backlog: readonly BacklogItem[], capacity: readonly
 		const free = new Set<string>();
 
 		// 1. Pinned people stay where a human put them; people who are out are skipped.
+		//    A pin to a Printed Relabel station is only honored if the worker is press-
+		//    qualified (set_worker_station already refuses the pin, but legacy pins or a
+		//    certification change later could violate the rule — fail safe here too).
 		for (const worker of workersInOrder) {
 			if (inputs.unavailable.has(staffingKey(worker.id, day))) continue;
 			const pinned = inputs.pins.get(staffingKey(worker.id, day));
 			if (pinned) {
-				if (stationIdsToday.has(pinned)) crew.get(pinned)!.push(worker.id);
+				if (stationIdsToday.has(pinned) && workerAllowedForStation(worker.id, pinned)) crew.get(pinned)!.push(worker.id);
 				continue; // pinned somewhere not scheduled today (e.g. the manual press): not free either
 			}
 			free.add(worker.id);
 		}
-		const eligible = (stationId: string) => workersInOrder.filter((w) => free.has(w.id) && w.stationIds.includes(stationId));
+		const eligible = (stationId: string) => workersInOrder.filter((w) => free.has(w.id) && w.stationIds.includes(stationId) && workerAllowedForStation(w.id, stationId));
 
 		// 2. Every station with work gets at least one person, scarcest station first.
 		const needsSomeone = [...stationIdsToday].filter((id) => hasWork(id) && crew.get(id)!.length === 0);
@@ -160,6 +181,7 @@ export function planStaffing(backlog: readonly BacklogItem[], capacity: readonly
 			let bestSaving = 0;
 			for (const stationId of worker.stationIds) {
 				if (!stationIdsToday.has(stationId) || !hasWork(stationId)) continue;
+				if (!workerAllowedForStation(worker.id, stationId)) continue;
 				const n = crew.get(stationId)!.length;
 				if (n === 0) continue; // step 2 already tried; no certified lead is in today
 				const saving = (loads.get(stationId)?.divisible ?? 0) / (n * (n + 1)); // time saved by the (n+1)th person

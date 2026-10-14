@@ -1,5 +1,5 @@
 import { prisma } from '$lib/server/prisma';
-import { OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import { LineItemStatus, OrderStatus } from '../../../../prisma/generated/prisma/enums';
 import { McpUserError } from '$lib/server/mcp/handler';
 import { fetchOrderGaps } from './orderReadiness';
 import { lineItemCorrectionSchema, orderCorrectionSchema, type ImportCorrections } from './types';
@@ -112,6 +112,16 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 		}
 
 		await tx.order.updateMany({ where: { id: { in: [...orderIds] } }, data: { status: OrderStatus.CONFIRMED } });
+
+		// Outsourced line items (2026-10-14): patch installs the reviewer answered as
+		// "outsourced" are being handled externally. They're already filtered from the
+		// scheduling backlog; marking them COMPLETE at confirm time means check_completion
+		// (and anything that walks sibling status) treats them as done, so the parent
+		// order can complete naturally without the floor needing to Start/Stop them.
+		await tx.lineItem.updateMany({
+			where: { orderId: { in: [...orderIds] }, outsourced: true, status: { not: LineItemStatus.COMPLETE } },
+			data: { status: LineItemStatus.COMPLETE }
+		});
 
 		for (const orderId of orderIds) {
 			const lineItemCorrectionsForOrder = Object.fromEntries(

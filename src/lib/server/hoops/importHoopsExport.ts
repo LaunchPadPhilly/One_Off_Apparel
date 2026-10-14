@@ -118,6 +118,10 @@ async function createLineItemsForOrder(
 				matteSurface: itemCandidate.matteSurface ?? null,
 				foldBagGarment: itemCandidate.foldBagGarment ?? null,
 				manualEstimatedHours: itemCandidate.manualEstimatedHours ?? null,
+				// Patch Install only (2026-10-14): null until the reviewer answers "is this
+				// outsourced?" An extraction that already knows the answer can send it;
+				// everything else leaves it null for the order page / confirm_import to ask.
+				outsourced: itemCandidate.outsourced ?? null,
 				quantity: itemCandidate.quantity,
 				sizeBreakdown: itemCandidate.sizeBreakdown,
 				reviewConfidence: itemCandidate.reviewConfidence ?? null

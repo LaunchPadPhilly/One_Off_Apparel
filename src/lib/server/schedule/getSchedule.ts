@@ -1,5 +1,6 @@
 import { prisma } from '$lib/server/prisma';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
+import { isWeekendDate } from '$lib/schedule/weekends';
 import type { DateRange } from './types';
 
 /**
@@ -22,7 +23,7 @@ export async function getSchedule(range: DateRange, stationId?: string) {
 	// Date type isn't). Prisma's runtime validation, unlike its TS types, rejects a
 	// date-only string ("premature end of input, expected ISO-8601 DateTime") — it needs
 	// a real Date.
-	return prisma.scheduleAssignment.findMany({
+	const assignments = await prisma.scheduleAssignment.findMany({
 		where: {
 			date: { gte: new Date(range.from), lte: new Date(range.to) },
 			...(stationId ? { stationId } : {}),
@@ -34,4 +35,7 @@ export async function getSchedule(range: DateRange, stationId?: string) {
 		},
 		orderBy: [{ date: 'asc' }, { stationId: 'asc' }, { sequenceOrder: 'asc' }]
 	});
+	// Shop doesn't operate Sat/Sun (2026-10-14): any legacy weekend row stays in the
+	// database for history but is filtered out of chat and UI views so the two agree.
+	return assignments.filter((assignment) => !isWeekendDate(assignment.date));
 }

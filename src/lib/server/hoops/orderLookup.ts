@@ -45,6 +45,10 @@ export async function listOrders(input: z.infer<typeof listOrdersSchema>) {
 	const orders = await prisma.order.findMany({
 		where: {
 			status: input.status ? (input.status.toUpperCase() as OrderStatus) : { in: ACTIVE_STATUSES },
+			// Same tray-filter rule the scheduling page uses: an order with zero line
+			// items has nothing to schedule and shouldn't be surfaced through MCP either,
+			// so chat-driven and UI-driven views agree on what counts as a real order.
+			lineItems: { some: {} },
 			...(input.search
 				? { OR: [{ hoopsOrderId: { contains: input.search, mode: 'insensitive' } }, { customerName: { contains: input.search, mode: 'insensitive' } }] }
 				: {})

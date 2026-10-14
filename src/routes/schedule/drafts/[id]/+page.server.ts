@@ -9,6 +9,7 @@ import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
+import { isWeekendDate } from '$lib/schedule/weekends';
 import {
 	OrderStatus,
 	ScheduleAssignmentStatus
@@ -111,7 +112,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		// candidate here, not just left unplaced by the automatic engine; see
 		// placeAssignment below for the matching server-side write-path check.
 		prisma.order.findMany({
-			where: { status: OrderStatus.CONFIRMED, deadline: { gte: startOfToday() } },
+			// `lineItems: { some: {} }` keeps orders with zero jobs out of the tray — a
+			// shell order (e.g. a manual import that landed before any line items were
+			// attached) has nothing schedulable and should not be offered as a candidate.
+			where: { status: OrderStatus.CONFIRMED, deadline: { gte: startOfToday() }, lineItems: { some: {} } },
 			include: { lineItems: { orderBy: { id: 'asc' } } },
 			orderBy: [{ deadline: 'asc' }, { createdAt: 'desc' }]
 		}),
@@ -142,9 +146,14 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// One entry per (station, day) in the window; falls back to the default day
 	// length when the capacity_calendar has no row for that pair. That keeps the
 	// timeline usable before capacity_calendar has been seeded for a shop.
+	// Weekends are omitted (2026-10-14): the shop doesn't operate Saturday or Sunday,
+	// so the board renders Mon–Fri only. The same filter is applied in fetchCapacity,
+	// proposeSchedule and getSchedule so no path can resurrect a weekend day.
 	const days: string[] = [];
 	for (let i = 0; i < draft.weeks * 7; i++) {
-		days.push(iso(addDays(startIso, i)));
+		const day = iso(addDays(startIso, i));
+		if (isWeekendDate(day)) continue;
+		days.push(day);
 	}
 	// Row order is the admin's (sortOrder, then label). No fallback list any more —
 	// the migration seeds the original stations, and an empty list means an admin
@@ -311,6 +320,9 @@ export const actions: Actions = {
 		}
 		if (lineItem.order.deadline.getTime() < startOfToday().getTime()) {
 			return fail(400, { message: "This order's deadline has already passed — it can't be scheduled until the deadline is corrected." });
+		}
+		if (isWeekendDate(date)) {
+			return fail(400, { message: "The shop doesn't operate on Saturday or Sunday — pick a weekday." });
 		}
 
 		const station = await findActiveStation(stationName);

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { pressable } from '$lib/actions/pressable.svelte';
+	import { PRINTED_RELABEL_KIND, PRINTING_PRESS_KIND } from '$lib/schedule/stationKinds';
 
 	/**
 	 * Settings → People (config settings, 2026-09-25): the shop-floor roster and which
@@ -67,12 +68,20 @@
 							<label class="checkbox">
 								<input type="checkbox" name="stationId" value={station.id} checked={worker?.stationIds.includes(station.id) ?? false} />
 								{station.label}
+								{#if station.kind === PRINTED_RELABEL_KIND}
+									<span class="muted">(needs a Screen Print certification too — relabel is run by the press operator)</span>
+								{/if}
 							</label>
 						{/each}
 					</div>
 				</div>
 			{/if}
 		{/each}
+		<p class="muted hint">
+			Printed Relabel is handled by the press operator between press runs, so anyone certified on
+			Printed Relabel must also be certified on a Screen Print station. The form will be rejected if that
+			pair isn't ticked together.
+		</p>
 	</fieldset>
 {/snippet}
 

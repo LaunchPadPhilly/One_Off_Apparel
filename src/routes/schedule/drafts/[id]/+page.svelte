@@ -139,12 +139,17 @@
 		}
 	}
 
-	let totalWeeks = $derived(Math.max(1, Math.ceil(data.capacity.length / 7)));
+	// Weekends were filtered out of data.capacity server-side (2026-10-14), so each
+	// work week is 5 days long on the board — Mon–Fri. The 7-based chunking was
+	// scaled down accordingly so the Week view, prev/next-week nav and weekly screen
+	// count all page through real work weeks instead of straddling two.
+	const WORK_DAYS_PER_WEEK = 5;
+	let totalWeeks = $derived(Math.max(1, Math.ceil(data.capacity.length / WORK_DAYS_PER_WEEK)));
 	let visibleDays = $derived(
-		daysViewMode === 'week' ? data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7) : data.capacity
+		daysViewMode === 'week' ? data.capacity.slice(weekIndex * WORK_DAYS_PER_WEEK, weekIndex * WORK_DAYS_PER_WEEK + WORK_DAYS_PER_WEEK) : data.capacity
 	);
 	let weekRangeLabel = $derived.by(() => {
-		const weekDays = data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7);
+		const weekDays = data.capacity.slice(weekIndex * WORK_DAYS_PER_WEEK, weekIndex * WORK_DAYS_PER_WEEK + WORK_DAYS_PER_WEEK);
 		if (weekDays.length === 0) return '';
 		const first = formatDayLabel(weekDays[0].date);
 		const last = formatDayLabel(weekDays[weekDays.length - 1].date);
@@ -153,10 +158,10 @@
 
 	// Weekly screen count: screens to prepare per week of this draft, from the
 	// live placements, so it updates as jobs are dragged between weeks. Weeks are the
-	// same 7-day chunks (from the draft's start date) the Week view pages through.
+	// same 5-day work-week chunks (Mon–Fri) the Week view pages through.
 	let weeklyScreens = $derived.by(() =>
 		Array.from({ length: totalWeeks }, (_, index) => {
-			const weekDays = data.capacity.slice(index * 7, index * 7 + 7);
+			const weekDays = data.capacity.slice(index * WORK_DAYS_PER_WEEK, index * WORK_DAYS_PER_WEEK + WORK_DAYS_PER_WEEK);
 			const dates = new Set(weekDays.map((day) => day.date));
 			const items = placements
 				.filter((placement) => dates.has(placement.date))

@@ -8,6 +8,7 @@
  */
 import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface } from '../../../../prisma/generated/prisma/enums';
 import { expectedStationFor } from '$lib/schedule/expectedStation';
+import { isPatchInstall, patchInstallInHouseHours } from '$lib/schedule/patchInstall';
 import { currentFormulas, maybeRefreshFormulas } from './formulaSettings';
 import type { EstimateHoursInput, EstimateHoursResult } from './types';
 import { countDecorationColors } from './decorationColors';
@@ -58,7 +59,10 @@ export type MissingLineItemField =
 	| 'matteSurface'
 	| 'foldBagGarment'
 	| 'manualEstimatedHours'
-	| 'assignedStationId';
+	| 'assignedStationId'
+	// NEW (2026-10-14): Patch Install only — "is this being outsourced?" See
+	// $lib/schedule/patchInstall.ts.
+	| 'outsourced';
 
 /**
  * Thrown when a station's formula is real, but *this specific job* is missing a field
@@ -75,6 +79,20 @@ export class MissingLineItemDataError extends EstimationError {
 	) {
 		super(`missing_data: ${what} is required to estimate this job's hours but is not set on this line item. Edit the line item to set it.`);
 		this.name = 'MissingLineItemDataError';
+	}
+}
+
+/**
+ * Thrown for a Patch Install line item the reviewer answered as "outsourced"
+ * (2026-10-14). Not a defect — the shop deliberately isn't doing this one — but we
+ * need a signal distinct from the two above so callers can show "Outsourced" instead
+ * of "pending" and summarizeOrderEstimate knows not to flag the order as having
+ * missing estimates. See $lib/schedule/patchInstall.ts for the business rule.
+ */
+export class OutsourcedLineItemError extends EstimationError {
+	constructor(what: string) {
+		super(`outsourced: ${what}`);
+		this.name = 'OutsourcedLineItemError';
 	}
 }
 
@@ -301,6 +319,24 @@ export const OTHER_STATION_KIND = 'other';
  */
 function estimateOtherHours(item: EstimateHoursInput): EstimateHoursResult {
 	const name = item.otherJobType ? `"${item.otherJobType}"` : 'this job';
+	// Patch Install special case (2026-10-14, client decision — see
+	// $lib/schedule/patchInstall.ts): the outsource question wins over the normal
+	// "assign a station + enter hours" ask, because it decides whether either applies
+	// at all. Outsourced items don't need a station or hours (they're not scheduled);
+	// in-house items use the fixed 3 min/unit rate rather than a reviewer entry.
+	if (isPatchInstall(item)) {
+		if (item.outsourced == null) {
+			throw new MissingLineItemDataError('outsourced (is this patch install being outsourced, or done in-house?)', 'outsourced');
+		}
+		if (item.outsourced) {
+			throw new OutsourcedLineItemError(`${name} is being handled externally — no in-house time or station needed.`);
+		}
+		if (!item.assignedStationId) {
+			throw new MissingLineItemDataError(`assigned station (${name} is in-house — which station does it run on?)`, 'assignedStationId');
+		}
+		const hours = patchInstallInHouseHours(item.quantity);
+		return { station: OTHER_STATION_KIND, stationId: item.assignedStationId, hours, crewDivisibleHours: 0 };
+	}
 	if (!item.assignedStationId) {
 		throw new MissingLineItemDataError(`assigned station (${name} isn't a job type the system knows — which station does it run on?)`, 'assignedStationId');
 	}

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '$lib/server/prisma';
 import { McpUserError } from '$lib/server/mcp/handler';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
+import { PRINTED_RELABEL_KIND, PRINTING_PRESS_KIND } from '$lib/schedule/stationKinds';
 
 /**
  * Daily staffing, the part people change by talking to Claude (2026-09-28): who is out
@@ -65,7 +66,10 @@ const iso = (date: Date) => date.toISOString().slice(0, 10);
 async function findWorker(name: string) {
 	const workers = await prisma.worker.findMany({
 		where: { archivedAt: null },
-		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
+		// `station.kind` is pulled through so the caller can enforce the Relabel-needs-press
+		// rule — a worker pinned to a Printed Relabel station must also be certified on at
+		// least one Screen Print station (set_worker_station below).
+		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, station: { select: { kind: true } } } } }
 	});
 	const lower = name.toLowerCase();
 	const exact = workers.filter((w) => w.name.toLowerCase() === lower);
@@ -77,7 +81,7 @@ async function findWorker(name: string) {
 
 /** An active station by its label (case-insensitive), else a unique partial match. Throws a StaffingError on no match or an ambiguous one. */
 async function findStation(name: string) {
-	const stations = await prisma.station.findMany({ where: { archivedAt: null }, select: { id: true, label: true } });
+	const stations = await prisma.station.findMany({ where: { archivedAt: null }, select: { id: true, label: true, kind: true } });
 	const lower = name.toLowerCase();
 	const exact = stations.filter((s) => s.label.toLowerCase() === lower);
 	const matches = exact.length ? exact : stations.filter((s) => s.label.toLowerCase().includes(lower));
@@ -215,6 +219,13 @@ export async function setWorkerStation(input: z.infer<typeof setWorkerStationSch
 	const station = await findStation(input.stationName);
 	if (!worker.certifications.some((c) => c.stationId === station.id)) {
 		throw new StaffingError(`${worker.name} isn't certified on ${station.label}. Add the certification in Settings → People first if they should be.`);
+	}
+	// Relabel is done BY the press operator between press runs — a worker pinned to a
+	// Printed Relabel station must also be certified on at least one Screen Print (press)
+	// station. Enforced here, in createWorker/updateWorker, and in planStaffing so chat,
+	// UI and engine all agree.
+	if (station.kind === PRINTED_RELABEL_KIND && !worker.certifications.some((c) => c.station.kind === PRINTING_PRESS_KIND)) {
+		throw new StaffingError(`${worker.name} isn't certified on a Screen Print station, so they can't run Printed Relabel — relabel is handled by the press operator between runs. Certify ${worker.name} on a Screen Print station first.`);
 	}
 	const out = await prisma.workerUnavailability.findUnique({ where: { workerId_date: { workerId: worker.id, date } } });
 	if (out) throw new StaffingError(`${worker.name} is marked out on ${input.date}. Mark them available first.`);

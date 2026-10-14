@@ -13,6 +13,7 @@
  */
 import { prisma } from '$lib/server/prisma';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
+import { isWeekendDate } from '$lib/schedule/weekends';
 import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from './draftDependencies';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 import type { PlacementPosition } from './draftDependencies';
@@ -125,6 +126,9 @@ export async function moveDraftAssignment(
 	if (mismatch) throw new MoveDraftAssignmentError(mismatch);
 
 	const date = parseDate(input.date);
+	if (isWeekendDate(date)) {
+		throw new MoveDraftAssignmentError("The shop doesn't operate on Saturday or Sunday — pick a weekday.");
+	}
 	const durationMin = Math.max(15, Math.round(existing.estimatedHours * 60));
 
 	const dependencyProblem = await checkFinisherPlacement(

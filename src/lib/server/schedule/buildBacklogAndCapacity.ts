@@ -13,6 +13,7 @@ import {
 } from '../../../../prisma/generated/prisma/enums';
 import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { isWeekendDate } from '$lib/schedule/weekends';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
 import type { DateRange } from './types';
@@ -68,6 +69,10 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 				// reviewer has assigned it a station and hours (estimateHours flags it otherwise).
 				{ itemType: LineItemType.OTHER, status: LineItemStatus.NEEDS_REVIEW }
 			],
+			// Outsourced work is handled externally (2026-10-14) and never gets a slot on
+			// the shop's schedule — on confirm_import it's also flipped to COMPLETE so the
+			// order can complete naturally. This filter is the defense-in-depth.
+			NOT: { outsourced: true },
 			order: {
 				status: OrderStatus.CONFIRMED,
 				deadline: { gte: startOfToday() }
@@ -137,6 +142,10 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			manualEstimatedHours: item.manualEstimatedHours,
 			otherJobType: item.otherJobType,
 			assignedStationId: item.assignedStationId,
+			// Carried through so estimateOtherHours can compute 3 min/unit for an in-house
+			// patch install directly from the backlog item (2026-10-14). Outsourced=true
+			// rows are already filtered by the query above.
+			outsourced: item.outsourced,
 			estimatedHoursOverride: item.estimatedHoursOverride,
 			// Never null here: the `deadline: { gte: … }` filter above excludes orders
 			// with no deadline yet (they can't be confirmed without one anyway).
@@ -195,20 +204,26 @@ export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
 		include: { station: { select: { id: true, name: true, kind: true } } }
 	});
 
-	const realSlots: CapacitySlot[] = rows.map((row) => ({
-		stationId: row.station.id,
-		stationName: row.station.name,
-		stationKind: row.station.kind,
-		date: row.date,
-		availableHrs: row.availableHrs
-	}));
+	// Weekend rows are dropped (2026-10-14): the shop is closed Sat/Sun. The default
+	// below also skips weekends, and proposeSchedule has a defensive filter so a legacy
+	// CapacityCalendar row on a weekend can't resurrect it.
+	const realSlots: CapacitySlot[] = rows
+		.filter((row) => !isWeekendDate(row.date))
+		.map((row) => ({
+			stationId: row.station.id,
+			stationName: row.station.name,
+			stationKind: row.station.kind,
+			date: row.date,
+			availableHrs: row.availableHrs
+		}));
 
-	// Fill every (station, day) that has no real row with the default, so a real row
-	// always wins and the default only covers gaps.
+	// Fill every (station, weekday) that has no real row with the default, so a real
+	// row always wins and the default only covers gaps.
 	const existingKeys = new Set(realSlots.map((slot) => `${slot.stationId}__${iso(slot.date)}`));
 	const defaultSlots: CapacitySlot[] = [];
 	for (const station of stations) {
 		for (const day of enumerateDays(range)) {
+			if (isWeekendDate(day)) continue;
 			const key = `${station.id}__${day}`;
 			if (existingKeys.has(key)) continue;
 			defaultSlots.push({ stationId: station.id, stationName: station.name, stationKind: station.kind, date: new Date(`${day}T00:00:00Z`), availableHrs: DEFAULT_STATION_DAY_HOURS });
