@@ -97,7 +97,7 @@ export async function proposeIntoDraft(options: ProposeOptions): Promise<Propose
 					proposedBy: actor,
 					scheduleDraftId: draft.id,
 					// The day's crew on this station (planStaffing.ts, 2026-09-28).
-					crew: { create: assignment.crewWorkerIds.map((workerId) => ({ workerId })) }
+					crew: { create: assignment.crewWorkerIds.map((workerId) => ({ workerId, isMain: workerId === assignment.mainWorkerId })) }
 				}
 			});
 			ids.push(row.id);

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { prisma } from '$lib/server/prisma';
 import { McpUserError } from '$lib/server/mcp/handler';
+import { isPressKind } from '$lib/schedule/stationKinds';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 
 /**
@@ -98,34 +99,50 @@ export async function getStaffing(input: z.infer<typeof getStaffingSchema>) {
 		prisma.worker.findMany({
 			where: { archivedAt: null },
 			orderBy: { name: 'asc' },
-			select: { name: true, notes: true, certifications: { where: { station: { archivedAt: null } }, select: { station: { select: { label: true } } } } }
+			select: {
+				name: true,
+				notes: true,
+				certifications: { where: { station: { archivedAt: null } }, select: { isMain: true, station: { select: { label: true, kind: true } } } }
+			}
 		}),
 		prisma.workerUnavailability.findMany({ where: { date: { gte: from, lte: to } }, select: { date: true, reason: true, worker: { select: { name: true } } } }),
 		prisma.staffingPin.findMany({ where: { date: { gte: from, lte: to } }, select: { date: true, worker: { select: { name: true } }, station: { select: { label: true } } } }),
 		prisma.scheduleAssignment.findMany({
 			where: { date: { gte: from, lte: to }, status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] } },
-			select: { date: true, station: { select: { label: true } }, crew: { select: { worker: { select: { name: true } } } } }
+			select: { date: true, station: { select: { label: true } }, crew: { select: { isMain: true, worker: { select: { name: true } } } } }
 		})
 	]);
 
 	// One crew per (day, station), merged across that station's jobs that day — "|" keys
 	// are split back apart below.
 	const crews = new Map<string, Set<string>>();
+	const mains = new Map<string, string>();
 	for (const a of assignments) {
 		const key = `${iso(a.date)}|${a.station.label}`;
 		const set = crews.get(key) ?? new Set<string>();
-		for (const member of a.crew) set.add(member.worker.name);
+		for (const member of a.crew) {
+			set.add(member.worker.name);
+			if (member.isMain) mains.set(key, member.worker.name);
+		}
 		crews.set(key, set);
 	}
 
 	return {
-		roster: workers.map((w) => ({ name: w.name, notes: w.notes, certifiedOn: w.certifications.map((c) => c.station.label) })),
+		// mainOn (2026-10-14): presses this person may run as the main printer; on every
+		// other press they're certified on they can only catch.
+		roster: workers.map((w) => ({
+			name: w.name,
+			notes: w.notes,
+			certifiedOn: w.certifications.map((c) => c.station.label),
+			mainOn: w.certifications.filter((c) => c.isMain && isPressKind(c.station.kind)).map((c) => c.station.label)
+		})),
 		out: out.map((o) => ({ date: iso(o.date), name: o.worker.name, reason: o.reason })),
 		pinned: pins.map((p) => ({ date: iso(p.date), name: p.worker.name, station: p.station.label })),
 		approvedCrews: [...crews.entries()]
 			.map(([key, names]) => {
 				const [date, station] = key.split('|');
-				return { date, station, crew: [...names].sort() };
+				// main: the press's main printer (null off-press); everyone else on a press is a catch.
+				return { date, station, crew: [...names].sort(), main: mains.get(key) ?? null };
 			})
 			.sort((a, b) => a.date.localeCompare(b.date) || a.station.localeCompare(b.station))
 	};
@@ -202,32 +219,49 @@ export async function setWorkerAvailability(input: z.infer<typeof setWorkerAvail
  */
 export async function setWorkerStation(input: z.infer<typeof setWorkerStationSchema>, actor: string) {
 	const worker = await findWorker(input.workerName);
+	const station = input.stationName ? await findStation(input.stationName) : null;
+	await prisma.$transaction((tx) => pinWorker(tx, { workerId: worker.id, date: input.date, stationId: station?.id ?? null }, actor));
+	return { name: worker.name, date: input.date, station: station?.label ?? null };
+}
+
+type Tx = Pick<typeof prisma, 'worker' | 'station' | 'workerUnavailability' | 'staffingPin' | 'domainAuditLog'>;
+
+/**
+ * Pins a person (by id) to a station (by id) for one day, or clears their pin for that
+ * day when `stationId` is null — the board's People panel (2026-10-14) and
+ * setWorkerStation share it. Runs inside the caller's transaction.
+ *
+ * @throws StaffingError for an archived/unknown person or station, a missing
+ *   certification, or a person marked out that day
+ */
+export async function pinWorker(tx: Tx, input: { workerId: string; date: string; stationId: string | null }, actor: string) {
+	const worker = await tx.worker.findFirst({
+		where: { id: input.workerId, archivedAt: null },
+		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
+	});
+	if (!worker) throw new StaffingError('That person is no longer on the roster (Settings → People).');
 	const date = new Date(`${input.date}T00:00:00Z`);
 
-	if (!input.stationName) {
-		await prisma.$transaction([
-			prisma.staffingPin.deleteMany({ where: { workerId: worker.id, date } }),
-			prisma.domainAuditLog.create({ data: { entity: 'Worker', entityId: worker.id, action: 'worker_station_unpinned', actor, diff: { name: worker.name, date: input.date } } })
-		]);
-		return { name: worker.name, date: input.date, station: null };
+	if (!input.stationId) {
+		await tx.staffingPin.deleteMany({ where: { workerId: worker.id, date } });
+		await tx.domainAuditLog.create({ data: { entity: 'Worker', entityId: worker.id, action: 'worker_station_unpinned', actor, diff: { name: worker.name, date: input.date } } });
+		return;
 	}
 
-	const station = await findStation(input.stationName);
+	const station = await tx.station.findFirst({ where: { id: input.stationId, archivedAt: null }, select: { id: true, label: true } });
+	if (!station) throw new StaffingError('That station no longer exists (Settings → Stations).');
 	if (!worker.certifications.some((c) => c.stationId === station.id)) {
 		throw new StaffingError(`${worker.name} isn't certified on ${station.label}. Add the certification in Settings → People first if they should be.`);
 	}
-	const out = await prisma.workerUnavailability.findUnique({ where: { workerId_date: { workerId: worker.id, date } } });
+	const out = await tx.workerUnavailability.findUnique({ where: { workerId_date: { workerId: worker.id, date } } });
 	if (out) throw new StaffingError(`${worker.name} is marked out on ${input.date}. Mark them available first.`);
 
-	await prisma.$transaction([
-		prisma.staffingPin.upsert({
-			where: { workerId_date: { workerId: worker.id, date } },
-			create: { workerId: worker.id, date, stationId: station.id, createdBy: actor },
-			update: { stationId: station.id, createdBy: actor }
-		}),
-		prisma.domainAuditLog.create({
-			data: { entity: 'Worker', entityId: worker.id, action: 'worker_station_pinned', actor, diff: { name: worker.name, date: input.date, station: station.label } }
-		})
-	]);
-	return { name: worker.name, date: input.date, station: station.label };
+	await tx.staffingPin.upsert({
+		where: { workerId_date: { workerId: worker.id, date } },
+		create: { workerId: worker.id, date, stationId: station.id, createdBy: actor },
+		update: { stationId: station.id, createdBy: actor }
+	});
+	await tx.domainAuditLog.create({
+		data: { entity: 'Worker', entityId: worker.id, action: 'worker_station_pinned', actor, diff: { name: worker.name, date: input.date, station: station.label } }
+	});
 }

@@ -16,6 +16,7 @@ import {
 	updateStationSchema
 } from '$lib/server/config/stations';
 import { WorkerConfigError, createWorker, listWorkers, setWorkerArchived, updateWorker, updateWorkerSchema, workerSchema } from '$lib/server/config/workers';
+import { applyWorkerRules, suggestRulesFromNotes, WorkerNoteRulesError, type WorkerRuleSuggestions } from '$lib/server/config/workerNoteRules';
 import { DEFAULT_FORMULAS, currentFormulas, saveFormulas, type FormulaSettings } from '$lib/server/engine/formulaSettings';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -142,10 +143,11 @@ export const actions: Actions = {
 			const input = parseOrFail(workerSchema, {
 				name: data.get('name'),
 				notes: data.get('notes') ?? '',
-				stationIds: data.getAll('stationId')
+				stationIds: data.getAll('stationId'),
+				mainStationIds: data.getAll('mainStationId')
 			});
-			await createWorker(input, actor);
-			return `Added ${input.name}.`;
+			const worker = await createWorker(input, actor);
+			return withNoteSuggestions(`Added ${input.name}.`, input.notes ? worker.id : null);
 		});
 	},
 
@@ -157,10 +159,37 @@ export const actions: Actions = {
 				id: data.get('id'),
 				name: data.get('name'),
 				notes: data.get('notes') ?? '',
-				stationIds: data.getAll('stationId')
+				stationIds: data.getAll('stationId'),
+				mainStationIds: data.getAll('mainStationId')
 			});
+			const before = await prisma.worker.findUnique({ where: { id: input.id }, select: { notes: true } });
 			await updateWorker(input, actor);
-			return `Saved ${input.name}.`;
+			// Only re-read notes that changed — each read is a Claude call.
+			return withNoteSuggestions(`Saved ${input.name}.`, input.notes && input.notes !== before?.notes ? input.id : null);
+		});
+	},
+
+	// Notes → suggested rules (2026-10-14): read a person's saved notes again on request.
+	suggestWorkerRules: async ({ request, locals }) => {
+		requireAdminApi(locals.user);
+		const data = await request.formData();
+		return runConfig('people', async () => withNoteSuggestions(null, requireId(data)));
+	},
+
+	// Applies the suggestions an admin ticked. Each is re-validated server-side.
+	applyWorkerRules: async ({ request, locals }) => {
+		const actor = requireAdminApi(locals.user).email;
+		const data = await request.formData();
+		return runConfig('people', async () => {
+			const rules = data.getAll('rule').map((raw) => {
+				try {
+					return JSON.parse(String(raw)) as unknown;
+				} catch {
+					throw new ConfigInputError('Those suggestions are out of date — read the notes again.');
+				}
+			});
+			const count = await applyWorkerRules(requireId(data), rules, actor);
+			return `Applied ${count} rule${count === 1 ? '' : 's'}. The next schedule uses them.`;
 		});
 	},
 
@@ -310,18 +339,36 @@ function parseOrFail<T>(schema: z.ZodType<T>, raw: unknown): T {
 	return parsed.data;
 }
 
+type ConfigResult = string | null | { notice: string | null; suggestions: WorkerRuleSuggestions | null };
+
 /** Runs one Stations/People action; an expected refusal (bad input, name clash,
  *  station still has work on it) comes back as a message on that tab, anything
  *  else is a real error. */
-async function runConfig(screen: 'stations' | 'people', run: () => Promise<string | null>) {
+async function runConfig(screen: 'stations' | 'people', run: () => Promise<ConfigResult>) {
 	try {
-		const notice = await run();
-		return { screen, success: true as const, notice };
+		const result = await run();
+		const { notice, suggestions } = typeof result === 'object' && result !== null ? result : { notice: result, suggestions: null };
+		return { screen, success: true as const, notice, suggestions };
 	} catch (err) {
-		if (err instanceof ConfigInputError || err instanceof StationConfigError || err instanceof WorkerConfigError) {
+		if (err instanceof ConfigInputError || err instanceof StationConfigError || err instanceof WorkerConfigError || err instanceof WorkerNoteRulesError) {
 			return fail(400, { screen, message: err.message });
 		}
 		throw err;
+	}
+}
+
+/** The save's own notice plus what Claude suggests from the person's notes. A failed
+ *  read doesn't undo the save — it's added to the notice instead. */
+async function withNoteSuggestions(notice: string | null, workerId: string | null): Promise<ConfigResult> {
+	if (!workerId) return notice;
+	try {
+		const suggestions = await suggestRulesFromNotes(workerId);
+		const nothing = suggestions.rules.length === 0 && suggestions.notRules.length === 0;
+		return { notice: nothing ? [notice, 'Nothing in the notes changes their settings.'].filter(Boolean).join(' ') : notice, suggestions: nothing ? null : suggestions };
+	} catch (err) {
+		if (!(err instanceof WorkerNoteRulesError)) throw err;
+		if (!notice) throw err;
+		return `${notice} (Couldn't read the notes into rules: ${err.message})`;
 	}
 }
 

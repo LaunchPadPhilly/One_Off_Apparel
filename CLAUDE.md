@@ -346,6 +346,38 @@ Deliberately not linked to `User`: floor staff don't log in. The daily staffing 
 (`engine/planStaffing.ts`) only ever puts a person on a station they're certified on — see
 "Config settings roadmap" under Known open items.
 
+**Press main / catch (client, 2026-10-14).** `worker_certifications.is_main` marks who may run a
+screen-print press (`isPressKind`, kind `screen_print_auto`) as its **main** printer; everyone
+else on a press is a **catch** (Mitch, Nick and Jose are the mains today — data, not code).
+Rules in `planStaffing.ts`: a press runs only with exactly one main (no main in → press closed
+that day); a running press gets its ideal catches — **1 for shirts, 2 when the press's work is
+mostly hoodies** (BULKY weight class, `idealCatches()`) — filled round-robin so every press gets
+its first catch before any gets a second, and **no more than that** (spare people go elsewhere
+or stay free; a human pin can still add extras). Mains are kept off catch/non-press work while
+someone else can do it. Catches still shrink the crew-divisible run time. Only presses have
+main/catch; other stations keep plain crew. `assignment_crew.is_main` records who was the main
+on each planned job. New certifications default to catch (migration
+`press_main_and_catch`) — an admin ticks **Main** per press in Settings → People.
+
+**Notes → suggested rules (2026-10-14).** Saving a person's notes (or "Suggest rules from
+notes") has Claude read them (`config/workerNoteRules.ts`) and suggest only rules the system can
+hold: certify/uncertify, main on a press, days out, a one-day pin. Anything else (part days,
+preferences, recurring patterns) is listed back as "not turned into a rule". Nothing changes
+until an admin ticks suggestions and applies them; they're re-validated server-side. The engine
+then reads the stored settings — Claude never places people.
+
+**People panel on the draft board (2026-10-14).** `/schedule/drafts/[id]`'s right-hand,
+collapsible panel (`PeoplePanel.svelte`) lists everyone for a chosen day: station + Main/Catch/
+Crew, free, pinned or out (avatars = initials on a color hashed from the id,
+`$lib/schedule/people.ts`). Job hover shows each crew member and role. Dragging a person onto a
+station row pins them there for that day (`StaffingPin`, shop-wide) and re-plans **that day's
+crews for this draft** from the jobs actually on it (`schedule/restaffDraftDay.ts` →
+`planStaffingForLoads`): only PROPOSED jobs are re-crewed and re-estimated for the new crew
+size; a longer job pushes the ones after it (`repackDraftDays` kind `restaff`, refused if that
+runs past the shift); APPROVED jobs keep their crew. "Pinned ×" in the panel clears the pin.
+Known limit: crew is stored per job, so someone the planner put on a station with no jobs that
+day shows as "Free".
+
 #### `capacity_calendar`
 How much time each station has open, per day.
 
@@ -613,7 +645,7 @@ wovens have no dependency and are placed like any other job. So:
 | `get_order(hoops_order_id)` | *(2026-10-05)* one order in full: jobs with estimates, the open questions that block confirming it, import notes, schedule slots (read-only, `ORDERS_READ`) |
 | `simulate_change(change)` | checks "what if" (a rush order, a moved job) without actually changing anything |
 | `add_order_note(hoops_order_id, note)` | *(added 2026-09-18, not in the original design)* appends a dated, attributed note to an order — the way a note given in conversation reaches `Order.notes` (and from there the order's page and Reports) without the web form |
-| `get_staffing(from, to)` | *(2026-09-28)* the roster with certifications, who's out, who's pinned, and the crew per station/day on the approved schedule |
+| `get_staffing(from, to)` | *(2026-09-28)* the roster with certifications (and `mainOn`: presses they may run as main, 2026-10-14), notes, who's out, who's pinned, and the crew per station/day on the approved schedule with its `main` |
 | `set_worker_availability(worker_name, from, to, available, reason?)` | *(2026-09-28)* marks a person out/in for days; returns the approved jobs they were on those days. Changes no schedule by itself |
 | `set_worker_station(worker_name, date, station_name?)` | *(2026-09-28)* pins a person to a station for a day (must be certified, not out); omit the station to clear |
 

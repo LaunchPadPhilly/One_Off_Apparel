@@ -1,6 +1,6 @@
 import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY } from '$lib/server/engine/types';
 import { cascadeInsert, cascadeMove, cascadeRemove, type CascadeItem } from '$lib/schedule/repackDay';
-import { SHIFT_START_MIN, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
+import { SHIFT_START_MIN, skipBreak, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
 import type { Prisma } from '../../../../prisma/generated/prisma/client';
 import { LineItemStatus, LineItemType } from '../../../../prisma/generated/prisma/enums';
 
@@ -251,7 +251,11 @@ export async function checkFinisherPlacement(db: Db, draftId: string, lineItemId
 export type DraftMutation =
 	| { kind: 'insert'; assignmentId: string; stationId: string; dayMs: number; targetStartMin: number; durationMin: number }
 	| { kind: 'move'; assignmentId: string; oldStationId: string; oldDayMs: number; newStationId: string; newDayMs: number; targetStartMin: number }
-	| { kind: 'remove'; oldStationId: string; oldDayMs: number; removedStartMin: number; removedDurationMin: number };
+	| { kind: 'remove'; oldStationId: string; oldDayMs: number; removedStartMin: number; removedDurationMin: number }
+	// A day's crew changed (People panel, 2026-10-14), so some jobs on these stations got
+	// longer or shorter. The caller has already saved their new hours; start times stay,
+	// and a job that now overlaps the one before it is pushed just past its end.
+	| { kind: 'restaff'; dayMs: number; stationIds: string[] };
 
 /**
  * Applies the user's mutation to the loaded placements in memory, using the same
@@ -355,6 +359,26 @@ export async function repackDraftDays(tx: Db, draftId: string, mutation: DraftMu
 		const sorted = [...peers].sort((a, b) => a.startMin - b.startMin);
 		sorted.forEach((p, i) => (p.sequenceOrder = i));
 		markTouched(mutation.oldStationId, mutation.oldDayMs);
+	} else if (mutation.kind === 'restaff') {
+		for (const stationId of mutation.stationIds) {
+			const peers = dayPeersOf(ctx, stationId, mutation.dayMs);
+			let previousEnd = SHIFT_START_MIN;
+			for (const p of peers) {
+				const start = skipBreak(Math.max(p.startMin, previousEnd));
+				// Only a job this pushed later is refused — a day that was already overfull
+				// by hand stays as it was.
+				const pushedLater = start > p.startMin;
+				p.startMin = start;
+				if (pushedLater && workingMinutesUntilShiftEnd(p.startMin) < fitMinutes(p.durationMin)) {
+					throw new DraftPlacementError(
+						`With that crew, "${ctx.nodes.get(p.lineItemId)?.design ?? 'a job'}" would run past the end of ${iso(mutation.dayMs)}. Nothing was changed — move a job off that station first.`
+					);
+				}
+				previousEnd = wallClockEnd(p.startMin, p.durationMin);
+			}
+			peers.forEach((p, i) => (p.sequenceOrder = i));
+			markTouched(stationId, mutation.dayMs);
+		}
 	}
 
 	// 2. Settle finisher-hold violations. A print moving later can push its finishers
