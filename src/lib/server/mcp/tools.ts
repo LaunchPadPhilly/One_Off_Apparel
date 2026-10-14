@@ -11,7 +11,7 @@ import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersis
 import { commitDraft, commitSchedule, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { unapproveDraft, unapproveSchedule, UnapproveScheduleError } from '$lib/server/schedule/unapproveSchedule';
 import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
-import { getDraftForTool, GetDraftError, listDraftsForTool } from '$lib/server/schedule/getDraftForTool';
+import { getDraftForTool, GetDraftError, listDraftsForTool, SHOP_SHIFT } from '$lib/server/schedule/getDraftForTool';
 import { listStationsForTool } from '$lib/server/schedule/listStationsForTool';
 import { resolveDraftIdOrShortCode } from '$lib/server/schedule/draftShortCode';
 import { ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
@@ -186,17 +186,23 @@ export const mcpTools: readonly McpToolDefinition[] = [
 	defineTool({
 		name: 'propose_schedule',
 		description:
-			'Builds a suggested schedule with the deterministic engine and saves it as a draft on the board ' +
-			'(Schedule page) — it does not change the live schedule. Started work never moves, and by default nothing ' +
-			'already approved moves either: only new work is placed around it. Pass replanFrom/replanTo to let ' +
-			'approved, not-started jobs dated in that window move: for a rush order use the whole from–to window; ' +
-			'when someone is out use just the days they are out (their jobs move to the next open slots, by due ' +
-			'date). Due date is the hard floor; jobs that cannot make it are flagged at risk, never dropped. Show the ' +
-			'person `changes` (new / moved / kept_at_risk) and `atRisk`, and link `draftPath`; nothing is real until ' +
-			"they approve it (commit_schedule with the draftId, or Approve on the board). At most 28 days. Example: " +
-			"'Maria is out Tuesday, fix the schedule' → { from: '2026-10-06', to: '2026-11-02', replanFrom: " +
-			"'2026-10-06', replanTo: '2026-10-06', reason: 'Maria out Tue' }. Returns { draftId, draftPath, " +
-			'assignmentIds, placedCount, atRisk, changes, reasoning }.',
+			"CREATES A NEW DRAFT — call this only when the person wants a fresh plan from scratch. If they're asking " +
+			"to tweak, re-order, buffer, or re-time jobs inside a draft that already exists (any phrase like 'in that " +
+			"draft', 'the one I'm looking at', 'add 10 minutes between items', 'move this one earlier'), do NOT call " +
+			"propose_schedule — use list_drafts to find the draft (or ask the person for its 6-char short code), " +
+			"get_draft to read its current assignments and the shop's shift timing, and move_assignment per item to " +
+			"adjust in place. Re-proposing silently creates a sibling draft with the same name and strands the one " +
+			"they were editing.\n\nWhen a NEW plan is what's wanted: builds a suggested schedule with the deterministic " +
+			"engine and saves it as a new draft on the board (Schedule page) — it does not change the live schedule. " +
+			'Started work never moves, and by default nothing already approved moves either: only new work is placed ' +
+			'around it. Pass replanFrom/replanTo to let approved, not-started jobs dated in that window move: for a ' +
+			'rush order use the whole from–to window; when someone is out use just the days they are out (their jobs ' +
+			'move to the next open slots, by due date). Due date is the hard floor; jobs that cannot make it are ' +
+			'flagged at risk, never dropped. Show the person `changes` (new / moved / kept_at_risk) and `atRisk`, and ' +
+			"link `draftPath`; nothing is real until they approve it (commit_schedule with the draftId, or Approve on " +
+			"the board). At most 28 days. Example: 'Maria is out Tuesday, fix the schedule' → { from: '2026-10-06', " +
+			"to: '2026-11-02', replanFrom: '2026-10-06', replanTo: '2026-10-06', reason: 'Maria out Tue' }. Returns " +
+			'{ draftId, draftPath, assignmentIds, placedCount, atRisk, changes, reasoning }.',
 		inputSchema: {
 			from: z.iso.date(),
 			to: z.iso.date(),
@@ -304,17 +310,21 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		name: 'list_drafts',
 		description:
 			"Lists schedule drafts on the board — every one that isn't archived, newest first — so Claude can find " +
-			"the draft the person is talking about without seeing the UI. Each entry has `id` (the full cuid used by " +
-			"move_assignment/commit_schedule/unapprove_schedule), `shortCode` (6 chars, e.g. 'AB3C9F', also accepted " +
-			"anywhere `draftId` is), `name`, `status` (DRAFT / PROPOSED / APPROVED), window (startDate + weeks), and " +
-			"counts: totalAssignments, proposedCount, approvedCount. Filter by `status` when the person says " +
-			"\"the approved one\" or \"the proposed drafts\". Example: 'which drafts do we have?' → {}. Returns { drafts }.",
+			"the draft the person is talking about without seeing the UI. CALL THIS FIRST whenever the person refers " +
+			"to \"that draft\", \"the one from today\", \"Automatic schedule — <date>\", or any existing draft they're " +
+			"editing — do not create a new one with propose_schedule just because you can't see what exists. Each entry " +
+			"has `id` (the full cuid used by move_assignment/commit_schedule/unapprove_schedule), `shortCode` (6 chars, " +
+			"e.g. 'AB3C9F', also accepted anywhere `draftId` is), `name`, `status` (DRAFT / PROPOSED / APPROVED), " +
+			"window (startDate + weeks), and counts: totalAssignments, proposedCount, approvedCount. For the draft's " +
+			"actual assignments and the shop's shift timing, call get_draft next. Filter by `status` when the person " +
+			"says \"the approved one\" or \"the proposed drafts\". Example: 'which drafts do we have?' → {}. Returns " +
+			"{ drafts }.",
 		inputSchema: {
 			status: z.enum(ScheduleDraftStatus).optional()
 		},
 		requiredScope: 'SCHEDULE_READ',
 		readOnly: true,
-		handler: async ({ status }) => ({ drafts: await listDraftsForTool(status) })
+		handler: async ({ status }) => ({ drafts: await listDraftsForTool(status), shift: SHOP_SHIFT })
 	}),
 	defineTool({
 		name: 'get_draft',
@@ -323,10 +333,13 @@ export const mcpTools: readonly McpToolDefinition[] = [
 			"only returns the approved live schedule. Pass either the full id or the 6-char shortCode from list_drafts. " +
 			"Returns the draft's metadata plus every assignment in run order (date → station → sequenceOrder) with: " +
 			"`id` (pass to move_assignment), `job` (readable label), `stationName` (pass to move_assignment), `date`, " +
-			"`startMinuteOfDay` (minutes from midnight), `durationMinutes`, `estimatedHours`, `status`. Use this before " +
-			"any batch move — e.g. to add a 10-minute buffer between items — so start times are computed from the " +
-			"draft's actual current layout, not guessed. Example: 'show me what's in that draft' → { draftIdOrCode: " +
-			"'AB3C9F' }. Returns { draft }.",
+			"`startMinuteOfDay` (minutes from midnight), `durationMinutes`, `estimatedHours`, `status`. ALSO returns " +
+			"`shift`: the shop's working day — `startMinuteOfDay` (480 = 8:00 AM), `endMinuteOfDay` (990 = 4:30 PM), " +
+			"and the three breaks (10:00–10:15, 12:30–13:00 lunch, 15:00–15:15) with their start minutes and durations. " +
+			"USE `shift.startMinuteOfDay` AS THE DAY-OPEN BASELINE WHEN COMPUTING MOVES — do not ask the person what " +
+			"time the shift starts, that's in the response. Use this before any batch move (e.g. adding a 10-minute " +
+			"buffer between items) so start times come from the draft's actual current layout, not guessed. Example: " +
+			"'show me what's in that draft' → { draftIdOrCode: 'AB3C9F' }. Returns { draft }.",
 		inputSchema: {
 			draftIdOrCode: z.string().min(1)
 		},
@@ -344,20 +357,24 @@ export const mcpTools: readonly McpToolDefinition[] = [
 	defineTool({
 		name: 'move_assignment',
 		description:
-			"Moves one proposed job inside a draft schedule — changes its station, its day, " +
-			"or its start time without touching the live schedule. Only PROPOSED rows inside the " +
-			"named draft can move; an already-approved job is refused with a clear message (make " +
-			"a new proposal to move it). Row-kind restrictions still apply: a screen-print job " +
-			"only lands on a screen-print station, embroidery on an embroidery station, and so " +
-			"on — both the manual and auto presses share the screen-print kind, so manual↔auto " +
-			"moves are allowed. `stationName` is the station's internal name (as returned by " +
-			"propose_schedule's `changes[].to.station`). `date` is YYYY-MM-DD. `startMinuteOfDay` " +
-			"is optional — minutes from midnight (e.g. 480 = 8:00 AM); when omitted the " +
-			"assignment keeps its current start minute. Peers in the day cascade to preserve " +
-			"gaps the same way a drag-and-drop would. The move is written to the draft only; it " +
-			"becomes live when commit_schedule approves it. Example: 'move that assignment to " +
-			"Screen Print Auto 2 at 10:00 on 2026-10-14' → { draftId: '...', assignmentId: " +
-			"'...', stationName: 'screen_print_auto_2', date: '2026-10-14', startMinuteOfDay: " +
+			"THE TOOL FOR EDITING A DRAFT IN PLACE — use this (not propose_schedule) whenever the person wants to " +
+			"adjust jobs inside a draft that already exists: re-time a slot, re-order items in a station's queue, " +
+			"add buffers between jobs, move something to another station or day. Call it once per assignment with " +
+			"the new absolute `startMinuteOfDay`; peers in the day cascade to preserve gaps the same way a " +
+			"drag-and-drop would.\n\nMoves one proposed job inside a draft — changes its station, its day, or its " +
+			"start time without touching the live schedule. Only PROPOSED rows inside the named draft can move; an " +
+			"already-approved job is refused with a clear message (unapprove_schedule if you want to move it). " +
+			"Row-kind restrictions still apply: a screen-print job only lands on a screen-print station, embroidery " +
+			"on an embroidery station, and so on — both the manual and auto presses share the screen-print kind, " +
+			"so manual↔auto moves are allowed. `stationName` is the station's internal name (as returned by " +
+			"get_draft's `assignments[].stationName` or propose_schedule's `changes[].to.station`). `date` is " +
+			"YYYY-MM-DD. `startMinuteOfDay` is optional — minutes from midnight (e.g. 480 = 8:00 AM, the shop's " +
+			"day-open; see get_draft's `shift` for the full timing); when omitted the assignment keeps its current " +
+			"start minute. Workflow for a batch adjustment: get_draft once (reads shift + current layout), compute " +
+			"the new startMinuteOfDay for each item in the sequence, call move_assignment per item. Do NOT call " +
+			"propose_schedule to re-arrange an existing draft — it creates a new draft and strands the one being " +
+			"edited. Example: 'move that assignment to Screen Print Auto 2 at 10:00 on 2026-10-14' → { draftId: " +
+			"'...', assignmentId: '...', stationName: 'screen_print_auto_2', date: '2026-10-14', startMinuteOfDay: " +
 			"600 }. Returns { id, peers, pushedCount }.",
 		inputSchema: {
 			draftId: z.string().min(1),
@@ -432,7 +449,12 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		description:
 			"Shows who works where: the roster with each person's certified stations, who is out, who is pinned to a " +
 			"station, and the crew on each station/day of the approved schedule. Example question: 'who's on the " +
-			"autos Tuesday?' → { from: '2026-10-06', to: '2026-10-06' }. Returns { roster, out, pinned, approvedCrews }.",
+			"autos Tuesday?' → { from: '2026-10-06', to: '2026-10-06' }. Returns { roster, out, pinned, approvedCrews }. " +
+			'A screen-print press runs with exactly one main printer (roster[].mainOn lists the presses a person may ' +
+			'run as main; approvedCrews[].main names who is) and everyone else on it is a catch; a press with no ' +
+			'main in that day is closed. Read roster[].notes before proposing a schedule: if a note states something ' +
+			'the staffing plan should know (someone out, someone on a station a given day), ask the user and then ' +
+			'use set_worker_availability / set_worker_station — never place people yourself.',
 		inputSchema: getStaffingSchema.shape,
 		requiredScope: 'SCHEDULE_READ',
 		readOnly: true,

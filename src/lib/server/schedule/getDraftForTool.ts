@@ -13,7 +13,28 @@
 import { prisma } from '$lib/server/prisma';
 import { McpUserError } from '$lib/server/mcp/handler';
 import { shortDraftCode, resolveDraftIdOrShortCode } from './draftShortCode';
+import { SHIFT_START_MIN, SHIFT_END_MIN, WORKING_MIN, BREAKS } from '$lib/schedule/shift';
 import { ScheduleAssignmentStatus, ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
+
+/**
+ * The shop's shift model, included in every list_drafts / get_draft response so
+ * Claude in chat doesn't have to ask the user "does your day start at 8 AM?" —
+ * the answer is already in the application and should travel with the data.
+ * See $lib/schedule/shift.ts for the source of truth.
+ */
+export const SHOP_SHIFT = {
+	startMinuteOfDay: SHIFT_START_MIN,
+	endMinuteOfDay: SHIFT_END_MIN,
+	startWallClock: '08:00',
+	endWallClock: '16:30',
+	workingMinutes: WORKING_MIN,
+	workingHours: WORKING_MIN / 60,
+	breaks: BREAKS.map((b) => ({
+		startMinuteOfDay: b.startMin,
+		durationMinutes: b.durationMin,
+		label: b.label
+	}))
+} as const;
 
 export class GetDraftError extends McpUserError {
 	constructor(message: string) {
@@ -104,6 +125,9 @@ export interface DraftAssignmentDetail {
 
 export interface DraftDetail extends DraftSummary {
 	assignments: DraftAssignmentDetail[];
+	/** The shop's shift model — included here so Claude can compute wall-clock moves
+	 *  without asking the user "when does the day start?". */
+	shift: typeof SHOP_SHIFT;
 }
 
 /**
@@ -167,6 +191,7 @@ export async function getDraftForTool(idOrShortCode: string): Promise<DraftDetai
 		totalAssignments: draft.assignments.length,
 		proposedCount: proposed,
 		approvedCount: approved,
-		assignments
+		assignments,
+		shift: SHOP_SHIFT
 	};
 }
