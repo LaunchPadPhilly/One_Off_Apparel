@@ -12,6 +12,7 @@ import { commitDraft, commitSchedule, CommitScheduleError } from '$lib/server/sc
 import { unapproveDraft, unapproveSchedule, UnapproveScheduleError } from '$lib/server/schedule/unapproveSchedule';
 import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
 import { getDraftForTool, GetDraftError, listDraftsForTool } from '$lib/server/schedule/getDraftForTool';
+import { listStationsForTool } from '$lib/server/schedule/listStationsForTool';
 import { resolveDraftIdOrShortCode } from '$lib/server/schedule/draftShortCode';
 import { ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
 import { HOOPS_EXTRACTION_RULES } from '$lib/server/hoops/extractionRules';
@@ -275,6 +276,29 @@ export const mcpTools: readonly McpToolDefinition[] = [
 			}
 			return unapproveSchedule(assignmentIds ?? [], actor);
 		}
+	}),
+	defineTool({
+		name: 'list_stations',
+		description:
+			"Lists every station on the shop floor with the two values a drag-and-drop or move_assignment " +
+			"actually compares: `label` (what people see) and `kind` (which estimate_hours formula it runs — " +
+			"the real gate). Diagnostic for \"why can't I drag this screen-print job onto Screen Print Manual?\" " +
+			"problems: a station's kind must equal the line item's expected kind, so a Manual press labeled " +
+			"\"Screen Print Manual\" is only draggable from an auto press if its kind is `screen_print_auto` too " +
+			"(both share one kind by design — client decision 2026-09-25, same time assumption). An entry with " +
+			"`kindIsRecognized: false` is misconfigured (likely a legacy station from before admin-managed " +
+			"stations, backfilled with `kind = name`); every job will be refused on it until an admin archives " +
+			"and re-creates it with the right kind in Settings → Stations. `hasUnrecognizedKinds: true` on the " +
+			"result means at least one such station exists on this shop. Example question: \"why does the manual " +
+			"press reject screen-print jobs?\" → {}. Returns { stations, hasUnrecognizedKinds }.",
+		inputSchema: {
+			// Set true to also return archived stations (for diagnosing a station that was already
+			// archived — e.g. "did someone archive the DTG press?"). Default false.
+			includeArchived: z.boolean().optional()
+		},
+		requiredScope: 'SCHEDULE_READ',
+		readOnly: true,
+		handler: async ({ includeArchived }) => listStationsForTool(includeArchived ?? false)
 	}),
 	defineTool({
 		name: 'list_drafts',

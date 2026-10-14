@@ -772,7 +772,7 @@
 			const movingStation = movingItem ? expectedStationFor(movingItem) : null;
 			if (movingStation && movingStation !== kindOf(stationName)) {
 				boardNotice = {
-					text: `${stepChip(movingItem!)} belongs on a ${stationDisplayLabel(movingStation)} station, not ${rowLabel(stationName)}.`,
+					text: `${stepChip(movingItem!)} belongs on a ${stationDisplayLabel(movingStation)} station, not ${rowLabel(stationName)} (kind: ${stationDisplayLabel(kindOf(stationName) ?? 'unknown')}). If that destination should accept this job, its kind is set wrong — fix it in Settings → Stations (archive + re-create with the correct kind).`,
 					tone: 'warn'
 				};
 				return;
@@ -861,7 +861,7 @@
 		if (payload.expectedStation && payload.expectedStation !== kindOf(stationName)) {
 			const item = findLineItem(payload.lineItemId);
 			boardNotice = {
-				text: `${item ? stepChip(item) : 'This job'} belongs on a ${stationDisplayLabel(payload.expectedStation)} station, not ${rowLabel(stationName)}.`,
+				text: `${item ? stepChip(item) : 'This job'} belongs on a ${stationDisplayLabel(payload.expectedStation)} station, not ${rowLabel(stationName)} (kind: ${stationDisplayLabel(kindOf(stationName) ?? 'unknown')}). If that destination should accept this job, its kind is set wrong — fix it in Settings → Stations (archive + re-create with the correct kind).`,
 				tone: 'warn'
 			};
 			return;
