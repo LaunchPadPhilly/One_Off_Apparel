@@ -15,7 +15,8 @@ import type { BacklogItem, CapacitySlot } from './types';
  *   panel) stays there.
  * - Screen-print presses (2026-10-14) run with exactly one **main** — a person
  *   certified on that press as main — and everyone else on the press is a **catch**.
- *   A press with no main in that day is closed. A running press gets its ideal
+ *   A press with no main in that day is closed, and nobody is on it — there's no catch
+ *   without a main, so anyone pinned there goes elsewhere. A running press gets its ideal
  *   catches (1 for shirts, 2 when the press's work is mostly hoodies — the BULKY
  *   weight class) before leftovers go anywhere, and no more than that: spare people
  *   go to other stations or stay free (a human can still pin extras onto a press).
@@ -81,14 +82,16 @@ export function staffingKey(workerId: string, date: Date | string): string {
 /**
  * `inputs` plus everyone crewing committed work, pinned to that work's station for its
  * day, so a new plan keeps them there (one person, one station a day). A human pin for
- * the same person and day wins.
+ * the same person and day wins. A press crew with no main isn't a crew (there's no catch
+ * without a main), so it holds nobody.
  */
 export function withCommittedCrew(
 	inputs: StaffingInputs,
-	rows: readonly { stationId: string; date: Date; crew: readonly { workerId: string }[] }[]
+	rows: readonly { stationId: string; stationKind: string; date: Date; crew: readonly { workerId: string; isMain: boolean }[] }[]
 ): StaffingInputs {
 	const pins = new Map(inputs.pins);
 	for (const row of rows) {
+		if (isPressKind(row.stationKind) && !row.crew.some((member) => member.isMain)) continue;
 		for (const { workerId } of row.crew) {
 			const key = staffingKey(workerId, row.date);
 			if (!pins.has(key)) pins.set(key, row.stationId);
@@ -156,7 +159,8 @@ export function idealCatches(load: StationLoad | undefined): number {
  * of this file. Pure: no DB access, inputs are not mutated.
  *
  * @returns the capacity slots that have someone working them, each with
- *   `crewWorkerIds` set (sorted) and, on a press, `mainWorkerId`. Slots nobody is on
+ *   `crewWorkerIds` set (the main first on a press, then by id) and, on a press,
+ *   `mainWorkerId`. Slots nobody is on
  *   (or a press with no main) are dropped — that station is closed that day. With an
  *   empty roster, a copy of `capacity` unchanged.
  */
@@ -230,22 +234,37 @@ export function planStaffingForLoads(loads: ReadonlyMap<string, StationLoad>, ca
 		//    re-counted after each placement, since taking someone changes who's left. On a
 		//    tie a press goes first: opening it also puts its catches to work, where the
 		//    other station would take the only main and leave them idle.
-		const needsLead = new Set([...stationIdsToday].filter((id) => hasWork(id) && !isOpen(id)));
-		while (needsLead.size) {
-			const ranked = [...needsLead]
-				.map((id) => ({ id, count: eligibleLeads(id).length }))
-				.sort(
-					(a, b) =>
-						a.count - b.count ||
-						Number(isPress.get(b.id)) - Number(isPress.get(a.id)) ||
-						(loads.get(b.id)?.total ?? 0) - (loads.get(a.id)?.total ?? 0) ||
-						a.id.localeCompare(b.id)
-				);
-			const { id: stationId } = ranked.find((r) => r.count > 0) ?? ranked[0];
-			needsLead.delete(stationId);
-			const person = eligibleLeads(stationId)[0];
-			if (person) place(person, stationId); // else nobody who can lead it is in today — it stays closed
+		const openStations = () => {
+			const needsLead = new Set([...stationIdsToday].filter((id) => hasWork(id) && !isOpen(id)));
+			while (needsLead.size) {
+				const ranked = [...needsLead]
+					.map((id) => ({ id, count: eligibleLeads(id).length }))
+					.sort(
+						(a, b) =>
+							a.count - b.count ||
+							Number(isPress.get(b.id)) - Number(isPress.get(a.id)) ||
+							(loads.get(b.id)?.total ?? 0) - (loads.get(a.id)?.total ?? 0) ||
+							a.id.localeCompare(b.id)
+					);
+				const { id: stationId } = ranked.find((r) => r.count > 0) ?? ranked[0];
+				needsLead.delete(stationId);
+				const person = eligibleLeads(stationId)[0];
+				if (person) place(person, stationId); // else nobody who can lead it is in today — it stays closed
+			}
+		};
+		openStations();
+
+		// A catch only assists a main (client, 2026-10-14): anyone pinned to a press that
+		// got no main can't work there, so they go back to the free pool — and may open a
+		// station that's still closed.
+		let released = false;
+		for (const stationId of stationIdsToday) {
+			if (!isPress.get(stationId) || main.has(stationId) || crew.get(stationId)!.length === 0) continue;
+			for (const workerId of crew.get(stationId)!) free.add(workerId);
+			crew.set(stationId, []);
+			released = true;
 		}
+		if (released) openStations();
 
 		// 3. Running presses get their ideal catches one round at a time, busiest press
 		//    first — every press gets its first catch before any gets a second.
@@ -280,12 +299,12 @@ export function planStaffingForLoads(loads: ReadonlyMap<string, StationLoad>, ca
 			if (best) place(worker, best);
 		}
 
-		// 5. A station nobody can lead has no capacity today.
+		// 5. A station nobody can lead has no capacity today. Crew is listed main first.
 		for (const slot of slots) {
 			if (!isOpen(slot.stationId)) continue;
-			const people = crew.get(slot.stationId)!;
 			const mainId = main.get(slot.stationId);
-			result.push({ ...slot, crewWorkerIds: [...people].sort(), ...(mainId ? { mainWorkerId: mainId } : {}) });
+			const others = crew.get(slot.stationId)!.filter((id) => id !== mainId).sort();
+			result.push({ ...slot, crewWorkerIds: mainId ? [mainId, ...others] : others, ...(mainId ? { mainWorkerId: mainId } : {}) });
 		}
 	}
 	return result;

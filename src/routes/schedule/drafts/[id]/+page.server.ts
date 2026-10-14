@@ -9,6 +9,8 @@ import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { pressSafeCrew } from '$lib/schedule/people';
+import { isPressKind } from '$lib/schedule/stationKinds';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 import {
 	OrderStatus,
@@ -128,7 +130,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			where: { scheduleDraftId: draft.id },
 			include: {
 				lineItem: { select: { id: true, orderId: true } },
-				station: { select: { id: true, name: true } },
+				station: { select: { id: true, name: true, kind: true } },
 				// The day's crew on this job (planStaffing.ts, 2026-09-28), with who's the
 				// press's main printer (2026-10-14).
 				crew: { select: { isMain: true, worker: { select: { id: true, name: true } } } }
@@ -252,9 +254,13 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			startMinuteOfDay: a.startMinuteOfDay ?? 8 * 60,
 			estimatedHours: a.estimatedHours,
 			status: a.status,
-			crew: a.crew
-				.map((member) => ({ id: member.worker.id, name: member.worker.name, isMain: member.isMain }))
-				.sort((x, y) => Number(y.isMain) - Number(x.isMain) || x.name.localeCompare(y.name))
+			// Main first; a press crew with no main isn't shown (no catch without a main) —
+			// noMain tells the board to say so instead.
+			crew: pressSafeCrew(
+				a.crew.map((member) => ({ id: member.worker.id, name: member.worker.name, isMain: member.isMain })),
+				isPressKind(a.station.kind)
+			),
+			noMain: isPressKind(a.station.kind) && a.crew.length > 0 && !a.crew.some((member) => member.isMain)
 		})),
 		stationNames,
 		// name → display label / formula kind, for the board's row labels, the
