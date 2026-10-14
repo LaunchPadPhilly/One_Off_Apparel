@@ -1,6 +1,6 @@
 import { prisma } from '$lib/server/prisma';
 import { estimateHours, EstimationError } from '$lib/server/engine/estimateHours';
-import { addLoad, planStaffingForLoads, type StationLoad } from '$lib/server/engine/planStaffing';
+import { addLoad, planStaffingForLoads, withCommittedCrew, type StationLoad } from '$lib/server/engine/planStaffing';
 import { fetchStaffingInputs } from '$lib/server/schedule/buildBacklogAndCapacity';
 import { pinWorker, StaffingError } from '$lib/server/schedule/staffing';
 import { DraftPlacementError, repackDraftDays, type PlacementPosition } from '$lib/server/schedule/draftDependencies';
@@ -23,7 +23,9 @@ import type { StaffingInputs } from '$lib/server/engine/planStaffing';
  * Only PROPOSED jobs are re-crewed: their crew is replaced and their hours re-estimated
  * for the new crew, and a job that got longer pushes the jobs after it (refused if that
  * would run past the end of the day). APPROVED jobs keep the crew and hours they were
- * approved with — changing those is a new plan and a new approval.
+ * approved with — changing those is a new plan and a new approval — and the people on
+ * any committed job that day (this draft or another) stay on its station, so nobody is
+ * planned onto two stations in one day.
  *
  * Pins are shop-wide (StaffingPin), so every later engine run honours them too; other
  * drafts aren't re-crewed until they're re-planned.
@@ -52,14 +54,22 @@ interface DayOutcome {
 /** Re-plans one day of one draft inside the caller's transaction (see the file comment). */
 async function restaffDay(tx: Tx, draftId: string, isoDay: string, staffing: StaffingInputs): Promise<DayOutcome> {
 	const day = new Date(`${isoDay}T00:00:00Z`);
-	const [stations, assignments, pins] = await Promise.all([
+	const [stations, assignments, pins, committed] = await Promise.all([
 		tx.station.findMany({ where: { archivedAt: null }, select: { id: true, name: true, label: true, kind: true } }),
 		tx.scheduleAssignment.findMany({
 			where: { scheduleDraftId: draftId, date: day, status: { in: [ScheduleAssignmentStatus.PROPOSED, ScheduleAssignmentStatus.APPROVED] } },
 			include: { lineItem: true }
 		}),
 		// Read inside the transaction so a pin saved just before counts.
-		tx.staffingPin.findMany({ where: { date: day }, select: { workerId: true, stationId: true } })
+		tx.staffingPin.findMany({ where: { date: day }, select: { workerId: true, stationId: true } }),
+		// Committed work that day in any draft: its crew stays on its station.
+		tx.scheduleAssignment.findMany({
+			where: {
+				date: day,
+				status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS, ScheduleAssignmentStatus.COMPLETE] }
+			},
+			select: { lineItemId: true, stationId: true, date: true, status: true, startedAt: true, crew: { select: { workerId: true } } }
+		})
 	]);
 	if (staffing.workers.length === 0) return { peers: [], pushedCount: 0, closed: [], approvedKept: 0 };
 
@@ -75,7 +85,12 @@ async function restaffDay(tx: Tx, draftId: string, isoDay: string, staffing: Sta
 		}
 	}
 	const slots: CapacitySlot[] = stations.map((s) => ({ stationId: s.id, stationName: s.name, stationKind: s.kind, date: day, availableHrs: 0 }));
-	const plan = planStaffingForLoads(loads, slots, { ...staffing, pins: new Map(pins.map((p) => [`${p.workerId}|${isoDay}`, p.stationId])) });
+	// An approved, not-started job this draft re-places is replaced on approval
+	// (commitSchedule.ts), so its old crew isn't held there.
+	const proposedLineItemIds = new Set(assignments.filter((a) => a.status === ScheduleAssignmentStatus.PROPOSED).map((a) => a.lineItemId));
+	const staying = committed.filter((row) => !(row.status === ScheduleAssignmentStatus.APPROVED && row.startedAt === null && proposedLineItemIds.has(row.lineItemId)));
+	const humanPins = new Map(pins.map((p) => [`${p.workerId}|${isoDay}`, p.stationId]));
+	const plan = planStaffingForLoads(loads, slots, withCommittedCrew({ ...staffing, pins: humanPins }, staying));
 	const planByStation = new Map(plan.map((slot) => [slot.stationId, slot]));
 
 	// Re-crew and re-estimate every proposed job.
