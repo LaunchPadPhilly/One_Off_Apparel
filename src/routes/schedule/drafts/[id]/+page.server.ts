@@ -4,7 +4,7 @@ import { deleteDraft, getDraft } from '$lib/server/schedule/draft';
 import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
 import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
-import { pinAndRestaffDraftDay, RestaffError } from '$lib/server/schedule/restaffDraftDay';
+import { pinAndRestaffDraftDay, replanDraftCrews, RestaffError } from '$lib/server/schedule/restaffDraftDay';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
@@ -500,6 +500,16 @@ export const actions: Actions = {
 			if (err instanceof RestaffError) return fail(409, { message: err.message });
 			throw err;
 		}
+	},
+
+	// "Re-plan crews" (2026-10-14): re-staff every day with proposed jobs against the
+	// current roster, certifications, pins and main/catch rules.
+	replanCrews: async ({ params, locals, url }) => {
+		requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		const result = await replanDraftCrews(params.id);
+		return { success: true as const, notice: result.notice };
 	},
 
 	updateOrderDisplay: async ({ request, locals, url }) => {

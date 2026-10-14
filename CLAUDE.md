@@ -354,7 +354,10 @@ that day); a running press gets its ideal catches — **1 for shirts, 2 when the
 mostly hoodies** (BULKY weight class, `idealCatches()`) — filled round-robin so every press gets
 its first catch before any gets a second, and **no more than that** (spare people go elsewhere
 or stay free; a human pin can still add extras). Mains are kept off catch/non-press work while
-someone else can do it. Catches still shrink the crew-divisible run time. Only presses have
+someone else can do it, and a main can catch for another main. **A catch halves the whole press
+job** (setup included): main + 1 or 2 catches = job hours ÷ 2; a second catch doesn't halve it
+again; main alone = full time (`estimateHours`, client 2026-10-14 — replaces the run-only
+division for presses). Only presses have
 main/catch; other stations keep plain crew. `assignment_crew.is_main` records who was the main
 on each planned job. New certifications default to catch (migration
 `press_main_and_catch`) — an admin ticks **Main** per press in Settings → People.
@@ -375,6 +378,11 @@ crews for this draft** from the jobs actually on it (`schedule/restaffDraftDay.t
 `planStaffingForLoads`): only PROPOSED jobs are re-crewed and re-estimated for the new crew
 size; a longer job pushes the ones after it (`repackDraftDays` kind `restaff`, refused if that
 runs past the shift); APPROVED jobs keep their crew. "Pinned ×" in the panel clears the pin.
+**Re-plan crews** (panel button, `replanDraftCrews`) does the same for every day of the draft
+with proposed jobs — use it on drafts made before the roster or these rules existed.
+**No weekends (2026-10-14):** the default capacity never opens a Saturday or Sunday
+(`isWeekendDay`, `$lib/schedule/defaultCapacity.ts`; a real CapacityCalendar row still wins),
+and the board hides weekend days unless a job is already on one.
 Known limit: crew is stored per job, so someone the planner put on a station with no jobs that
 day shows as "Free".
 
@@ -709,7 +717,9 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     screen print's `run` term; embroidery's **setup & boxing only** (client, 2026-09-28 —
     thread changes, hooping, load/unload, cleanup and sewing stay fixed); every finishing
     formula entirely; DTF/DTG entered hours entirely. OTHER jobs' entered hours stay fixed
-    (not decided yet). There is **no max crew per station** — the floor is organic.
+    (not decided yet). There is **no max crew per station** — the floor is organic —
+    **except screen-print presses (2026-10-14):** main + ideal catches, and any catch
+    halves the whole job once; see "Press main / catch".
   - **Engine picks people** — `engine/planStaffing.ts`, deterministic. One person works
     one station for the whole day; only certified people, never someone marked out;
     human pins kept; every station with work gets ≥1 person (scarcest station first,
@@ -830,7 +840,7 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   since the deterministic engine saw zero capacity everywhere even though the drafts
   workspace's own timeline was already *displaying* that same 7.5h/day default as a
   cosmetic fallback. This is a real, visible business assumption (every known station
-  open every day, including weekends, until real numbers are entered), not an invented
+  open every weekday — weekends closed since 2026-10-14 — until real numbers are entered), not an invented
   fact — a real `CapacityCalendar` row always overrides it the moment one exists. (4)
   An order whose due date already fell before the draft's window even starts (a real,
   recurring case — "today" always moves forward) was briefly given a "place it anyway,

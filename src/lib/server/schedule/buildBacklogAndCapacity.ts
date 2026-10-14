@@ -12,7 +12,7 @@ import {
 	OrderStatus
 } from '../../../../prisma/generated/prisma/enums';
 import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
-import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { DEFAULT_STATION_DAY_HOURS, isWeekendDay } from '$lib/schedule/defaultCapacity';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
 import type { DateRange } from './types';
@@ -210,7 +210,7 @@ export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
 	for (const station of stations) {
 		for (const day of enumerateDays(range)) {
 			const key = `${station.id}__${day}`;
-			if (existingKeys.has(key)) continue;
+			if (existingKeys.has(key) || isWeekendDay(day)) continue; // no default weekend work
 			defaultSlots.push({ stationId: station.id, stationName: station.name, stationKind: station.kind, date: new Date(`${day}T00:00:00Z`), availableHrs: DEFAULT_STATION_DAY_HOURS });
 		}
 	}

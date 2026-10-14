@@ -25,6 +25,7 @@
 		isAdmin,
 		busy,
 		onUnpin,
+		onReplan,
 		onWorkerDragStart,
 		onWorkerDragEnd
 	}: {
@@ -38,6 +39,8 @@
 		isAdmin: boolean;
 		busy: boolean;
 		onUnpin: (workerId: string, date: string) => void;
+		/** Re-staff every day of the draft with the current roster and rules. */
+		onReplan: () => void;
 		onWorkerDragStart: (workerId: string) => void;
 		onWorkerDragEnd: () => void;
 	} = $props();
@@ -167,9 +170,20 @@
 			</select>
 		</label>
 
-		<p class="people__summary muted">
-			{counts.working} working · {counts.free} free · {counts.out} out
-		</p>
+		<div class="people__summary-row">
+			<p class="people__summary muted">
+				{counts.working} working · {counts.free} free · {counts.out} out
+			</p>
+			{#if people.length > 0}
+				<button
+					type="button"
+					class="people__replan"
+					disabled={busy}
+					onclick={onReplan}
+					title="Re-pick every day's crew for this draft's proposed jobs from the current roster, certifications and main/catch rules"
+				>{busy ? 'Working…' : 'Re-plan crews'}</button>
+			{/if}
+		</div>
 
 		{#if noMains}
 			<p class="people__warn" role="status">
@@ -322,6 +336,29 @@
 		color: var(--ink-900);
 		border-radius: var(--radius-sm);
 		font-size: var(--fs-sm);
+	}
+
+	.people__summary-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.people__replan {
+		background: var(--secondary-bg);
+		border: 1px solid var(--secondary-border);
+		box-shadow: none;
+		color: var(--ink-700);
+		border-radius: var(--radius-sm);
+		padding: 0.2rem 0.55rem;
+		font-size: var(--fs-xs);
+		cursor: pointer;
+		white-space: nowrap;
+	}
+
+	.people__replan:hover:not(:disabled) {
+		background: var(--secondary-hover);
 	}
 
 	.people__summary,

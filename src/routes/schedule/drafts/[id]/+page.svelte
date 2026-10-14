@@ -9,6 +9,7 @@
 	import { isFinishingKind, isPressKind } from '$lib/schedule/stationKinds';
 	import { avatarHue, crewRoleLabel, initials } from '$lib/schedule/people';
 	import { countScreens } from '$lib/schedule/screenCount';
+	import { isWeekendDay } from '$lib/schedule/defaultCapacity';
 	import { shortDraftCode } from '$lib/schedule/shortDraftCode';
 	import { deserialize } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
@@ -144,9 +145,6 @@
 	}
 
 	let totalWeeks = $derived(Math.max(1, Math.ceil(data.capacity.length / 7)));
-	let visibleDays = $derived(
-		daysViewMode === 'week' ? data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7) : data.capacity
-	);
 	let weekRangeLabel = $derived.by(() => {
 		const weekDays = data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7);
 		if (weekDays.length === 0) return '';
@@ -515,6 +513,15 @@
 	// Initial copy only; later server changes are applied by hand (or re-hydrated after a crew change).
 	let placements = $state<Placement[]>(untrack(() => hydratePlacements(data.assignments)));
 
+	// No weekend work (client, 2026-10-14): Saturdays and Sundays are hidden unless a
+	// job is already on one, so nothing placed there disappears.
+	let daysWithJobs = $derived(new Set(placements.map((p) => p.date)));
+	let visibleDays = $derived(
+		(daysViewMode === 'week' ? data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7) : data.capacity).filter(
+			(day) => !isWeekendDay(day.date) || daysWithJobs.has(day.date)
+		)
+	);
+
 	/** "Main" / "Catch" on a press, "Crew" anywhere else. */
 	function roleOf(member: CrewMember, stationName: string): string {
 		return crewRoleLabel(isPressKind(kindOf(stationName)) ? (member.isMain ? 'main' : 'catch') : 'crew');
@@ -569,9 +576,14 @@
 		body.set('workerId', workerId);
 		body.set('date', date);
 		if (stationName) body.set('stationName', stationName);
+		await submitStaffing('pinWorker', body);
+	}
+	// Both staffing actions re-crew jobs (and so change their lengths) on the server,
+	// so the board reloads its placements afterwards.
+	async function submitStaffing(action: 'pinWorker' | 'replanCrews', body: FormData) {
 		staffingBusy = true;
 		try {
-			const res = await fetch('?/pinWorker', { method: 'POST', body, headers: { 'x-sveltekit-action': 'true' } });
+			const res = await fetch(`?/${action}`, { method: 'POST', body, headers: { 'x-sveltekit-action': 'true' } });
 			const result = deserialize(await res.text());
 			if (result.type === 'success') {
 				await invalidateAll();
@@ -583,7 +595,7 @@
 				boardNotice = { text: message ?? 'Couldn’t change the crew — try again.', tone: 'warn' };
 			}
 		} catch (e) {
-			console.error('pinWorker failed', e);
+			console.error(`${action} failed`, e);
 			boardNotice = { text: 'Couldn’t change the crew — try again.', tone: 'warn' };
 		} finally {
 			staffingBusy = false;
@@ -1625,6 +1637,7 @@
 			isAdmin={Boolean(data.user?.isAdmin)}
 			busy={staffingBusy}
 			onUnpin={(workerId, date) => submitPin(workerId, date, null)}
+			onReplan={() => submitStaffing('replanCrews', new FormData())}
 			onWorkerDragStart={(workerId) => (draggingWorkerId = workerId)}
 			onWorkerDragEnd={() => {
 				draggingWorkerId = null;
