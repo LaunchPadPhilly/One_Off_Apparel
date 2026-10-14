@@ -350,7 +350,11 @@ Deliberately not linked to `User`: floor staff don't log in. The daily staffing 
 screen-print press (`isPressKind`, kind `screen_print_auto`) as its **main** printer; everyone
 else on a press is a **catch** (Mitch, Nick and Jose are the mains today — data, not code).
 Rules in `planStaffing.ts`: a press runs only with exactly one main (no main in → press closed
-that day); a running press gets its ideal catches — **1 for shirts, 2 when the press's work is
+that day). **There is never a catch without a main** (client, 2026-10-14 — the main does the
+print, a catch assists them): someone pinned to a press that gets no main is released to work
+elsewhere, a committed press crew with no main holds nobody, and the board, People panel and
+`get_staffing` show a mainless press crew as no crew (`pressSafeCrew`, `$lib/schedule/people.ts`)
+with a "no main printer — re-plan" note. The main is always listed first; a running press gets its ideal catches — **1 for shirts, 2 when the press's work is
 mostly hoodies** (BULKY weight class, `idealCatches()`) — filled round-robin so every press gets
 its first catch before any gets a second, and **no more than that** (spare people go elsewhere
 or stay free; a human pin can still add extras). Mains are kept off catch/non-press work while

@@ -491,8 +491,11 @@
 		startMin: number;
 		durationMin: number;
 		// The day's crew on this job (planStaffing.ts, 2026-09-28), main printer first
-		// on a press (2026-10-14). Empty for hand-placed or hand-moved jobs.
+		// on a press (2026-10-14). Empty for hand-placed or hand-moved jobs, and for a
+		// press job whose crew had no main (there's no catch without a main).
 		crew: CrewMember[];
+		/** A press job planned without a main printer — its crew isn't shown. */
+		noMain?: boolean;
 	};
 	type CrewMember = { id: string; name: string; isMain: boolean };
 	// Hydrate from server: each ScheduleAssignment tied to this draft becomes a
@@ -507,7 +510,8 @@
 			stationName: a.stationName,
 			startMin: a.startMinuteOfDay,
 			durationMin: Math.max(15, Math.round(a.estimatedHours * 60)),
-			crew: a.crew
+			crew: a.crew,
+			noMain: a.noMain
 		}));
 	}
 	// Initial copy only; later server changes are applied by hand (or re-hydrated after a crew change).
@@ -920,7 +924,7 @@
 				placements = placements.map((p) => {
 					if (p.id === existing.id) {
 						const next = insertCascade.placements.find((q) => q.id === existing.id)!;
-						return { ...p, date, stationName, startMin: next.startMin, crew: [] };
+						return { ...p, date, stationName, startMin: next.startMin, crew: [], noMain: false };
 					}
 					const next = newStarts.get(p.id);
 					return next != null ? { ...p, startMin: next } : p;
@@ -1532,6 +1536,8 @@
 																				</li>
 																			{/each}
 																		</ul>
+																	{:else if placement.noMain}
+																		<div class="placement__details-waits">No main printer on this press, so no crew — a catch only assists a main. Tick Main for the press operators in Settings → People, then Re-plan crews.</div>
 																	{:else if data.people.length}
 																		<div class="placement__details-waits">No crew planned — drag someone from People onto this row.</div>
 																	{/if}

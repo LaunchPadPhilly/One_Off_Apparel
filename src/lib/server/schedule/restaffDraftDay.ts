@@ -68,7 +68,7 @@ async function restaffDay(tx: Tx, draftId: string, isoDay: string, staffing: Sta
 				date: day,
 				status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS, ScheduleAssignmentStatus.COMPLETE] }
 			},
-			select: { lineItemId: true, stationId: true, date: true, status: true, startedAt: true, crew: { select: { workerId: true } } }
+			select: { lineItemId: true, stationId: true, date: true, status: true, startedAt: true, station: { select: { kind: true } }, crew: { select: { workerId: true, isMain: true } } }
 		})
 	]);
 	if (staffing.workers.length === 0) return { peers: [], pushedCount: 0, closed: [], approvedKept: 0 };
@@ -88,7 +88,9 @@ async function restaffDay(tx: Tx, draftId: string, isoDay: string, staffing: Sta
 	// An approved, not-started job this draft re-places is replaced on approval
 	// (commitSchedule.ts), so its old crew isn't held there.
 	const proposedLineItemIds = new Set(assignments.filter((a) => a.status === ScheduleAssignmentStatus.PROPOSED).map((a) => a.lineItemId));
-	const staying = committed.filter((row) => !(row.status === ScheduleAssignmentStatus.APPROVED && row.startedAt === null && proposedLineItemIds.has(row.lineItemId)));
+	const staying = committed
+		.filter((row) => !(row.status === ScheduleAssignmentStatus.APPROVED && row.startedAt === null && proposedLineItemIds.has(row.lineItemId)))
+		.map((row) => ({ ...row, stationKind: row.station.kind }));
 	const humanPins = new Map(pins.map((p) => [`${p.workerId}|${isoDay}`, p.stationId]));
 	const plan = planStaffingForLoads(loads, slots, withCommittedCrew({ ...staffing, pins: humanPins }, staying));
 	const planByStation = new Map(plan.map((slot) => [slot.stationId, slot]));
