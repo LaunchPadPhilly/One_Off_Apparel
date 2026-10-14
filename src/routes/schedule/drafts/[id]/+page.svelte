@@ -7,6 +7,7 @@
 	import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 	import { isFinishingKind } from '$lib/schedule/stationKinds';
 	import { countScreens } from '$lib/schedule/screenCount';
+	import { shortDraftCode } from '$lib/schedule/shortDraftCode';
 	import { deserialize } from '$app/forms';
 	import type { PageProps } from './$types';
 
@@ -968,6 +969,12 @@
 			<span class="eyebrow">Schedule draft</span>
 			<h1>{data.draft.name}</h1>
 			<p class="muted meta">
+				<code
+					class="draft-code"
+					title="Short code — paste into Claude chat to refer to this draft unambiguously (same-day auto-drafts share names)"
+					>{shortDraftCode(data.draft.id)}</code
+				>
+				·
 				{data.draft.startDate} → {data.draft.endDate} ·
 				{data.draft.weeks} {data.draft.weeks === 1 ? 'week' : 'weeks'} ·
 				{strategyLabel(data.draft.strategy)}
