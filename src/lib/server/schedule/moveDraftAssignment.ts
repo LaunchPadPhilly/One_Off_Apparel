@@ -70,7 +70,7 @@ function stationMismatchMessage(
 	}
 	const expected = expectedStationFor(item);
 	if (!expected || expected === station.kind) return null;
-	return `This job belongs on a ${stationDisplayLabel(expected)} station, not ${station.label}.`;
+	return `This job belongs on a ${stationDisplayLabel(expected)} station, not ${station.label} (kind: ${stationDisplayLabel(station.kind)}). If that destination should accept this job, its kind is set wrong — fix it in Settings → Stations (archive + re-create with the correct kind).`;
 }
 
 function parseDate(iso: string): Date {

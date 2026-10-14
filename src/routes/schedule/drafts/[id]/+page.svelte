@@ -7,6 +7,7 @@
 	import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 	import { isFinishingKind } from '$lib/schedule/stationKinds';
 	import { countScreens } from '$lib/schedule/screenCount';
+	import { shortDraftCode } from '$lib/schedule/shortDraftCode';
 	import { deserialize } from '$app/forms';
 	import type { PageProps } from './$types';
 
@@ -771,7 +772,7 @@
 			const movingStation = movingItem ? expectedStationFor(movingItem) : null;
 			if (movingStation && movingStation !== kindOf(stationName)) {
 				boardNotice = {
-					text: `${stepChip(movingItem!)} belongs on a ${stationDisplayLabel(movingStation)} station, not ${rowLabel(stationName)}.`,
+					text: `${stepChip(movingItem!)} belongs on a ${stationDisplayLabel(movingStation)} station, not ${rowLabel(stationName)} (kind: ${stationDisplayLabel(kindOf(stationName) ?? 'unknown')}). If that destination should accept this job, its kind is set wrong — fix it in Settings → Stations (archive + re-create with the correct kind).`,
 					tone: 'warn'
 				};
 				return;
@@ -860,7 +861,7 @@
 		if (payload.expectedStation && payload.expectedStation !== kindOf(stationName)) {
 			const item = findLineItem(payload.lineItemId);
 			boardNotice = {
-				text: `${item ? stepChip(item) : 'This job'} belongs on a ${stationDisplayLabel(payload.expectedStation)} station, not ${rowLabel(stationName)}.`,
+				text: `${item ? stepChip(item) : 'This job'} belongs on a ${stationDisplayLabel(payload.expectedStation)} station, not ${rowLabel(stationName)} (kind: ${stationDisplayLabel(kindOf(stationName) ?? 'unknown')}). If that destination should accept this job, its kind is set wrong — fix it in Settings → Stations (archive + re-create with the correct kind).`,
 				tone: 'warn'
 			};
 			return;
@@ -968,6 +969,12 @@
 			<span class="eyebrow">Schedule draft</span>
 			<h1>{data.draft.name}</h1>
 			<p class="muted meta">
+				<code
+					class="draft-code"
+					title="Short code — paste into Claude chat to refer to this draft unambiguously (same-day auto-drafts share names)"
+					>{shortDraftCode(data.draft.id)}</code
+				>
+				·
 				{data.draft.startDate} → {data.draft.endDate} ·
 				{data.draft.weeks} {data.draft.weeks === 1 ? 'week' : 'weeks'} ·
 				{strategyLabel(data.draft.strategy)}

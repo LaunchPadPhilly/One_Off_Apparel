@@ -5,6 +5,7 @@
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig } from '$lib/appConfig';
 	import { screensByCalendarWeek } from '$lib/schedule/screenCount';
+	import { shortDraftCode } from '$lib/schedule/shortDraftCode';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
@@ -187,7 +188,12 @@
 								<span class="badge">{draft.status}</span>
 							</div>
 							<div class="draft-card__meta muted">
-								{draft.startDate} · {draft.weeks} {draft.weeks === 1 ? 'week' : 'weeks'} ·
+								<code
+									class="draft-card__code"
+									title="Short code — paste into Claude chat to refer to this draft unambiguously (same-day auto-drafts share names)"
+									>{shortDraftCode(draft.id)}</code
+								>
+								· {draft.startDate} · {draft.weeks} {draft.weeks === 1 ? 'week' : 'weeks'} ·
 								{draft.strategy === 'BATCH_OPTIMIZE' ? 'Batch-optimize' : 'Strict due-date'}
 							</div>
 						</a>

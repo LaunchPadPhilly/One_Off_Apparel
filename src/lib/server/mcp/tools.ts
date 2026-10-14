@@ -11,6 +11,10 @@ import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersis
 import { commitDraft, commitSchedule, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { unapproveDraft, unapproveSchedule, UnapproveScheduleError } from '$lib/server/schedule/unapproveSchedule';
 import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
+import { getDraftForTool, GetDraftError, listDraftsForTool } from '$lib/server/schedule/getDraftForTool';
+import { listStationsForTool } from '$lib/server/schedule/listStationsForTool';
+import { resolveDraftIdOrShortCode } from '$lib/server/schedule/draftShortCode';
+import { ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
 import { HOOPS_EXTRACTION_RULES } from '$lib/server/hoops/extractionRules';
 import { getOrder, getOrderSchema, listOrders, listOrdersSchema } from '$lib/server/hoops/orderLookup';
 import { simulateChange, simulateChangeSchema } from '$lib/server/schedule/simulateChange';
@@ -46,6 +50,13 @@ import {
  *    tagged-template parameters, never string interpolation.
  *  - Validate input with the Zod shape; the handler receives the parsed object.
  *  - Never return secrets, raw upstream payloads, or another user's private data.
+ *
+ * list_drafts / get_draft (added 2026-10-14) are the chat-side read tools for drafts —
+ * get_schedule only sees the approved live schedule, so without these Claude has no way
+ * to find a draft by name or inspect what's inside one. Both accept a draft's full cuid
+ * OR its 6-char shortCode (draftShortCode.ts), and move_assignment / commit_schedule /
+ * unapprove_schedule now resolve the same short code so a code read from the UI can be
+ * pasted straight into any write-side draft tool.
  *
  * These are the tools in CLAUDE.md's "Domain MCP tools" table. import_hoops_export and
  * confirm_import are the persistence half of the Hoops import feature
@@ -83,6 +94,19 @@ async function approverFor(principal: Principal, givenName: string | undefined):
 
 function defineTool<Shape extends z.ZodRawShape>(tool: McpToolDefinition<Shape>): McpToolDefinition {
 	return tool as unknown as McpToolDefinition;
+}
+
+/**
+ * Resolves a draft id or 6-char short code (as returned by list_drafts / get_draft) to a
+ * full id, so every write-side draft tool — move_assignment, commit_schedule,
+ * unapprove_schedule — accepts whichever one the person has in hand. Throws a user-facing
+ * error on miss or ambiguity, matching each caller's own error class.
+ */
+async function resolveDraftIdForTool<E extends Error>(idOrCode: string, ErrorClass: new (message: string) => E): Promise<string> {
+	const resolved = await resolveDraftIdOrShortCode(idOrCode);
+	if (resolved === null) throw new ErrorClass(`No schedule draft matches "${idOrCode}". Try list_drafts.`);
+	if (resolved === 'AMBIGUOUS') throw new ErrorClass(`Short code "${idOrCode}" matches more than one draft; use the full id from list_drafts.`);
+	return resolved;
 }
 
 /** Every tool this MCP server registers. Each tool's `principal` argument (when used)
@@ -214,7 +238,11 @@ export const mcpTools: readonly McpToolDefinition[] = [
 				throw new CommitScheduleError('Give either a draftId or assignmentIds (not both).');
 			}
 			const approver = await approverFor(principal, approvedBy);
-			return draftId ? commitDraft(draftId, approver) : commitSchedule(assignmentIds ?? [], approver);
+			if (draftId) {
+				const resolvedId = await resolveDraftIdForTool(draftId, CommitScheduleError);
+				return commitDraft(resolvedId, approver);
+			}
+			return commitSchedule(assignmentIds ?? [], approver);
 		}
 	}),
 	defineTool({
@@ -242,7 +270,75 @@ export const mcpTools: readonly McpToolDefinition[] = [
 				throw new UnapproveScheduleError('Give either a draftId or assignmentIds (not both).');
 			}
 			const actor = principalIdentity(principal);
-			return draftId ? unapproveDraft(draftId, actor) : unapproveSchedule(assignmentIds ?? [], actor);
+			if (draftId) {
+				const resolvedId = await resolveDraftIdForTool(draftId, UnapproveScheduleError);
+				return unapproveDraft(resolvedId, actor);
+			}
+			return unapproveSchedule(assignmentIds ?? [], actor);
+		}
+	}),
+	defineTool({
+		name: 'list_stations',
+		description:
+			"Lists every station on the shop floor with the two values a drag-and-drop or move_assignment " +
+			"actually compares: `label` (what people see) and `kind` (which estimate_hours formula it runs — " +
+			"the real gate). Diagnostic for \"why can't I drag this screen-print job onto Screen Print Manual?\" " +
+			"problems: a station's kind must equal the line item's expected kind, so a Manual press labeled " +
+			"\"Screen Print Manual\" is only draggable from an auto press if its kind is `screen_print_auto` too " +
+			"(both share one kind by design — client decision 2026-09-25, same time assumption). An entry with " +
+			"`kindIsRecognized: false` is misconfigured (likely a legacy station from before admin-managed " +
+			"stations, backfilled with `kind = name`); every job will be refused on it until an admin archives " +
+			"and re-creates it with the right kind in Settings → Stations. `hasUnrecognizedKinds: true` on the " +
+			"result means at least one such station exists on this shop. Example question: \"why does the manual " +
+			"press reject screen-print jobs?\" → {}. Returns { stations, hasUnrecognizedKinds }.",
+		inputSchema: {
+			// Set true to also return archived stations (for diagnosing a station that was already
+			// archived — e.g. "did someone archive the DTG press?"). Default false.
+			includeArchived: z.boolean().optional()
+		},
+		requiredScope: 'SCHEDULE_READ',
+		readOnly: true,
+		handler: async ({ includeArchived }) => listStationsForTool(includeArchived ?? false)
+	}),
+	defineTool({
+		name: 'list_drafts',
+		description:
+			"Lists schedule drafts on the board — every one that isn't archived, newest first — so Claude can find " +
+			"the draft the person is talking about without seeing the UI. Each entry has `id` (the full cuid used by " +
+			"move_assignment/commit_schedule/unapprove_schedule), `shortCode` (6 chars, e.g. 'AB3C9F', also accepted " +
+			"anywhere `draftId` is), `name`, `status` (DRAFT / PROPOSED / APPROVED), window (startDate + weeks), and " +
+			"counts: totalAssignments, proposedCount, approvedCount. Filter by `status` when the person says " +
+			"\"the approved one\" or \"the proposed drafts\". Example: 'which drafts do we have?' → {}. Returns { drafts }.",
+		inputSchema: {
+			status: z.enum(ScheduleDraftStatus).optional()
+		},
+		requiredScope: 'SCHEDULE_READ',
+		readOnly: true,
+		handler: async ({ status }) => ({ drafts: await listDraftsForTool(status) })
+	}),
+	defineTool({
+		name: 'get_draft',
+		description:
+			"Reads one schedule draft in full — the only way for Claude to see what's inside a draft, since get_schedule " +
+			"only returns the approved live schedule. Pass either the full id or the 6-char shortCode from list_drafts. " +
+			"Returns the draft's metadata plus every assignment in run order (date → station → sequenceOrder) with: " +
+			"`id` (pass to move_assignment), `job` (readable label), `stationName` (pass to move_assignment), `date`, " +
+			"`startMinuteOfDay` (minutes from midnight), `durationMinutes`, `estimatedHours`, `status`. Use this before " +
+			"any batch move — e.g. to add a 10-minute buffer between items — so start times are computed from the " +
+			"draft's actual current layout, not guessed. Example: 'show me what's in that draft' → { draftIdOrCode: " +
+			"'AB3C9F' }. Returns { draft }.",
+		inputSchema: {
+			draftIdOrCode: z.string().min(1)
+		},
+		requiredScope: 'SCHEDULE_READ',
+		readOnly: true,
+		handler: async ({ draftIdOrCode }) => {
+			try {
+				return { draft: await getDraftForTool(draftIdOrCode) };
+			} catch (err) {
+				if (err instanceof GetDraftError) throw err;
+				throw err;
+			}
 		}
 	}),
 	defineTool({
@@ -276,7 +372,8 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		readOnly: false,
 		handler: async (input, principal) => {
 			try {
-				return await moveDraftAssignment(input, principalIdentity(principal));
+				const resolvedDraftId = await resolveDraftIdForTool(input.draftId, MoveDraftAssignmentError);
+				return await moveDraftAssignment({ ...input, draftId: resolvedDraftId }, principalIdentity(principal));
 			} catch (err) {
 				if (err instanceof MoveDraftAssignmentError) throw new Error(err.message);
 				throw err;
