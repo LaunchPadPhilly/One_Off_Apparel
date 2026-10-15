@@ -772,7 +772,9 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   `scheduleFlaggedAt` (migration `order_schedule_flag`) in plain words ("Not enough open
   Screen print time before Oct 13…"), shown as a red **"Couldn't be scheduled"** flag on
   the Orders list and order page (and `couldNotSchedule` in `list_orders`/`get_order`);
-  the next plan that fits the order clears it. "Needs re-review" is red too. (4) The
+  the next plan that fits the order clears it, and so does any edit to the order (other
+  than its notes) or to one of its jobs (`updateOrderFields.ts`), since the edit may have
+  fixed the cause. "Needs re-review" is red too. (4) The
   draft board's sidebar hides all three kinds (re-review, nothing estimable, flagged) —
   the Orders page is the one place to deal with them; `placeAssignment` refuses
   re-review and unestimable jobs server-side. This also answers the Reports open item
