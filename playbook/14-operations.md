@@ -55,6 +55,10 @@ old value stays live and a green smoke test proves nothing.
 **Accept when:** keys unchanged (or the intended addition, which must also be added to
 `web_secret_keys`/`mcp_secret_keys` and applied), one `AWSCURRENT`, `STABLE`.
 
+To set or replace a single key without opening the JSON (e.g. `ANTHROPIC_API_KEY`), run
+`AWS_PROFILE=<operator-profile> ./scripts/set-secret-key.sh uat/<slug>/app <KEY>`. It asks for
+the value with input hidden and leaves every other key untouched. Then force-redeploy both services, as above.
+
 Rotating the Google client secret: create a new secret on the same client in Google Cloud,
 put it here, redeploy, then delete the old one in Google Cloud.
 
