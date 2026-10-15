@@ -270,8 +270,9 @@ stops an order reaching Orders: the reviewer sees what's missing as questions in
   `quantity × 3 / 60`, and it still needs a station. Filter on `outsourced` as
   null-or-false, never `NOT: { outsourced: true }`: that becomes SQL
   `NOT outsourced = true`, which drops every null row.
-- An order with **no line items** is left out of the draft board's sidebar and out of
-  `list_orders`.
+- An order with **no line items** is left out of the draft board's sidebar, and out of
+  `list_orders` once it's past review. While it's in review, `list_orders` still lists it,
+  because it needs a person.
 Every new question is a normal `computeOrderGaps` question, so confirming stays blocked
 until they're answered, by hand or via the notes box.
 
