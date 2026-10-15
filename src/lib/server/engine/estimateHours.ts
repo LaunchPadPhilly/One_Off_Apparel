@@ -8,6 +8,7 @@
  */
 import { DecorationType, FinishingStep, GarmentStyle, LineItemType, MatteSurface } from '../../../../prisma/generated/prisma/enums';
 import { expectedStationFor } from '$lib/schedule/expectedStation';
+import { isPressKind } from '$lib/schedule/stationKinds';
 import { currentFormulas, maybeRefreshFormulas } from './formulaSettings';
 import type { EstimateHoursInput, EstimateHoursResult } from './types';
 import { countDecorationColors } from './decorationColors';
@@ -353,6 +354,10 @@ function roundToQuarterHour(hours: number): number {
  * run time, embroidery setup & boxing, all finishing time, DTF/DTG entered hours) is
  * divided by N; everything else stays fixed. Default 1 = the unchanged formula.
  *
+ * Screen-print press (client, 2026-10-14): a main with at least one catch runs the
+ * WHOLE job (setup included) in half the time; a second catch doesn't halve it again.
+ * Main alone = the full time. This replaces the run-only division for presses.
+ *
  * @returns the station kind (plus `stationId` for OTHER rows) and the rounded hours.
  * @throws MissingFormulaError for an unknown decoration type / finishing step.
  * @throws MissingLineItemDataError when this job is missing a field its formula needs.
@@ -364,6 +369,7 @@ export function estimateHours(item: EstimateHoursInput, crewSize = 1): EstimateH
 	maybeRefreshFormulas();
 	const raw = applyEstimateOverride(item);
 	const crew = Math.max(1, Math.floor(crewSize));
+	if (isPressKind(raw.station)) return { ...raw, hours: roundToQuarterHour(crew >= 2 ? raw.hours / 2 : raw.hours) };
 	const divisible = raw.crewDivisibleHours ?? 0;
 	const hours = raw.hours - divisible + divisible / crew;
 	return { ...raw, hours: roundToQuarterHour(hours) };

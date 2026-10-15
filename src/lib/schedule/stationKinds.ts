@@ -47,3 +47,14 @@ export function isFinishingKind(kind: string | null | undefined): boolean {
 export function stationKindLabel(kind: string): string {
 	return byKey.get(kind)?.label ?? kind.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
+
+/**
+ * Screen-print presses (2026-10-14) are the only stations with a main / catch crew: a
+ * press runs only with one main printer (a person certified on it as main), and
+ * everyone else on it that day is a catch. Every other kind has plain crew.
+ */
+export const PRESS_KIND = 'screen_print_auto';
+
+export function isPressKind(kind: string | null | undefined): boolean {
+	return kind === PRESS_KIND;
+}

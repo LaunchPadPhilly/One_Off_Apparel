@@ -1,13 +1,19 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { fly, fade } from 'svelte/transition';
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig, storageKeyPrefix } from '$lib/appConfig';
 	import { SHIFT_START_MIN, SHIFT_END_MIN, SHIFT_LENGTH_MIN, BREAKS, WORKING_HOURS, wallClockEnd, computeSegments } from '$lib/schedule/shift';
 	import { cascadeInsert, cascadeMove, cascadeRemove, type CascadeItem } from '$lib/schedule/repackDay';
 	import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
-	import { isFinishingKind } from '$lib/schedule/stationKinds';
+	import { isFinishingKind, isPressKind } from '$lib/schedule/stationKinds';
+	import { avatarHue, crewRoleLabel, initials } from '$lib/schedule/people';
 	import { countScreens } from '$lib/schedule/screenCount';
+	import { isWeekendDay } from '$lib/schedule/defaultCapacity';
+	import { shortDraftCode } from '$lib/schedule/shortDraftCode';
 	import { deserialize } from '$app/forms';
+	import { invalidateAll } from '$app/navigation';
+	import PeoplePanel from './PeoplePanel.svelte';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
@@ -142,9 +148,6 @@
 	}
 
 	let totalWeeks = $derived(Math.max(1, Math.ceil(data.capacity.length / 7)));
-	let visibleDays = $derived(
-		daysViewMode === 'week' ? data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7) : data.capacity
-	);
 	let weekRangeLabel = $derived.by(() => {
 		const weekDays = data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7);
 		if (weekDays.length === 0) return '';
@@ -490,15 +493,19 @@
 		stationName: string;
 		startMin: number;
 		durationMin: number;
-		// The day's crew on this job, by name (planStaffing.ts, 2026-09-28). Empty for
-		// hand-placed or hand-moved jobs.
-		crew: string[];
+		// The day's crew on this job (planStaffing.ts, 2026-09-28), main printer first
+		// on a press (2026-10-14). Empty for hand-placed or hand-moved jobs, and for a
+		// press job whose crew had no main (there's no catch without a main).
+		crew: CrewMember[];
+		/** A press job planned without a main printer — its crew isn't shown. */
+		noMain?: boolean;
 	};
+	type CrewMember = { id: string; name: string; isMain: boolean };
 	// Hydrate from server: each ScheduleAssignment tied to this draft becomes a
 	// placement. estimatedHours * 60 is the working duration; startMinuteOfDay
 	// is minutes-from-midnight, aligned with the client's SHIFT_START_MIN.
-	let placements = $state<Placement[]>(
-		data.assignments.map((a) => ({
+	function hydratePlacements(assignments: typeof data.assignments): Placement[] {
+		return assignments.map((a) => ({
 			id: a.id,
 			lineItemId: a.lineItemId,
 			orderId: a.orderId,
@@ -506,9 +513,101 @@
 			stationName: a.stationName,
 			startMin: a.startMinuteOfDay,
 			durationMin: Math.max(15, Math.round(a.estimatedHours * 60)),
-			crew: a.crew
-		}))
+			crew: a.crew,
+			noMain: a.noMain
+		}));
+	}
+	// Initial copy only; later server changes are applied by hand (or re-hydrated after a crew change).
+	let placements = $state<Placement[]>(untrack(() => hydratePlacements(data.assignments)));
+
+	// No weekend work (client, 2026-10-14): Saturdays and Sundays are hidden unless a
+	// job is already on one, so nothing placed there disappears.
+	let daysWithJobs = $derived(new Set(placements.map((p) => p.date)));
+	let visibleDays = $derived(
+		(daysViewMode === 'week' ? data.capacity.slice(weekIndex * 7, weekIndex * 7 + 7) : data.capacity).filter(
+			(day) => !isWeekendDay(day.date) || daysWithJobs.has(day.date)
+		)
 	);
+
+	/** "Main" / "Catch" on a press, "Crew" anywhere else. */
+	function roleOf(member: CrewMember, stationName: string): string {
+		return crewRoleLabel(isPressKind(kindOf(stationName)) ? (member.isMain ? 'main' : 'catch') : 'crew');
+	}
+
+	/** Everyone on a station's day, main first — one person works one station all day. */
+	function rowCrewOf(rowPlacements: readonly Placement[]): CrewMember[] {
+		const byId = new Map<string, CrewMember>();
+		for (const p of rowPlacements) for (const m of p.crew) if (!byId.has(m.id) || m.isMain) byId.set(m.id, m);
+		return [...byId.values()].sort((a, b) => Number(b.isMain) - Number(a.isMain) || a.name.localeCompare(b.name));
+	}
+
+	// ─── People panel: drag a person onto a station row (2026-10-14) ───────────
+	// Pins them there for that day and re-plans that day's crews on the server
+	// (restaffDraftDay.ts); the board then reloads, since crews change job lengths.
+	let draggingWorkerId = $state<string | null>(null);
+	let staffingBusy = $state(false);
+	const peopleById = $derived(new Map(data.people.map((person) => [person.id, person])));
+	function workerCertifiedOn(workerId: string, stationName: string): boolean {
+		return peopleById.get(workerId)?.certifications.some((c) => c.stationName === stationName) ?? false;
+	}
+	function isWorkerDrag(event: DragEvent): boolean {
+		return event.dataTransfer?.types.includes('application/x-worker') ?? false;
+	}
+	function handleRowWorkerDragOver(event: DragEvent, date: string, stationName: string) {
+		if (!isWorkerDrag(event)) return;
+		event.preventDefault();
+		event.dataTransfer!.dropEffect = 'move';
+		dragOverKey = trackKey(date, stationName);
+	}
+	async function handleRowWorkerDrop(event: DragEvent, date: string, stationName: string) {
+		if (!isWorkerDrag(event)) return;
+		event.preventDefault();
+		dragOverKey = null;
+		const raw = event.dataTransfer!.getData('application/x-worker');
+		draggingWorkerId = null;
+		let workerId: string;
+		try {
+			workerId = (JSON.parse(raw) as { workerId: string }).workerId;
+		} catch {
+			return;
+		}
+		const person = peopleById.get(workerId);
+		if (person && !workerCertifiedOn(workerId, stationName)) {
+			boardNotice = { text: `${person.name} isn't certified on ${rowLabel(stationName)}. Add it in Settings → People if they should be.`, tone: 'warn' };
+			return;
+		}
+		await submitPin(workerId, date, stationName);
+	}
+	async function submitPin(workerId: string, date: string, stationName: string | null) {
+		const body = new FormData();
+		body.set('workerId', workerId);
+		body.set('date', date);
+		if (stationName) body.set('stationName', stationName);
+		await submitStaffing('pinWorker', body);
+	}
+	// Both staffing actions re-crew jobs (and so change their lengths) on the server,
+	// so the board reloads its placements afterwards.
+	async function submitStaffing(action: 'pinWorker' | 'replanCrews', body: FormData) {
+		staffingBusy = true;
+		try {
+			const res = await fetch(`?/${action}`, { method: 'POST', body, headers: { 'x-sveltekit-action': 'true' } });
+			const result = deserialize(await res.text());
+			if (result.type === 'success') {
+				await invalidateAll();
+				placements = hydratePlacements(data.assignments);
+				const notice = (result.data as { notice?: string } | undefined)?.notice;
+				if (notice) boardNotice = { text: notice, tone: notice.includes('Nobody can run') ? 'warn' : 'info' };
+			} else {
+				const message = result.type === 'failure' ? (result.data as { message?: string } | undefined)?.message : undefined;
+				boardNotice = { text: message ?? 'Couldn’t change the crew — try again.', tone: 'warn' };
+			}
+		} catch (e) {
+			console.error(`${action} failed`, e);
+			boardNotice = { text: 'Couldn’t change the crew — try again.', tone: 'warn' };
+		} finally {
+			staffingBusy = false;
+		}
+	}
 
 	// Hover state — tracks which placement (across ALL its segments, if it spans a
 	// break) is currently hovered, so all segments highlight together and a shared
@@ -730,18 +829,24 @@
 			!types?.includes('application/x-placement')
 		)
 			return;
-		// Refuse the drop at the browser level when the row's station doesn't match
-		// the dragging item's expected station — the not-allowed cursor appears and
-		// ondrop never fires. `activeExpectedStation === null` means we don't yet
-		// know (e.g. an uncategorized "Patch Install") so we don't restrict.
-		if (activeExpectedStation && activeExpectedStation !== kindOf(stationName)) {
-			event.dataTransfer!.dropEffect = 'none';
-			dragPreview = null;
-			return;
-		}
+		// Row-mismatch no longer refuses the drop at the browser level — a silent
+		// not-allowed cursor was indistinguishable from the drag just not registering,
+		// so a drop on a wrong row (e.g. a stale manual-vs-auto station kind) looked
+		// like nothing happened. We still dim the row visually (see `isBlocked` on the
+		// track), but we let the drop event fire; handleTrackDrop then surfaces the
+		// reason through `boardNotice`.
 		event.preventDefault();
 		event.dataTransfer!.dropEffect = 'move';
 		dragOverKey = trackKey(date, stationName);
+
+		// On a row whose kind doesn't match the dragging item, we still allow the drop
+		// (so the drop handler can surface the reason); but we skip the
+		// "where it will land" preview — it would be a lie, the drop is going to be
+		// refused the moment it fires.
+		if (activeExpectedStation && activeExpectedStation !== kindOf(stationName)) {
+			dragPreview = null;
+			return;
+		}
 
 		// Compute the predicted drop position: cursor → wall-clock minute → snap to
 		// 15-min grid → snap out of any peer's span (same as the real drop).
@@ -765,6 +870,7 @@
 	// pre-mutation snapshot is restored. Errors surface in the console for now;
 	// a toast pass comes with the wider save-error UX.
 	async function handleTrackDrop(event: DragEvent, date: string, stationName: string) {
+		if (isWorkerDrag(event)) return; // the station row's own handler takes people
 		event.preventDefault();
 		dragOverKey = null;
 		activeExpectedStation = null;
@@ -797,7 +903,7 @@
 			const movingStation = movingItem ? expectedStationFor(movingItem) : null;
 			if (movingStation && movingStation !== kindOf(stationName)) {
 				boardNotice = {
-					text: `${stepChip(movingItem!)} belongs on a ${stationDisplayLabel(movingStation)} station, not ${rowLabel(stationName)}.`,
+					text: `${stepChip(movingItem!)} belongs on a ${stationDisplayLabel(movingStation)} station, not ${rowLabel(stationName)} (kind: ${stationDisplayLabel(kindOf(stationName) ?? 'unknown')}). If that destination should accept this job, its kind is set wrong — fix it in Settings → Stations (archive + re-create with the correct kind).`,
 					tone: 'warn'
 				};
 				return;
@@ -850,7 +956,7 @@
 				placements = placements.map((p) => {
 					if (p.id === existing.id) {
 						const next = insertCascade.placements.find((q) => q.id === existing.id)!;
-						return { ...p, date, stationName, startMin: next.startMin, crew: [] };
+						return { ...p, date, stationName, startMin: next.startMin, crew: [], noMain: false };
 					}
 					const next = newStarts.get(p.id);
 					return next != null ? { ...p, startMin: next } : p;
@@ -886,7 +992,7 @@
 		if (payload.expectedStation && payload.expectedStation !== kindOf(stationName)) {
 			const item = findLineItem(payload.lineItemId);
 			boardNotice = {
-				text: `${item ? stepChip(item) : 'This job'} belongs on a ${stationDisplayLabel(payload.expectedStation)} station, not ${rowLabel(stationName)}.`,
+				text: `${item ? stepChip(item) : 'This job'} belongs on a ${stationDisplayLabel(payload.expectedStation)} station, not ${rowLabel(stationName)} (kind: ${stationDisplayLabel(kindOf(stationName) ?? 'unknown')}). If that destination should accept this job, its kind is set wrong — fix it in Settings → Stations (archive + re-create with the correct kind).`,
 				tone: 'warn'
 			};
 			return;
@@ -1008,6 +1114,12 @@
 				</h1>
 			{/if}
 			<p class="muted meta">
+				<code
+					class="draft-code"
+					title="Short code — paste into Claude chat to refer to this draft unambiguously (same-day auto-drafts share names)"
+					>{shortDraftCode(data.draft.id)}</code
+				>
+				·
 				{data.draft.startDate} → {data.draft.endDate} ·
 				{data.draft.weeks} {data.draft.weeks === 1 ? 'week' : 'weeks'} ·
 				{strategyLabel(data.draft.strategy)}
@@ -1334,19 +1446,38 @@
 						<div class="station-rows">
 							{#snippet stationRow(date: string, station: string)}
 								{@const rowPlacements = placementsForDay(date, station)}
-								{@const rowCrew = [...new Set(rowPlacements.flatMap((p) => p.crew))].sort()}
+								{@const rowCrew = rowCrewOf(rowPlacements)}
 								{@const isDragTarget = dragOverKey === trackKey(date, station)}
-								{@const isBlocked = activeExpectedStation !== null && activeExpectedStation !== kindOf(station)}
+								{@const isBlocked =
+									(activeExpectedStation !== null && activeExpectedStation !== kindOf(station)) ||
+									(draggingWorkerId !== null && !workerCertifiedOn(draggingWorkerId, station))}
 								<div
 									class="station-row"
 									class:station-row--empty={rowPlacements.length === 0}
 									class:station-row--blocked={isBlocked}
+									class:station-row--worker-target={draggingWorkerId !== null && isDragTarget}
+									role="presentation"
+									ondragover={(event) => handleRowWorkerDragOver(event, date, station)}
+									ondragleave={handleTrackDragLeave}
+									ondrop={(event) => handleRowWorkerDrop(event, date, station)}
 								>
-									<div class="station-row__label" title={rowCrew.length ? `${rowLabel(station)} — ${rowCrew.join(', ')}` : rowLabel(station)}>
+									<div
+										class="station-row__label"
+										title={rowCrew.length ? `${rowLabel(station)} — ${rowCrew.map((m) => `${m.name} (${roleOf(m, station)})`).join(', ')}` : rowLabel(station)}
+									>
 										{rowLabel(station)}
-										<!-- The day's crew on this station (planStaffing.ts, 2026-09-28). -->
+										<!-- The day's crew on this station (planStaffing.ts), main printer first. -->
 										{#if rowCrew.length}
-											<span class="station-row__crew">{rowCrew.join(', ')}</span>
+											<span class="station-row__crew">
+												{#each rowCrew as member (member.id)}
+													<span
+														class="mini-avatar"
+														class:mini-avatar--main={member.isMain}
+														style="--avatar-hue: {avatarHue(member.id)}"
+														title="{member.name} — {roleOf(member, station)}"
+													>{initials(member.name)}</span>
+												{/each}
+											</span>
 										{/if}
 									</div>
 									<div class="station-row__bar" aria-label="{rowLabel(station)} on {date}">
@@ -1443,7 +1574,24 @@
 																	{#if waitsOnText(placement.lineItemId)}
 																		<div class="placement__details-waits">{waitsOnText(placement.lineItemId)}</div>
 																	{/if}
+																	{#if placement.crew.length}
+																		<ul class="placement__details-crew" aria-label="Crew">
+																			{#each placement.crew as member (member.id)}
+																				<li>
+																					<span class="mini-avatar" class:mini-avatar--main={member.isMain} style="--avatar-hue: {avatarHue(member.id)}">{initials(member.name)}</span>
+																					<span class="placement__details-crew-name">{member.name}</span>
+																					<span class="placement__details-role" class:placement__details-role--main={member.isMain}>{roleOf(member, placement.stationName)}</span>
+																				</li>
+																			{/each}
+																		</ul>
+																	{:else if placement.noMain}
+																		<div class="placement__details-waits">No main printer on this press, so no crew — a catch only assists a main. Tick Main for the press operators in Settings → People, then Re-plan crews.</div>
+																	{:else if data.people.length}
+																		<div class="placement__details-waits">No crew planned — drag someone from People onto this row.</div>
+																	{/if}
 																	<div class="placement__details-time">
+																		{rowLabel(placement.stationName)}
+																		<span class="placement__details-dot">·</span>
 																		{formatClock(placement.startMin)} → {formatClock(wallEnd)}
 																		<span class="placement__details-dot">·</span>
 																		{formatMinutes(placement.durationMin)} of work
@@ -1531,6 +1679,25 @@
 				gap.
 			</p>
 		</section>
+
+		<!-- Right: who's working where (2026-10-14). -->
+		<PeoplePanel
+			people={data.people}
+			peopleOut={data.peopleOut}
+			pins={data.pins}
+			{placements}
+			stations={data.stations}
+			days={visibleDays.map((day) => day.date)}
+			isAdmin={Boolean(data.user?.isAdmin)}
+			busy={staffingBusy}
+			onUnpin={(workerId, date) => submitPin(workerId, date, null)}
+			onReplan={() => submitStaffing('replanCrews', new FormData())}
+			onWorkerDragStart={(workerId) => (draggingWorkerId = workerId)}
+			onWorkerDragEnd={() => {
+				draggingWorkerId = null;
+				dragOverKey = null;
+			}}
+		/>
 	</div>
 </div>
 
@@ -1652,18 +1819,90 @@
 		font-size: var(--fs-sm);
 	}
 
-	/* Two-column workspace: tray + main timeline. Collapses to stacked on narrow. */
+	/* Three-column workspace: orders tray, main timeline, People panel (2026-10-14;
+	   the panel sizes itself — wide when open, a thin rail when collapsed). Below
+	   1200px the panel drops under the timeline; below 900px everything stacks. */
 	.workspace {
 		display: grid;
-		grid-template-columns: minmax(18rem, 22rem) 1fr;
+		grid-template-columns: minmax(18rem, 22rem) minmax(0, 1fr) auto;
 		gap: var(--space-4);
 		align-items: start;
+	}
+
+	@media (max-width: 1200px) {
+		.workspace {
+			grid-template-columns: minmax(18rem, 22rem) minmax(0, 1fr);
+		}
+
+		.workspace > :global(.people) {
+			grid-column: 1 / -1;
+		}
 	}
 
 	@media (max-width: 900px) {
 		.workspace {
 			grid-template-columns: 1fr;
 		}
+	}
+
+	/* A person's initials on their color (People panel, crew under a station name,
+	   and the job hover). The main printer gets a ring. */
+	.mini-avatar {
+		display: inline-grid;
+		place-items: center;
+		width: 1.35rem;
+		height: 1.35rem;
+		border-radius: 50%;
+		font-size: 0.6rem;
+		font-weight: 700;
+		color: #fff;
+		background: hsl(var(--avatar-hue) 55% 42%);
+		flex-shrink: 0;
+	}
+
+	.mini-avatar--main {
+		box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--brand-500);
+	}
+
+	.station-row--worker-target .station-row__label,
+	.station-row--worker-target :global(.bar__track) {
+		outline: 2px dashed var(--brand-500);
+		outline-offset: -2px;
+	}
+
+	.placement__details-crew {
+		list-style: none;
+		margin: 0;
+		padding: 0.3rem 0 0;
+		border-top: 1px solid var(--border);
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.placement__details-crew li {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: var(--fs-xs);
+	}
+
+	.placement__details-crew-name {
+		color: var(--ink-900);
+		font-weight: 600;
+		flex: 1;
+	}
+
+	.placement__details-role {
+		font-size: 0.66rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--ink-500);
+	}
+
+	.placement__details-role--main {
+		color: var(--brand-700);
 	}
 
 	/* --- Side tray --- */
@@ -2211,13 +2450,14 @@
 		color: var(--ink-700);
 	}
 
-	/* The day's crew under the station name. */
+	/* The day's crew under the station name, as avatars (main printer first). */
 	.station-row__crew {
-		display: block;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.2rem;
+		margin-top: 0.2rem;
 		font-weight: 450;
 		color: var(--ink-500);
-		overflow: hidden;
-		text-overflow: ellipsis;
 	}
 
 	/* One stacked row per station within a day card. The label column is a fixed

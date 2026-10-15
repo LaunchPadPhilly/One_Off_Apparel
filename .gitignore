@@ -28,6 +28,11 @@ project-notes/
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
+# Dev-only UAT snapshot (contains real customer data; repo is public).
+# Regenerate with the Claude MCP `list_orders` + `get_order` tools against UAT,
+# then write the result inline. See memory `uat-sync-script-local-only`.
+scripts/sync_from_uat.mjs
+
 # Operational tooling and IAM policy documents are kept locally, not in the repo.
 deploy/
 # Terraform backend partial configs carry account-specific bucket names.

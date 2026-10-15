@@ -436,6 +436,10 @@ model Worker {
 model WorkerCertification {
   workerId  String
   stationId String
+  // Screen-print presses only (2026-10-14): may run this press as its main printer.
+  // A press needs exactly one main to run that day; everyone else on it is a catch.
+  // Ignored on every other station kind.
+  isMain    Boolean  @default(false)
   createdAt DateTime @default(now())
   worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
   station   Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
@@ -478,6 +482,9 @@ model StaffingPin {
 model AssignmentCrew {
   assignmentId String
   workerId     String
+  // The press's main printer that day (2026-10-14); false = a catch, or plain crew
+  // on a station that isn't a screen-print press.
+  isMain       Boolean            @default(false)
   assignment   ScheduleAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   worker       Worker             @relation(fields: [workerId], references: [id], onDelete: Cascade)
 

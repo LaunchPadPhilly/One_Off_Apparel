@@ -3,11 +3,15 @@ import { isAdmin, requireScopePage } from '$lib/server/auth/guards';
 import { deleteDraft, getDraft, renameDraft, renameDraftSchema } from '$lib/server/schedule/draft';
 import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
+import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
+import { pinAndRestaffDraftDay, replanDraftCrews, RestaffError } from '$lib/server/schedule/restaffDraftDay';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { fetchOrderGaps } from '$lib/server/hoops/orderReadiness';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { pressSafeCrew } from '$lib/schedule/people';
+import { isPressKind } from '$lib/schedule/stationKinds';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 import {
 	OrderStatus,
@@ -127,17 +131,35 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			where: { scheduleDraftId: draft.id },
 			include: {
 				lineItem: { select: { id: true, orderId: true } },
-				station: { select: { id: true, name: true } },
-				// The day's crew on this job (planStaffing.ts, 2026-09-28).
-				crew: { select: { worker: { select: { name: true } } } }
+				station: { select: { id: true, name: true, kind: true } },
+				// The day's crew on this job (planStaffing.ts, 2026-09-28), with who's the
+				// press's main printer (2026-10-14).
+				crew: { select: { isMain: true, worker: { select: { id: true, name: true } } } }
 			},
 			orderBy: [{ date: 'asc' }, { startMinuteOfDay: 'asc' }, { sequenceOrder: 'asc' }]
 		})
 	]);
-	const unavailability = await prisma.workerUnavailability.findMany({
-		where: { date: { gte: draft.startDate, lte: endDate }, worker: { archivedAt: null } },
-		select: { date: true, worker: { select: { name: true } } }
-	});
+	const [unavailability, workers, pins] = await Promise.all([
+		prisma.workerUnavailability.findMany({
+			where: { date: { gte: draft.startDate, lte: endDate }, worker: { archivedAt: null } },
+			select: { date: true, reason: true, worker: { select: { id: true, name: true } } }
+		}),
+		// The People panel (2026-10-14): the active roster with certifications and notes.
+		prisma.worker.findMany({
+			where: { archivedAt: null },
+			orderBy: { name: 'asc' },
+			select: {
+				id: true,
+				name: true,
+				notes: true,
+				certifications: { where: { station: { archivedAt: null } }, select: { isMain: true, station: { select: { name: true } } } }
+			}
+		}),
+		prisma.staffingPin.findMany({
+			where: { date: { gte: draft.startDate, lte: endDate }, worker: { archivedAt: null } },
+			select: { date: true, workerId: true, station: { select: { name: true } } }
+		})
+	]);
 
 	// One entry per (station, day) in the window; falls back to the default day
 	// length when the capacity_calendar has no row for that pair. That keeps the
@@ -238,7 +260,13 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			startMinuteOfDay: a.startMinuteOfDay ?? 8 * 60,
 			estimatedHours: a.estimatedHours,
 			status: a.status,
-			crew: a.crew.map((member) => member.worker.name).sort()
+			// Main first; a press crew with no main isn't shown (no catch without a main) —
+			// noMain tells the board to say so instead.
+			crew: pressSafeCrew(
+				a.crew.map((member) => ({ id: member.worker.id, name: member.worker.name, isMain: member.isMain })),
+				isPressKind(a.station.kind)
+			),
+			noMain: isPressKind(a.station.kind) && a.crew.length > 0 && !a.crew.some((member) => member.isMain)
 		})),
 		stationNames,
 		// name → display label / formula kind, for the board's row labels, the
@@ -247,7 +275,16 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		capacity,
 		defaultStationDayHours: DEFAULT_STATION_DAY_HOURS,
 		// Who's out each day of the draft (set through Claude, 2026-09-28): date → names.
-		outByDate: groupNamesByDate(unavailability)
+		outByDate: groupNamesByDate(unavailability),
+		// The People panel (2026-10-14): roster, days out and pins in this window.
+		people: workers.map((w) => ({
+			id: w.id,
+			name: w.name,
+			notes: w.notes,
+			certifications: w.certifications.map((c) => ({ stationName: c.station.name, isMain: c.isMain }))
+		})),
+		peopleOut: unavailability.map((row) => ({ date: iso(row.date), workerId: row.worker.id, reason: row.reason })),
+		pins: pins.map((row) => ({ date: iso(row.date), workerId: row.workerId, stationName: row.station.name }))
 	};
 };
 
@@ -389,88 +426,36 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const id = form.get('id');
 		const stationName = form.get('stationName');
-		const date = toDate(form.get('date'));
+		const dateValue = form.get('date');
 		const startMinuteOfDay = parseInt10(form.get('startMinuteOfDay'));
 
 		if (typeof id !== 'string' || !id) return fail(400, { message: 'id required' });
 		if (typeof stationName !== 'string' || !stationName) return fail(400, { message: 'stationName required' });
-		if (!date) return fail(400, { message: 'date required (YYYY-MM-DD)' });
+		if (typeof dateValue !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateValue))
+			return fail(400, { message: 'date required (YYYY-MM-DD)' });
 		if (startMinuteOfDay === null) return fail(400, { message: 'startMinuteOfDay required' });
 
-		// Belongs-to-this-draft check: prevent a client from re-parenting an
-		// assignment from a different draft (or a committed one) through this
-		// endpoint. A stronger authz check comes with the committed vs draft
-		// separation, but this covers the current UI.
-		const existing = await prisma.scheduleAssignment.findUnique({
-			where: { id },
-			select: {
-				scheduleDraftId: true,
-				status: true,
-				stationId: true,
-				date: true,
-				lineItemId: true,
-				estimatedHours: true,
-				lineItem: {
-					select: { itemType: true, decorationType: true, finishingStep: true, assignedStationId: true }
-				}
-			}
-		});
-		if (!existing || existing.scheduleDraftId !== params.id)
-			return fail(404, { message: 'Assignment not in this draft' });
-		// An approved job is on the live schedule; changing it here would skip the
-		// approval gate. Changes go through a new proposed plan instead.
-		if (existing.status !== ScheduleAssignmentStatus.PROPOSED)
-			return fail(409, { message: 'This job is already approved, so it can’t be changed here. Propose a new plan to move it.' });
-
-		const station = await findActiveStation(stationName);
-		if (!station) return fail(400, { message: 'That station no longer exists (it may have been archived in Settings → Stations). Reload the board.' });
-
-		// Row restriction on move — same rule as placeAssignment above. Prevents a
-		// placed embroidery block from being dragged onto a finishing row (or vice
-		// versa) via a hand-crafted POST.
-		const mismatch = stationMismatchMessage(existing.lineItem, station);
-		if (mismatch) return fail(400, { message: mismatch });
-
-		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, existing.lineItemId, date, Math.max(15, Math.round(existing.estimatedHours * 60)));
-		if (dependencyProblem) return fail(400, { message: dependencyProblem });
-
-		// A finisher that can't be settled is refused with a message, nothing saved.
-		let result;
 		try {
-			result = await prisma.$transaction(async (tx) => {
-				// Persist the caller's intent (station/date/startMin). The cascade helper
-				// re-applies gap-preserving math server-authoritatively and rewrites this
-				// row plus any peers it shifts (see draftDependencies.ts).
-				await tx.scheduleAssignment.update({
-					where: { id },
-					data: {
-						stationId: station.id,
-						date,
-						startMinuteOfDay: startMinuteOfDay,
-						proposedBy: user.email
-					}
-				});
-
-				// The planned crew was for the (station, day) it left (2026-09-28).
-				const changedSlot =
-					existing.stationId !== station.id || existing.date.getTime() !== date.getTime();
-				if (changedSlot) await tx.assignmentCrew.deleteMany({ where: { assignmentId: id } });
-				return repackDraftDays(tx, params.id, {
-					kind: 'move',
+			const result = await moveDraftAssignment(
+				{
+					draftId: params.id,
 					assignmentId: id,
-					oldStationId: existing.stationId,
-					oldDayMs: existing.date.getTime(),
-					newStationId: station.id,
-					newDayMs: date.getTime(),
-					targetStartMin: startMinuteOfDay
-				});
-			});
+					stationName,
+					date: dateValue,
+					startMinuteOfDay
+				},
+				user.email
+			);
+			return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
 		} catch (err) {
-			if (err instanceof DraftPlacementError) return fail(409, { message: err.message });
+			if (err instanceof MoveDraftAssignmentError) {
+				// 409 keeps parity with the previous responses for post-check refusals; the
+				// shape mismatch messages still go through here too — the client cares about
+				// the message, not the status code.
+				return fail(409, { message: err.message });
+			}
 			throw err;
 		}
-
-		return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
 	},
 
 	removeAssignment: async ({ request, params, locals, url }) => {
@@ -510,6 +495,45 @@ export const actions: Actions = {
 			throw err;
 		}
 		return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
+	},
+
+	// People panel (2026-10-14): drop a person on a station row to pin them there for
+	// that day (no stationName = clear their pin), then re-plan that day's crews for
+	// this draft's proposed jobs. See restaffDraftDay.ts.
+	pinWorker: async ({ request, params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const form = await request.formData();
+		const workerId = form.get('workerId');
+		const date = toDate(form.get('date'));
+		const stationName = form.get('stationName');
+		if (typeof workerId !== 'string' || !workerId) return fail(400, { message: 'workerId required' });
+		if (!date) return fail(400, { message: 'date required (YYYY-MM-DD)' });
+
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		let stationId: string | null = null;
+		if (typeof stationName === 'string' && stationName) {
+			const station = await findActiveStation(stationName);
+			if (!station) return fail(400, { message: 'That station no longer exists.' });
+			stationId = station.id;
+		}
+		try {
+			const result = await pinAndRestaffDraftDay({ draftId: params.id, workerId, date: iso(date), stationId }, user.email);
+			return { success: true as const, peers: result.peers, pushedCount: result.pushedCount, notice: result.notice };
+		} catch (err) {
+			if (err instanceof RestaffError) return fail(409, { message: err.message });
+			throw err;
+		}
+	},
+
+	// "Re-plan crews" (2026-10-14): re-staff every day with proposed jobs against the
+	// current roster, certifications, pins and main/catch rules.
+	replanCrews: async ({ params, locals, url }) => {
+		requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		const result = await replanDraftCrews(params.id);
+		return { success: true as const, notice: result.notice };
 	},
 
 	updateOrderDisplay: async ({ request, locals, url }) => {

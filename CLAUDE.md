@@ -346,6 +346,50 @@ Deliberately not linked to `User`: floor staff don't log in. The daily staffing 
 (`engine/planStaffing.ts`) only ever puts a person on a station they're certified on — see
 "Config settings roadmap" under Known open items.
 
+**Press main / catch (client, 2026-10-14).** `worker_certifications.is_main` marks who may run a
+screen-print press (`isPressKind`, kind `screen_print_auto`) as its **main** printer; everyone
+else on a press is a **catch** (Mitch, Nick and Jose are the mains today — data, not code).
+Rules in `planStaffing.ts`: a press runs only with exactly one main (no main in → press closed
+that day). **There is never a catch without a main** (client, 2026-10-14 — the main does the
+print, a catch assists them): someone pinned to a press that gets no main is released to work
+elsewhere, a committed press crew with no main holds nobody, and the board, People panel and
+`get_staffing` show a mainless press crew as no crew (`pressSafeCrew`, `$lib/schedule/people.ts`)
+with a "no main printer — re-plan" note. The main is always listed first; a running press gets its ideal catches — **1 for shirts, 2 when the press's work is
+mostly hoodies** (BULKY weight class, `idealCatches()`) — filled round-robin so every press gets
+its first catch before any gets a second, and **no more than that** (spare people go elsewhere
+or stay free; a human pin can still add extras). Mains are kept off catch/non-press work while
+someone else can do it, and a main can catch for another main. **A catch halves the whole press
+job** (setup included): main + 1 or 2 catches = job hours ÷ 2; a second catch doesn't halve it
+again; main alone = full time (`estimateHours`, client 2026-10-14 — replaces the run-only
+division for presses). Only presses have
+main/catch; other stations keep plain crew. `assignment_crew.is_main` records who was the main
+on each planned job. New certifications default to catch (migration
+`press_main_and_catch`) — an admin ticks **Main** per press in Settings → People.
+
+**Notes → suggested rules (2026-10-14).** Saving a person's notes (or "Suggest rules from
+notes") has Claude read them (`config/workerNoteRules.ts`) and suggest only rules the system can
+hold: certify/uncertify, main on a press, days out, a one-day pin. Anything else (part days,
+preferences, recurring patterns) is listed back as "not turned into a rule". Nothing changes
+until an admin ticks suggestions and applies them; they're re-validated server-side. The engine
+then reads the stored settings — Claude never places people.
+
+**People panel on the draft board (2026-10-14).** `/schedule/drafts/[id]`'s right-hand,
+collapsible panel (`PeoplePanel.svelte`) lists everyone for a chosen day: station + Main/Catch/
+Crew, free, pinned or out (avatars = initials on a color hashed from the id,
+`$lib/schedule/people.ts`). Job hover shows each crew member and role. Dragging a person onto a
+station row pins them there for that day (`StaffingPin`, shop-wide) and re-plans **that day's
+crews for this draft** from the jobs actually on it (`schedule/restaffDraftDay.ts` →
+`planStaffingForLoads`): only PROPOSED jobs are re-crewed and re-estimated for the new crew
+size; a longer job pushes the ones after it (`repackDraftDays` kind `restaff`, refused if that
+runs past the shift); APPROVED jobs keep their crew. "Pinned ×" in the panel clears the pin.
+**Re-plan crews** (panel button, `replanDraftCrews`) does the same for every day of the draft
+with proposed jobs — use it on drafts made before the roster or these rules existed.
+**No weekends (2026-10-14):** the default capacity never opens a Saturday or Sunday
+(`isWeekendDay`, `$lib/schedule/defaultCapacity.ts`; a real CapacityCalendar row still wins),
+and the board hides weekend days unless a job is already on one.
+Known limit: crew is stored per job, so someone the planner put on a station with no jobs that
+day shows as "Free".
+
 #### `capacity_calendar`
 How much time each station has open, per day.
 
@@ -613,7 +657,7 @@ wovens have no dependency and are placed like any other job. So:
 | `get_order(hoops_order_id)` | *(2026-10-05)* one order in full: jobs with estimates, the open questions that block confirming it, import notes, schedule slots (read-only, `ORDERS_READ`) |
 | `simulate_change(change)` | checks "what if" (a rush order, a moved job) without actually changing anything |
 | `add_order_note(hoops_order_id, note)` | *(added 2026-09-18, not in the original design)* appends a dated, attributed note to an order — the way a note given in conversation reaches `Order.notes` (and from there the order's page and Reports) without the web form |
-| `get_staffing(from, to)` | *(2026-09-28)* the roster with certifications, who's out, who's pinned, and the crew per station/day on the approved schedule |
+| `get_staffing(from, to)` | *(2026-09-28)* the roster with certifications (and `mainOn`: presses they may run as main, 2026-10-14), notes, who's out, who's pinned, and the crew per station/day on the approved schedule with its `main` |
 | `set_worker_availability(worker_name, from, to, available, reason?)` | *(2026-09-28)* marks a person out/in for days; returns the approved jobs they were on those days. Changes no schedule by itself |
 | `set_worker_station(worker_name, date, station_name?)` | *(2026-09-28)* pins a person to a station for a day (must be certified, not out); omit the station to clear |
 
@@ -677,12 +721,18 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     screen print's `run` term; embroidery's **setup & boxing only** (client, 2026-09-28 —
     thread changes, hooping, load/unload, cleanup and sewing stay fixed); every finishing
     formula entirely; DTF/DTG entered hours entirely. OTHER jobs' entered hours stay fixed
-    (not decided yet). There is **no max crew per station** — the floor is organic.
+    (not decided yet). There is **no max crew per station** — the floor is organic —
+    **except screen-print presses (2026-10-14):** main + ideal catches, and any catch
+    halves the whole job once; see "Press main / catch".
   - **Engine picks people** — `engine/planStaffing.ts`, deterministic. One person works
     one station for the whole day; only certified people, never someone marked out;
     human pins kept; every station with work gets ≥1 person (scarcest station first,
-    least-flexible person first); everyone else goes where one more person saves the
-    most crew-divisible time. A station nobody is on that day has no capacity. No roster
+    least-flexible person first, re-counted after each placement; a press first on a tie
+    so a lone main opens it rather than leaving its catches idle); everyone else goes
+    where one more person saves the most crew-divisible time. Anyone crewing committed
+    work (approved/started) that day stays on that station (`withCommittedCrew`, used by
+    every engine run and the board's crew re-plan), so nobody is planned onto two
+    stations in one day; a human pin still wins. A station nobody is on that day has no capacity. No roster
     at all = the old behavior (one unnamed person, every station open). Simplification:
     workload is the whole backlog spread evenly over the window, not re-planned per day.
     `fetchStaffedCapacity()` is what every engine run (automatic draft, propose_schedule,
@@ -813,7 +863,7 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   since the deterministic engine saw zero capacity everywhere even though the drafts
   workspace's own timeline was already *displaying* that same 7.5h/day default as a
   cosmetic fallback. This is a real, visible business assumption (every known station
-  open every day, including weekends, until real numbers are entered), not an invented
+  open every weekday — weekends closed since 2026-10-14 — until real numbers are entered), not an invented
   fact — a real `CapacityCalendar` row always overrides it the moment one exists. (4)
   An order whose due date already fell before the draft's window even starts (a real,
   recurring case — "today" always moves forward) was briefly given a "place it anyway,

@@ -9,6 +9,12 @@ import { orderCandidateSchema, importCorrectionsSchema } from '$lib/server/hoops
 import { getSchedule } from '$lib/server/schedule/getSchedule';
 import { proposeAndPersistSchedule } from '$lib/server/schedule/proposeAndPersistSchedule';
 import { commitDraft, commitSchedule, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
+import { unapproveDraft, unapproveSchedule, UnapproveScheduleError } from '$lib/server/schedule/unapproveSchedule';
+import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
+import { getDraftForTool, GetDraftError, listDraftsForTool, SHOP_SHIFT } from '$lib/server/schedule/getDraftForTool';
+import { listStationsForTool } from '$lib/server/schedule/listStationsForTool';
+import { resolveDraftIdOrShortCode } from '$lib/server/schedule/draftShortCode';
+import { ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
 import { HOOPS_EXTRACTION_RULES } from '$lib/server/hoops/extractionRules';
 import { getOrder, getOrderSchema, listOrders, listOrdersSchema } from '$lib/server/hoops/orderLookup';
 import { simulateChange, simulateChangeSchema } from '$lib/server/schedule/simulateChange';
@@ -30,7 +36,8 @@ import {
  *  - Set `readOnly` truthfully (see McpToolDefinition in mcp/handler.ts). Read-only is
  *    the default expectation; `readOnly: false` is an approved, scoped exception for the
  *    write-tools below (import_hoops_export, confirm_import, add_order_note,
- *    propose_schedule, commit_schedule, set_worker_availability, set_worker_station) —
+ *    propose_schedule, move_assignment, commit_schedule, unapprove_schedule,
+ *    set_worker_availability, set_worker_station) —
  *    each sits behind its own scope (IMPORT_WRITE or SCHEDULE_WRITE). All but
  *    commit_schedule write data that's still human-editable/reversible afterward or is
  *    only a draft; commit_schedule is itself the human schedule-approval gate. Never a
@@ -43,6 +50,13 @@ import {
  *    tagged-template parameters, never string interpolation.
  *  - Validate input with the Zod shape; the handler receives the parsed object.
  *  - Never return secrets, raw upstream payloads, or another user's private data.
+ *
+ * list_drafts / get_draft (added 2026-10-14) are the chat-side read tools for drafts —
+ * get_schedule only sees the approved live schedule, so without these Claude has no way
+ * to find a draft by name or inspect what's inside one. Both accept a draft's full cuid
+ * OR its 6-char shortCode (draftShortCode.ts), and move_assignment / commit_schedule /
+ * unapprove_schedule now resolve the same short code so a code read from the UI can be
+ * pasted straight into any write-side draft tool.
  *
  * These are the tools in CLAUDE.md's "Domain MCP tools" table. import_hoops_export and
  * confirm_import are the persistence half of the Hoops import feature
@@ -80,6 +94,19 @@ async function approverFor(principal: Principal, givenName: string | undefined):
 
 function defineTool<Shape extends z.ZodRawShape>(tool: McpToolDefinition<Shape>): McpToolDefinition {
 	return tool as unknown as McpToolDefinition;
+}
+
+/**
+ * Resolves a draft id or 6-char short code (as returned by list_drafts / get_draft) to a
+ * full id, so every write-side draft tool — move_assignment, commit_schedule,
+ * unapprove_schedule — accepts whichever one the person has in hand. Throws a user-facing
+ * error on miss or ambiguity, matching each caller's own error class.
+ */
+async function resolveDraftIdForTool<E extends Error>(idOrCode: string, ErrorClass: new (message: string) => E): Promise<string> {
+	const resolved = await resolveDraftIdOrShortCode(idOrCode);
+	if (resolved === null) throw new ErrorClass(`No schedule draft matches "${idOrCode}". Try list_drafts.`);
+	if (resolved === 'AMBIGUOUS') throw new ErrorClass(`Short code "${idOrCode}" matches more than one draft; use the full id from list_drafts.`);
+	return resolved;
 }
 
 /** Every tool this MCP server registers. Each tool's `principal` argument (when used)
@@ -159,20 +186,26 @@ export const mcpTools: readonly McpToolDefinition[] = [
 	defineTool({
 		name: 'propose_schedule',
 		description:
-			'Builds a suggested schedule with the deterministic engine and saves it as a draft on the board ' +
-			'(Schedule page) — it does not change the live schedule. Started work never moves, and by default nothing ' +
-			'already approved moves either: only new work is placed around it. Pass replanFrom/replanTo to let ' +
-			'approved, not-started jobs dated in that window move: for a rush order use the whole from–to window; ' +
-			'when someone is out use just the days they are out (their jobs move to the next open slots, by due ' +
-			'date). Due date is the hard floor; jobs that cannot make it are flagged at risk, never dropped. Show the ' +
-			'person `changes` (new / moved / kept_at_risk) and `atRisk`, and link `draftPath`; nothing is real until ' +
-			"they approve it (commit_schedule with the draftId, or Approve on the board). At most 28 days. Example: " +
-			"'Maria is out Tuesday, fix the schedule' → { from: '2026-10-06', to: '2026-11-02', replanFrom: " +
-			"'2026-10-06', replanTo: '2026-10-06', reason: 'Maria out Tue' }. Orders are all-or-nothing: one " +
-			"that can't fully fit is left off the plan and listed in `unscheduledOrders` with a plain reason (also " +
-			"shown as a red flag on the Orders page) — tell the person which ones and why; orders needing re-review " +
-			'are never planned. Returns { draftId, draftPath, assignmentIds, placedCount, atRisk, unscheduledOrders, ' +
-			'changes, reasoning }.',
+			"CREATES A NEW DRAFT — call this only when the person wants a fresh plan from scratch. If they're asking " +
+			"to tweak, re-order, buffer, or re-time jobs inside a draft that already exists (any phrase like 'in that " +
+			"draft', 'the one I'm looking at', 'add 10 minutes between items', 'move this one earlier'), do NOT call " +
+			"propose_schedule — use list_drafts to find the draft (or ask the person for its 6-char short code), " +
+			"get_draft to read its current assignments and the shop's shift timing, and move_assignment per item to " +
+			"adjust in place. Re-proposing silently creates a sibling draft with the same name and strands the one " +
+			"they were editing.\n\nWhen a NEW plan is what's wanted: builds a suggested schedule with the deterministic " +
+			"engine and saves it as a new draft on the board (Schedule page) — it does not change the live schedule. " +
+			'Started work never moves, and by default nothing already approved moves either: only new work is placed ' +
+			'around it. Pass replanFrom/replanTo to let approved, not-started jobs dated in that window move: for a ' +
+			'rush order use the whole from–to window; when someone is out use just the days they are out (their jobs ' +
+			'move to the next open slots, by due date). Due date is the hard floor; jobs that cannot make it are ' +
+			'flagged at risk, never dropped. Show the person `changes` (new / moved / kept_at_risk) and `atRisk`, and ' +
+			"link `draftPath`; nothing is real until they approve it (commit_schedule with the draftId, or Approve on " +
+			"the board). At most 28 days. Example: 'Maria is out Tuesday, fix the schedule' → { from: '2026-10-06', " +
+			"to: '2026-11-02', replanFrom: '2026-10-06', replanTo: '2026-10-06', reason: 'Maria out Tue' }. Orders are " +
+			"all-or-nothing: one that can't fully fit is left off the plan and listed in `unscheduledOrders` with a " +
+			'plain reason (also shown as a red flag on the Orders page) — tell the person which ones and why; orders ' +
+			'needing re-review are never planned. Returns { draftId, draftPath, assignmentIds, placedCount, atRisk, ' +
+			'unscheduledOrders, changes, reasoning }.',
 		inputSchema: {
 			from: z.iso.date(),
 			to: z.iso.date(),
@@ -214,7 +247,157 @@ export const mcpTools: readonly McpToolDefinition[] = [
 				throw new CommitScheduleError('Give either a draftId or assignmentIds (not both).');
 			}
 			const approver = await approverFor(principal, approvedBy);
-			return draftId ? commitDraft(draftId, approver) : commitSchedule(assignmentIds ?? [], approver);
+			if (draftId) {
+				const resolvedId = await resolveDraftIdForTool(draftId, CommitScheduleError);
+				return commitDraft(resolvedId, approver);
+			}
+			return commitSchedule(assignmentIds ?? [], approver);
+		}
+	}),
+	defineTool({
+		name: 'unapprove_schedule',
+		description:
+			"Reverses commit_schedule — flips APPROVED jobs back to PROPOSED so they can be moved with " +
+			"move_assignment or re-approved after edits. The recovery path when a plan was approved too early " +
+			"and someone wants to adjust it without re-running propose_schedule. Only approved, not-started jobs " +
+			"can be unapproved; a job that has already started (IN_PROGRESS) or finished (COMPLETE) is refused — " +
+			"those have already happened on the floor and must not be rewound. Pass draftId to unapprove every " +
+			"approved, not-started job in one draft (its status rolls back from APPROVED to DRAFT so the board " +
+			"treats it as editable again), or assignmentIds to unapprove a specific set. Known limit: commit " +
+			"deletes a job's prior approved slot when it supersedes it, and those deleted slots are not restored " +
+			"here — the unapproved rows return as PROPOSED on their own; re-propose if the prior slot mattered. " +
+			"Example: 'actually, unapprove that whole plan I just approved' → { draftId: '...' }. Returns " +
+			"{ assignments, draftsReopened, skipped? }.",
+		inputSchema: {
+			draftId: z.string().min(1).optional(),
+			assignmentIds: z.array(z.string()).min(1).optional()
+		},
+		requiredScope: 'SCHEDULE_WRITE',
+		readOnly: false,
+		handler: async ({ draftId, assignmentIds }, principal) => {
+			if ((draftId === undefined) === (assignmentIds === undefined)) {
+				throw new UnapproveScheduleError('Give either a draftId or assignmentIds (not both).');
+			}
+			const actor = principalIdentity(principal);
+			if (draftId) {
+				const resolvedId = await resolveDraftIdForTool(draftId, UnapproveScheduleError);
+				return unapproveDraft(resolvedId, actor);
+			}
+			return unapproveSchedule(assignmentIds ?? [], actor);
+		}
+	}),
+	defineTool({
+		name: 'list_stations',
+		description:
+			"Lists every station on the shop floor with the two values a drag-and-drop or move_assignment " +
+			"actually compares: `label` (what people see) and `kind` (which estimate_hours formula it runs — " +
+			"the real gate). Diagnostic for \"why can't I drag this screen-print job onto Screen Print Manual?\" " +
+			"problems: a station's kind must equal the line item's expected kind, so a Manual press labeled " +
+			"\"Screen Print Manual\" is only draggable from an auto press if its kind is `screen_print_auto` too " +
+			"(both share one kind by design — client decision 2026-09-25, same time assumption). An entry with " +
+			"`kindIsRecognized: false` is misconfigured (likely a legacy station from before admin-managed " +
+			"stations, backfilled with `kind = name`); every job will be refused on it until an admin archives " +
+			"and re-creates it with the right kind in Settings → Stations. `hasUnrecognizedKinds: true` on the " +
+			"result means at least one such station exists on this shop. Example question: \"why does the manual " +
+			"press reject screen-print jobs?\" → {}. Returns { stations, hasUnrecognizedKinds }.",
+		inputSchema: {
+			// Set true to also return archived stations (for diagnosing a station that was already
+			// archived — e.g. "did someone archive the DTG press?"). Default false.
+			includeArchived: z.boolean().optional()
+		},
+		requiredScope: 'SCHEDULE_READ',
+		readOnly: true,
+		handler: async ({ includeArchived }) => listStationsForTool(includeArchived ?? false)
+	}),
+	defineTool({
+		name: 'list_drafts',
+		description:
+			"Lists schedule drafts on the board — every one that isn't archived, newest first — so Claude can find " +
+			"the draft the person is talking about without seeing the UI. CALL THIS FIRST whenever the person refers " +
+			"to \"that draft\", \"the one from today\", \"Automatic schedule — <date>\", or any existing draft they're " +
+			"editing — do not create a new one with propose_schedule just because you can't see what exists. Each entry " +
+			"has `id` (the full cuid used by move_assignment/commit_schedule/unapprove_schedule), `shortCode` (6 chars, " +
+			"e.g. 'AB3C9F', also accepted anywhere `draftId` is), `name`, `status` (DRAFT / PROPOSED / APPROVED), " +
+			"window (startDate + weeks), and counts: totalAssignments, proposedCount, approvedCount. For the draft's " +
+			"actual assignments and the shop's shift timing, call get_draft next. Filter by `status` when the person " +
+			"says \"the approved one\" or \"the proposed drafts\". Example: 'which drafts do we have?' → {}. Returns " +
+			"{ drafts }.",
+		inputSchema: {
+			status: z.enum(ScheduleDraftStatus).optional()
+		},
+		requiredScope: 'SCHEDULE_READ',
+		readOnly: true,
+		handler: async ({ status }) => ({ drafts: await listDraftsForTool(status), shift: SHOP_SHIFT })
+	}),
+	defineTool({
+		name: 'get_draft',
+		description:
+			"Reads one schedule draft in full — the only way for Claude to see what's inside a draft, since get_schedule " +
+			"only returns the approved live schedule. Pass either the full id or the 6-char shortCode from list_drafts. " +
+			"Returns the draft's metadata plus every assignment in run order (date → station → sequenceOrder) with: " +
+			"`id` (pass to move_assignment), `job` (readable label), `stationName` (pass to move_assignment), `date`, " +
+			"`startMinuteOfDay` (minutes from midnight), `durationMinutes`, `estimatedHours`, `status`. ALSO returns " +
+			"`shift`: the shop's working day — `startMinuteOfDay` (480 = 8:00 AM), `endMinuteOfDay` (990 = 4:30 PM), " +
+			"and the three breaks (10:00–10:15, 12:30–13:00 lunch, 15:00–15:15) with their start minutes and durations. " +
+			"USE `shift.startMinuteOfDay` AS THE DAY-OPEN BASELINE WHEN COMPUTING MOVES — do not ask the person what " +
+			"time the shift starts, that's in the response. Use this before any batch move (e.g. adding a 10-minute " +
+			"buffer between items) so start times come from the draft's actual current layout, not guessed. Example: " +
+			"'show me what's in that draft' → { draftIdOrCode: 'AB3C9F' }. Returns { draft }.",
+		inputSchema: {
+			draftIdOrCode: z.string().min(1)
+		},
+		requiredScope: 'SCHEDULE_READ',
+		readOnly: true,
+		handler: async ({ draftIdOrCode }) => {
+			try {
+				return { draft: await getDraftForTool(draftIdOrCode) };
+			} catch (err) {
+				if (err instanceof GetDraftError) throw err;
+				throw err;
+			}
+		}
+	}),
+	defineTool({
+		name: 'move_assignment',
+		description:
+			"THE TOOL FOR EDITING A DRAFT IN PLACE — use this (not propose_schedule) whenever the person wants to " +
+			"adjust jobs inside a draft that already exists: re-time a slot, re-order items in a station's queue, " +
+			"add buffers between jobs, move something to another station or day. Call it once per assignment with " +
+			"the new absolute `startMinuteOfDay`; peers in the day cascade to preserve gaps the same way a " +
+			"drag-and-drop would.\n\nMoves one proposed job inside a draft — changes its station, its day, or its " +
+			"start time without touching the live schedule. Only PROPOSED rows inside the named draft can move; an " +
+			"already-approved job is refused with a clear message (unapprove_schedule if you want to move it). " +
+			"Row-kind restrictions still apply: a screen-print job only lands on a screen-print station, embroidery " +
+			"on an embroidery station, and so on — both the manual and auto presses share the screen-print kind, " +
+			"so manual↔auto moves are allowed. `stationName` is the station's internal name (as returned by " +
+			"get_draft's `assignments[].stationName` or propose_schedule's `changes[].to.station`). `date` is " +
+			"YYYY-MM-DD. `startMinuteOfDay` is optional — minutes from midnight (e.g. 480 = 8:00 AM, the shop's " +
+			"day-open; see get_draft's `shift` for the full timing); when omitted the assignment keeps its current " +
+			"start minute. Workflow for a batch adjustment: get_draft once (reads shift + current layout), compute " +
+			"the new startMinuteOfDay for each item in the sequence, call move_assignment per item. Do NOT call " +
+			"propose_schedule to re-arrange an existing draft — it creates a new draft and strands the one being " +
+			"edited. Example: 'move that assignment to Screen Print Auto 2 at 10:00 on 2026-10-14' → { draftId: " +
+			"'...', assignmentId: '...', stationName: 'screen_print_auto_2', date: '2026-10-14', startMinuteOfDay: " +
+			"600 }. Returns { id, peers, pushedCount }.",
+		inputSchema: {
+			draftId: z.string().min(1),
+			assignmentId: z.string().min(1),
+			stationName: z.string().min(1),
+			date: z.iso.date(),
+			// Optional: keep the current start when omitted — Claude rarely has an exact
+			// wall-clock minute from the conversation and shouldn't have to guess one.
+			startMinuteOfDay: z.number().int().min(0).max(24 * 60).optional()
+		},
+		requiredScope: 'SCHEDULE_WRITE',
+		readOnly: false,
+		handler: async (input, principal) => {
+			try {
+				const resolvedDraftId = await resolveDraftIdForTool(input.draftId, MoveDraftAssignmentError);
+				return await moveDraftAssignment({ ...input, draftId: resolvedDraftId }, principalIdentity(principal));
+			} catch (err) {
+				if (err instanceof MoveDraftAssignmentError) throw new Error(err.message);
+				throw err;
+			}
 		}
 	}),
 	defineTool({
@@ -269,7 +452,13 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		description:
 			"Shows who works where: the roster with each person's certified stations, who is out, who is pinned to a " +
 			"station, and the crew on each station/day of the approved schedule. Example question: 'who's on the " +
-			"autos Tuesday?' → { from: '2026-10-06', to: '2026-10-06' }. Returns { roster, out, pinned, approvedCrews }.",
+			"autos Tuesday?' → { from: '2026-10-06', to: '2026-10-06' }. Returns { roster, out, pinned, approvedCrews }. " +
+			'A screen-print press runs with exactly one main printer (roster[].mainOn lists the presses a person may ' +
+			'run as main; approvedCrews[].main names who is, listed first in crew) and everyone else on it is a catch ' +
+			'(approvedCrews[].catches) who assists the main. There is never a catch without a main: a press with no ' +
+			'main in that day is closed and has no crew. Read roster[].notes before proposing a schedule: if a note states something ' +
+			'the staffing plan should know (someone out, someone on a station a given day), ask the user and then ' +
+			'use set_worker_availability / set_worker_station — never place people yourself.',
 		inputSchema: getStaffingSchema.shape,
 		requiredScope: 'SCHEDULE_READ',
 		readOnly: true,
