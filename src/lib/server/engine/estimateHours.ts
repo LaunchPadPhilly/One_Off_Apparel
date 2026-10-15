@@ -429,6 +429,9 @@ function applyEstimateOverride(item: EstimateHoursInput): EstimateHoursResult {
 		formula = estimateHoursRaw(item);
 	} catch (error) {
 		if (!(error instanceof EstimationError)) throw error;
+		// A Patch Install's "outsourced?" answer isn't something hours can stand in for:
+		// unanswered it's still a question, and outsourced it has no hours at all.
+		if (error instanceof OutsourcedLineItemError || (error instanceof MissingLineItemDataError && error.field === 'outsourced')) throw error;
 	}
 	if (formula) {
 		const divisibleShare = formula.hours > 0 ? (formula.crewDivisibleHours ?? 0) / formula.hours : 0;
