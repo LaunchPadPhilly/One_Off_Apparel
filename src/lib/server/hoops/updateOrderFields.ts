@@ -1,6 +1,6 @@
 import { prisma } from '$lib/server/prisma';
 import type { Prisma } from '../../../../prisma/generated/prisma/client';
-import { LineItemStatus, OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import { LineItemStatus, OrderStatus, ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 import { checkCompletion } from '$lib/server/engine/checkCompletion';
 import { isPatchInstall } from '$lib/schedule/patchInstall';
 import { orderCorrectionSchema, lineItemCorrectionSchema, type OrderCorrection, type LineItemCorrection } from './types';
@@ -85,6 +85,19 @@ export async function updateLineItemFields(lineItemId: string, patch: LineItemCo
 				select: { itemType: true, otherJobType: true, outsourced: true, status: true, order: { select: { status: true } } }
 			});
 			if (validated.outsourced === true && !(before && isPatchInstall(before))) throw new Error('Only a Patch Install can be marked outsourced.');
+			if (validated.outsourced === true && before?.outsourced !== true) {
+				// Work that's started is being done in house; slots not started yet are freed.
+				const slots = await tx.scheduleAssignment.findMany({ where: { lineItemId }, select: { id: true, status: true, stationId: true, date: true, startMinuteOfDay: true } });
+				if (slots.some((slot) => slot.status === ScheduleAssignmentStatus.IN_PROGRESS || slot.status === ScheduleAssignmentStatus.COMPLETE)) {
+					throw new Error("This Patch Install has already been started on the floor, so it can't be marked outsourced.");
+				}
+				for (const slot of slots) {
+					await tx.domainAuditLog.create({
+						data: { entity: 'ScheduleAssignment', entityId: slot.id, action: 'schedule_removed_outsourced', actor, diff: { lineItemId, status: slot.status, stationId: slot.stationId, date: slot.date, startMinuteOfDay: slot.startMinuteOfDay } }
+					});
+				}
+				if (slots.length > 0) await tx.scheduleAssignment.deleteMany({ where: { id: { in: slots.map((slot) => slot.id) } } });
+			}
 			if (before && validated.outsourced === true && before.status !== LineItemStatus.COMPLETE && before.order.status !== OrderStatus.NEEDS_REVIEW) {
 				completeAfterCommit = true;
 			}

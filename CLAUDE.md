@@ -263,7 +263,9 @@ stops an order reaching Orders: the reviewer sees what's missing as questions in
   outsourced (the import and `updateLineItemFields` enforce this). If outsourced, the
   job counts as done: `confirmImport`, or a later edit through `updateLineItemFields`,
   marks it COMPLETE via `check_completion`, which unlocks a waiting fold & bag and can
-  complete the order. `fetchBacklog()` never schedules it. Switching back to in-house
+  complete the order. Its not-started schedule slots are removed (audit
+  `schedule_removed_outsourced`); once it has started on the floor it can no longer be
+  outsourced. `fetchBacklog()` never schedules it. Switching back to in-house
   reopens the job (NEEDS_REVIEW) unless the order is already complete. If in-house, its hours are
   `quantity × 3 / 60`, and it still needs a station. Filter on `outsourced` as
   null-or-false, never `NOT: { outsourced: true }`: that becomes SQL

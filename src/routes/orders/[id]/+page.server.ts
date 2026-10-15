@@ -235,8 +235,8 @@ export const actions: Actions = {
 		// outsourced (2026-10-14, Patch Install only — see $lib/schedule/patchInstall.ts):
 		// a tri-state the form sends as "true"/"false", or omits to leave it alone.
 		// Same hidden-marker pattern as manualEstimatedHours above: the input is only
-		// present on the form for a patch install, and leaving the select on "— choose —"
-		// must not silently clear a previous answer.
+		// present on the form for a patch install. The select preselects the stored
+		// answer, so it only clears (null) when someone deliberately re-picks "— choose —".
 		if (data.has('outsourcedSubmitted')) {
 			const raw = data.get('outsourced');
 			if (raw === 'true') patch.outsourced = true;
