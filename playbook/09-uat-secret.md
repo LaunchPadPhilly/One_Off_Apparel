@@ -39,6 +39,7 @@ Edit `$F` with `"${EDITOR:-vi}" "$F"` and set:
 | `MCP_PUBLIC_URL` | `https://uat.<domain>/api/mcp` |
 | `MCP_OAUTH_SCOPES` | `data:read reports:read schedule:read schedule:write import:write orders:read` (every scope; leaving it out lists all of them too) |
 | `MCP_SERVER_TOKEN` | **Option B only:** output of `openssl rand -base64 48` |
+| `ANTHROPIC_API_KEY` | A key from the team's Anthropic Console (API Keys). It powers the Orders page's PDF import, answering questions from order notes, and suggesting rules from people's notes; without it those three features fail for every user. Billed per use. |
 
 Leave `DATABASE_URL` as the template placeholder; the next step overwrites it.
 
