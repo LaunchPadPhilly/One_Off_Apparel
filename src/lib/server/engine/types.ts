@@ -137,6 +137,9 @@ export interface CapacitySlot {
 	// NEW (2026-09-28): the people working this station that day (planStaffing.ts).
 	// Absent = no roster in use, so jobs are estimated for one person (the old behavior).
 	crewWorkerIds?: string[];
+	// NEW (2026-10-14): on a screen-print press, which of crewWorkerIds is the main
+	// printer (the rest are catches). Absent on every other station kind.
+	mainWorkerId?: string;
 	// NEW (2026-10-05): work already committed to this slot that this run keeps in
 	// place. `availableHrs` should already have those hours taken out; these say where
 	// the day's free time starts (minute of day) and how many jobs are already queued,
@@ -162,6 +165,8 @@ export interface ProposedAssignment {
 	estimatedHours: number;
 	// NEW (2026-09-28): the crew the hours were estimated for (empty = one unnamed person).
 	crewWorkerIds: string[];
+	// NEW (2026-10-14): the press's main printer among crewWorkerIds (null off-press).
+	mainWorkerId: string | null;
 }
 
 /** A job the engine could not place on time, with why (flag_at_risk — never hidden). */

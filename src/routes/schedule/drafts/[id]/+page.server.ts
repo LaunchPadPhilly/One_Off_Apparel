@@ -4,12 +4,14 @@ import { deleteDraft, getDraft } from '$lib/server/schedule/draft';
 import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
 import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
+import { pinAndRestaffDraftDay, replanDraftCrews, RestaffError } from '$lib/server/schedule/restaffDraftDay';
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
+import { pressSafeCrew } from '$lib/schedule/people';
+import { isPressKind } from '$lib/schedule/stationKinds';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
-import { isWeekendDate } from '$lib/schedule/weekends';
 import {
 	OrderStatus,
 	ScheduleAssignmentStatus
@@ -131,29 +133,42 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			where: { scheduleDraftId: draft.id },
 			include: {
 				lineItem: { select: { id: true, orderId: true } },
-				station: { select: { id: true, name: true } },
-				// The day's crew on this job (planStaffing.ts, 2026-09-28).
-				crew: { select: { worker: { select: { name: true } } } }
+				station: { select: { id: true, name: true, kind: true } },
+				// The day's crew on this job (planStaffing.ts, 2026-09-28), with who's the
+				// press's main printer (2026-10-14).
+				crew: { select: { isMain: true, worker: { select: { id: true, name: true } } } }
 			},
 			orderBy: [{ date: 'asc' }, { startMinuteOfDay: 'asc' }, { sequenceOrder: 'asc' }]
 		})
 	]);
-	const unavailability = await prisma.workerUnavailability.findMany({
-		where: { date: { gte: draft.startDate, lte: endDate }, worker: { archivedAt: null } },
-		select: { date: true, worker: { select: { name: true } } }
-	});
+	const [unavailability, workers, pins] = await Promise.all([
+		prisma.workerUnavailability.findMany({
+			where: { date: { gte: draft.startDate, lte: endDate }, worker: { archivedAt: null } },
+			select: { date: true, reason: true, worker: { select: { id: true, name: true } } }
+		}),
+		// The People panel (2026-10-14): the active roster with certifications and notes.
+		prisma.worker.findMany({
+			where: { archivedAt: null },
+			orderBy: { name: 'asc' },
+			select: {
+				id: true,
+				name: true,
+				notes: true,
+				certifications: { where: { station: { archivedAt: null } }, select: { isMain: true, station: { select: { name: true } } } }
+			}
+		}),
+		prisma.staffingPin.findMany({
+			where: { date: { gte: draft.startDate, lte: endDate }, worker: { archivedAt: null } },
+			select: { date: true, workerId: true, station: { select: { name: true } } }
+		})
+	]);
 
 	// One entry per (station, day) in the window; falls back to the default day
 	// length when the capacity_calendar has no row for that pair. That keeps the
 	// timeline usable before capacity_calendar has been seeded for a shop.
-	// Weekends are omitted (2026-10-14): the shop doesn't operate Saturday or Sunday,
-	// so the board renders Mon–Fri only. The same filter is applied in fetchCapacity,
-	// proposeSchedule and getSchedule so no path can resurrect a weekend day.
 	const days: string[] = [];
 	for (let i = 0; i < draft.weeks * 7; i++) {
-		const day = iso(addDays(startIso, i));
-		if (isWeekendDate(day)) continue;
-		days.push(day);
+		days.push(iso(addDays(startIso, i)));
 	}
 	// Row order is the admin's (sortOrder, then label). No fallback list any more —
 	// the migration seeds the original stations, and an empty list means an admin
@@ -242,7 +257,13 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			startMinuteOfDay: a.startMinuteOfDay ?? 8 * 60,
 			estimatedHours: a.estimatedHours,
 			status: a.status,
-			crew: a.crew.map((member) => member.worker.name).sort()
+			// Main first; a press crew with no main isn't shown (no catch without a main) —
+			// noMain tells the board to say so instead.
+			crew: pressSafeCrew(
+				a.crew.map((member) => ({ id: member.worker.id, name: member.worker.name, isMain: member.isMain })),
+				isPressKind(a.station.kind)
+			),
+			noMain: isPressKind(a.station.kind) && a.crew.length > 0 && !a.crew.some((member) => member.isMain)
 		})),
 		stationNames,
 		// name → display label / formula kind, for the board's row labels, the
@@ -251,7 +272,16 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		capacity,
 		defaultStationDayHours: DEFAULT_STATION_DAY_HOURS,
 		// Who's out each day of the draft (set through Claude, 2026-09-28): date → names.
-		outByDate: groupNamesByDate(unavailability)
+		outByDate: groupNamesByDate(unavailability),
+		// The People panel (2026-10-14): roster, days out and pins in this window.
+		people: workers.map((w) => ({
+			id: w.id,
+			name: w.name,
+			notes: w.notes,
+			certifications: w.certifications.map((c) => ({ stationName: c.station.name, isMain: c.isMain }))
+		})),
+		peopleOut: unavailability.map((row) => ({ date: iso(row.date), workerId: row.worker.id, reason: row.reason })),
+		pins: pins.map((row) => ({ date: iso(row.date), workerId: row.workerId, stationName: row.station.name }))
 	};
 };
 
@@ -320,9 +350,6 @@ export const actions: Actions = {
 		}
 		if (lineItem.order.deadline.getTime() < startOfToday().getTime()) {
 			return fail(400, { message: "This order's deadline has already passed — it can't be scheduled until the deadline is corrected." });
-		}
-		if (isWeekendDate(date)) {
-			return fail(400, { message: "The shop doesn't operate on Saturday or Sunday — pick a weekday." });
 		}
 
 		const station = await findActiveStation(stationName);
@@ -453,6 +480,45 @@ export const actions: Actions = {
 			throw err;
 		}
 		return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
+	},
+
+	// People panel (2026-10-14): drop a person on a station row to pin them there for
+	// that day (no stationName = clear their pin), then re-plan that day's crews for
+	// this draft's proposed jobs. See restaffDraftDay.ts.
+	pinWorker: async ({ request, params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const form = await request.formData();
+		const workerId = form.get('workerId');
+		const date = toDate(form.get('date'));
+		const stationName = form.get('stationName');
+		if (typeof workerId !== 'string' || !workerId) return fail(400, { message: 'workerId required' });
+		if (!date) return fail(400, { message: 'date required (YYYY-MM-DD)' });
+
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		let stationId: string | null = null;
+		if (typeof stationName === 'string' && stationName) {
+			const station = await findActiveStation(stationName);
+			if (!station) return fail(400, { message: 'That station no longer exists.' });
+			stationId = station.id;
+		}
+		try {
+			const result = await pinAndRestaffDraftDay({ draftId: params.id, workerId, date: iso(date), stationId }, user.email);
+			return { success: true as const, peers: result.peers, pushedCount: result.pushedCount, notice: result.notice };
+		} catch (err) {
+			if (err instanceof RestaffError) return fail(409, { message: err.message });
+			throw err;
+		}
+	},
+
+	// "Re-plan crews" (2026-10-14): re-staff every day with proposed jobs against the
+	// current roster, certifications, pins and main/catch rules.
+	replanCrews: async ({ params, locals, url }) => {
+		requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		const result = await replanDraftCrews(params.id);
+		return { success: true as const, notice: result.notice };
 	},
 
 	updateOrderDisplay: async ({ request, locals, url }) => {

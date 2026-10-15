@@ -43,19 +43,10 @@ export function isFinishingKind(kind: string | null | undefined): boolean {
 	return kind ? byKey.get(kind)?.category === 'finishing' : false;
 }
 
-/** The printing-press station kind. Both auto and manual presses share this one kind by
- *  design (see the header comment on STATION_KINDS). Used by the Relabel-press constraint:
- *  Relabel is done BY the press operator between press runs, so a worker scheduled to run
- *  the relabel station must also be certified on a press. */
-export const PRINTING_PRESS_KIND = 'screen_print_auto';
-
-/** The printed-relabel station kind — paired with PRINTING_PRESS_KIND by the business
- *  rule above. Centralized here so UI, engine and MCP tools agree on the identifier. */
+/** The printed-relabel station kind. Relabel is done BY the press operator between press
+ *  runs, so a worker who runs it must also be certified on a press (isPressKind below).
+ *  Centralized here so UI, engine and MCP tools agree on the identifier. */
 export const PRINTED_RELABEL_KIND = 'printed_relabel';
-
-export function isPressKind(kind: string | null | undefined): boolean {
-	return kind === PRINTING_PRESS_KIND;
-}
 
 export function isRelabelKind(kind: string | null | undefined): boolean {
 	return kind === PRINTED_RELABEL_KIND;
@@ -64,4 +55,15 @@ export function isRelabelKind(kind: string | null | undefined): boolean {
 /** A human label for a kind key; falls back to title-casing an unknown key. */
 export function stationKindLabel(kind: string): string {
 	return byKey.get(kind)?.label ?? kind.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Screen-print presses (2026-10-14) are the only stations with a main / catch crew: a
+ * press runs only with one main printer (a person certified on it as main), and
+ * everyone else on it that day is a catch. Every other kind has plain crew.
+ */
+export const PRESS_KIND = 'screen_print_auto';
+
+export function isPressKind(kind: string | null | undefined): boolean {
+	return kind === PRESS_KIND;
 }

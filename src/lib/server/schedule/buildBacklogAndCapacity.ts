@@ -12,10 +12,9 @@ import {
 	OrderStatus
 } from '../../../../prisma/generated/prisma/enums';
 import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, type CapacitySlot, type ExternalDependencyState } from '$lib/server/engine/types';
-import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
-import { isWeekendDate } from '$lib/schedule/weekends';
+import { DEFAULT_STATION_DAY_HOURS, isWeekendDay } from '$lib/schedule/defaultCapacity';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
-import { planStaffing, staffingKey, type StaffingInputs } from '$lib/server/engine/planStaffing';
+import { planStaffing, staffingKey, withCommittedCrew, type StaffingInputs } from '$lib/server/engine/planStaffing';
 import type { DateRange } from './types';
 
 /** Midnight UTC today — the cutoff for "deadline already passed". Dates are stored as UTC days. */
@@ -71,8 +70,10 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			],
 			// Outsourced work is handled externally (2026-10-14) and never gets a slot on
 			// the shop's schedule — on confirm_import it's also flipped to COMPLETE so the
-			// order can complete naturally. This filter is the defense-in-depth.
-			NOT: { outsourced: true },
+			// order can complete naturally. This filter is the defense-in-depth. Written as
+			// null-or-false: `NOT: { outsourced: true }` becomes SQL `NOT outsourced = true`,
+			// which is NULL for the (usual) unset column and would drop every job.
+			AND: [{ OR: [{ outsourced: null }, { outsourced: false }] }],
 			order: {
 				status: OrderStatus.CONFIRMED,
 				deadline: { gte: startOfToday() }
@@ -204,28 +205,22 @@ export async function fetchCapacity(range: DateRange): Promise<CapacitySlot[]> {
 		include: { station: { select: { id: true, name: true, kind: true } } }
 	});
 
-	// Weekend rows are dropped (2026-10-14): the shop is closed Sat/Sun. The default
-	// below also skips weekends, and proposeSchedule has a defensive filter so a legacy
-	// CapacityCalendar row on a weekend can't resurrect it.
-	const realSlots: CapacitySlot[] = rows
-		.filter((row) => !isWeekendDate(row.date))
-		.map((row) => ({
-			stationId: row.station.id,
-			stationName: row.station.name,
-			stationKind: row.station.kind,
-			date: row.date,
-			availableHrs: row.availableHrs
-		}));
+	const realSlots: CapacitySlot[] = rows.map((row) => ({
+		stationId: row.station.id,
+		stationName: row.station.name,
+		stationKind: row.station.kind,
+		date: row.date,
+		availableHrs: row.availableHrs
+	}));
 
-	// Fill every (station, weekday) that has no real row with the default, so a real
-	// row always wins and the default only covers gaps.
+	// Fill every (station, day) that has no real row with the default, so a real row
+	// always wins and the default only covers gaps.
 	const existingKeys = new Set(realSlots.map((slot) => `${slot.stationId}__${iso(slot.date)}`));
 	const defaultSlots: CapacitySlot[] = [];
 	for (const station of stations) {
 		for (const day of enumerateDays(range)) {
-			if (isWeekendDate(day)) continue;
 			const key = `${station.id}__${day}`;
-			if (existingKeys.has(key)) continue;
+			if (existingKeys.has(key) || isWeekendDay(day)) continue; // no default weekend work
 			defaultSlots.push({ stationId: station.id, stationName: station.name, stationKind: station.kind, date: new Date(`${day}T00:00:00Z`), availableHrs: DEFAULT_STATION_DAY_HOURS });
 		}
 	}
@@ -244,13 +239,17 @@ export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInp
 	const [workers, unavailability, pins] = await Promise.all([
 		prisma.worker.findMany({
 			where: { archivedAt: null },
-			select: { id: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
+			select: { id: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, isMain: true } } }
 		}),
 		prisma.workerUnavailability.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true } }),
 		prisma.staffingPin.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true, stationId: true } })
 	]);
 	return {
-		workers: workers.map((worker) => ({ id: worker.id, stationIds: worker.certifications.map((cert) => cert.stationId) })),
+		workers: workers.map((worker) => ({
+			id: worker.id,
+			stationIds: worker.certifications.map((cert) => cert.stationId),
+			mainStationIds: worker.certifications.filter((cert) => cert.isMain).map((cert) => cert.stationId)
+		})),
 		unavailable: new Set(unavailability.map((row) => staffingKey(row.workerId, row.date))),
 		pins: new Map(pins.map((row) => [staffingKey(row.workerId, row.date), row.stationId]))
 	};
@@ -259,9 +258,14 @@ export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInp
 /**
  * fetchCapacity() with each (station, day) staffed by planStaffing — the capacity every
  * engine run should use (2026-09-28). Slots with nobody on them are dropped; with no
- * roster at all it's the same as fetchCapacity().
+ * roster at all it's the same as fetchCapacity(). `committedCrew` is the committed work
+ * staying put in this run: its crew stays on its station that day (withCommittedCrew).
  */
-export async function fetchStaffedCapacity(range: DateRange, backlog: readonly BacklogItem[]): Promise<CapacitySlot[]> {
+export async function fetchStaffedCapacity(
+	range: DateRange,
+	backlog: readonly BacklogItem[],
+	committedCrew: Parameters<typeof withCommittedCrew>[1] = []
+): Promise<CapacitySlot[]> {
 	const [capacity, inputs] = await Promise.all([fetchCapacity(range), fetchStaffingInputs(range)]);
-	return planStaffing(backlog, capacity, inputs);
+	return planStaffing(backlog, capacity, withCommittedCrew(inputs, committedCrew));
 }

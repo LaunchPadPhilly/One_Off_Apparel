@@ -449,7 +449,13 @@ export const mcpTools: readonly McpToolDefinition[] = [
 		description:
 			"Shows who works where: the roster with each person's certified stations, who is out, who is pinned to a " +
 			"station, and the crew on each station/day of the approved schedule. Example question: 'who's on the " +
-			"autos Tuesday?' → { from: '2026-10-06', to: '2026-10-06' }. Returns { roster, out, pinned, approvedCrews }.",
+			"autos Tuesday?' → { from: '2026-10-06', to: '2026-10-06' }. Returns { roster, out, pinned, approvedCrews }. " +
+			'A screen-print press runs with exactly one main printer (roster[].mainOn lists the presses a person may ' +
+			'run as main; approvedCrews[].main names who is, listed first in crew) and everyone else on it is a catch ' +
+			'(approvedCrews[].catches) who assists the main. There is never a catch without a main: a press with no ' +
+			'main in that day is closed and has no crew. Read roster[].notes before proposing a schedule: if a note states something ' +
+			'the staffing plan should know (someone out, someone on a station a given day), ask the user and then ' +
+			'use set_worker_availability / set_worker_station — never place people yourself.',
 		inputSchema: getStaffingSchema.shape,
 		requiredScope: 'SCHEDULE_READ',
 		readOnly: true,

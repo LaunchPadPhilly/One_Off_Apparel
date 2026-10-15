@@ -157,6 +157,7 @@
 			kindOptions={data.shopConfig.stationKindOptions}
 			notice={form?.screen === 'people' && 'notice' in form ? (form.notice ?? null) : null}
 			message={form?.screen === 'people' && 'message' in form ? (form.message ?? null) : null}
+			suggestions={form?.screen === 'people' && 'suggestions' in form ? (form.suggestions ?? null) : null}
 		/>
 	{:else if activeScreen === 'formulas' && data.formulaConfig}
 		<FormulasScreen

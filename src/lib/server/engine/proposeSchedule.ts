@@ -7,7 +7,6 @@
  * flagged at risk with a reason, never dropped or placed late.
  */
 import { SHIFT_END_MIN, SHIFT_START_MIN, skipBreak, wallClockEnd, workingMinutesUntilShiftEnd } from '$lib/schedule/shift';
-import { isWeekendDate } from '$lib/schedule/weekends';
 import { estimateHours, EstimationError } from './estimateHours';
 import type { AtRiskFlag, BacklogItem, CapacitySlot, ExternalDependencyState, ProposedAssignment, ProposeScheduleResult } from './types';
 
@@ -100,10 +99,6 @@ export function proposeSchedule(
 ): ProposeScheduleResult {
 	const slots = new Map<string, SlotState>();
 	for (const slot of capacity) {
-		// Weekend slots are never assignable (2026-10-14): the shop is closed Sat/Sun.
-		// fetchCapacity already excludes them; this is a defensive filter for the
-		// simulateChange path, legacy CapacityCalendar rows, or any direct caller.
-		if (isWeekendDate(slot.date)) continue;
 		// A day with committed work kept in place starts its free time after that work.
 		const cursor = Math.max(SHIFT_START_MIN, slot.busyUntilMin ?? SHIFT_START_MIN);
 		slots.set(slotKey(slot.stationId, slot.date), { slot: { ...slot }, cursor, placedCount: slot.committedJobCount ?? 0, families: new Set() });
@@ -258,7 +253,8 @@ export function proposeSchedule(
 			sequenceOrder: state.placedCount,
 			startMinuteOfDay: start,
 			estimatedHours: hours,
-			crewWorkerIds: state.slot.crewWorkerIds ?? []
+			crewWorkerIds: state.slot.crewWorkerIds ?? [],
+			mainWorkerId: state.slot.mainWorkerId ?? null
 		});
 		reasoning.push(
 			`${item.id}: placed at "${state.slot.stationName}" on ${state.slot.date.toISOString().slice(0, 10)} (slot #${state.placedCount}, ${hours.toFixed(2)}h${state.slot.crewWorkerIds?.length ? `, crew of ${state.slot.crewWorkerIds.length}` : ''})` +

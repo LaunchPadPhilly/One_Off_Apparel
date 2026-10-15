@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { prisma } from '$lib/server/prisma';
-import { PRINTED_RELABEL_KIND, PRINTING_PRESS_KIND } from '$lib/schedule/stationKinds';
+import { isPressKind, PRINTED_RELABEL_KIND } from '$lib/schedule/stationKinds';
 
 /**
  * The shop-floor roster (config settings, 2026-09-25): people by name, each with the
@@ -29,7 +29,10 @@ export const workerSchema = z.object({
 		.trim()
 		.max(500, 'Notes must be 500 characters or fewer.')
 		.transform((value) => value || null),
-	stationIds: z.array(z.string().min(1)).max(200)
+	stationIds: z.array(z.string().min(1)).max(200),
+	// Presses this person may run as the main printer (2026-10-14). Ticking "Main"
+	// certifies them on that press too; ignored for stations that aren't presses.
+	mainStationIds: z.array(z.string().min(1)).max(200).default([])
 });
 
 /** Same as workerSchema plus the id of the person being edited. */
@@ -40,14 +43,15 @@ export const updateWorkerSchema = workerSchema.extend({ id: z.string().min(1) })
 export async function listWorkers() {
 	const workers = await prisma.worker.findMany({
 		orderBy: [{ archivedAt: { sort: 'asc', nulls: 'first' } }, { name: 'asc' }],
-		include: { certifications: { select: { stationId: true } } }
+		include: { certifications: { select: { stationId: true, isMain: true } } }
 	});
 	return workers.map((worker) => ({
 		id: worker.id,
 		name: worker.name,
 		notes: worker.notes,
 		archivedAt: worker.archivedAt,
-		stationIds: worker.certifications.map((cert) => cert.stationId)
+		stationIds: worker.certifications.map((cert) => cert.stationId),
+		mainStationIds: worker.certifications.filter((cert) => cert.isMain).map((cert) => cert.stationId)
 	}));
 }
 
@@ -63,23 +67,38 @@ async function assertActiveStations(tx: Pick<typeof prisma, 'station'>, stationI
 	const rows = await tx.station.findMany({ where: { id: { in: stationIds }, archivedAt: null }, select: { kind: true } });
 	if (rows.length !== new Set(stationIds).size) throw new WorkerConfigError('One of the selected stations no longer exists — reload and try again.');
 	const hasRelabel = rows.some((r) => r.kind === PRINTED_RELABEL_KIND);
-	const hasPress = rows.some((r) => r.kind === PRINTING_PRESS_KIND);
+	const hasPress = rows.some((r) => isPressKind(r.kind));
 	if (hasRelabel && !hasPress) {
 		throw new WorkerConfigError('Printed Relabel can only be run by a press operator — also tick a Screen Print station for this person, or untick Printed Relabel.');
 	}
 }
 
+/** The certified station ids (a "Main" tick certifies too) and, of those, the presses
+ *  the person may run as main — anything ticked "Main" that isn't a press is dropped. */
+async function resolveCertifications(tx: Pick<typeof prisma, 'station'>, input: { stationIds: string[]; mainStationIds: string[] }) {
+	const stationIds = [...new Set([...input.stationIds, ...input.mainStationIds])];
+	await assertActiveStations(tx, stationIds);
+	const presses = new Set(
+		(await tx.station.findMany({ where: { id: { in: input.mainStationIds } }, select: { id: true, kind: true } })).filter((s) => isPressKind(s.kind)).map((s) => s.id)
+	);
+	const mainStationIds = new Set(input.mainStationIds.filter((id) => presses.has(id)));
+	return { stationIds, mainStationIds };
+}
+
 /** Adds a person with their certifications; returns the new row. Throws
  *  WorkerConfigError if any station id isn't an active station. */
 export async function createWorker(input: z.infer<typeof workerSchema>, actor: string) {
-	const stationIds = [...new Set(input.stationIds)];
 	return prisma.$transaction(async (tx) => {
-		await assertActiveStations(tx, stationIds);
+		const { stationIds, mainStationIds } = await resolveCertifications(tx, input);
 		const worker = await tx.worker.create({
-			data: { name: input.name, notes: input.notes, certifications: { create: stationIds.map((stationId) => ({ stationId })) } }
+			data: {
+				name: input.name,
+				notes: input.notes,
+				certifications: { create: stationIds.map((stationId) => ({ stationId, isMain: mainStationIds.has(stationId) })) }
+			}
 		});
 		await tx.domainAuditLog.create({
-			data: { entity: 'Worker', entityId: worker.id, action: 'worker_created', actor, diff: { name: input.name, stationIds } }
+			data: { entity: 'Worker', entityId: worker.id, action: 'worker_created', actor, diff: { name: input.name, stationIds, mainStationIds: [...mainStationIds] } }
 		});
 		return worker;
 	});
@@ -92,19 +111,23 @@ export async function createWorker(input: z.infer<typeof workerSchema>, actor: s
  * WorkerConfigError if the person is missing or a station id isn't an active station.
  */
 export async function updateWorker(input: z.infer<typeof updateWorkerSchema>, actor: string) {
-	const stationIds = [...new Set(input.stationIds)];
 	return prisma.$transaction(async (tx) => {
 		const existing = await tx.worker.findUnique({ where: { id: input.id }, include: { certifications: { include: { station: { select: { archivedAt: true } } } } } });
 		if (!existing) throw new WorkerConfigError('Person not found.');
-		await assertActiveStations(tx, stationIds);
+		const { stationIds, mainStationIds } = await resolveCertifications(tx, input);
 
-		const before = existing.certifications.filter((cert) => !cert.station.archivedAt).map((cert) => cert.stationId);
+		const activeCerts = existing.certifications.filter((cert) => !cert.station.archivedAt);
+		const before = activeCerts.map((cert) => cert.stationId);
 		const removed = before.filter((id) => !stationIds.includes(id));
 		const added = stationIds.filter((id) => !before.includes(id));
+		const mainChanged = activeCerts.filter((cert) => stationIds.includes(cert.stationId) && cert.isMain !== mainStationIds.has(cert.stationId));
 
 		await tx.worker.update({ where: { id: input.id }, data: { name: input.name, notes: input.notes } });
 		if (removed.length > 0) await tx.workerCertification.deleteMany({ where: { workerId: input.id, stationId: { in: removed } } });
-		if (added.length > 0) await tx.workerCertification.createMany({ data: added.map((stationId) => ({ workerId: input.id, stationId })) });
+		if (added.length > 0) await tx.workerCertification.createMany({ data: added.map((stationId) => ({ workerId: input.id, stationId, isMain: mainStationIds.has(stationId) })) });
+		for (const cert of mainChanged) {
+			await tx.workerCertification.update({ where: { workerId_stationId: { workerId: input.id, stationId: cert.stationId } }, data: { isMain: mainStationIds.has(cert.stationId) } });
+		}
 
 		await tx.domainAuditLog.create({
 			data: {
@@ -112,7 +135,13 @@ export async function updateWorker(input: z.infer<typeof updateWorkerSchema>, ac
 				entityId: input.id,
 				action: 'worker_updated',
 				actor,
-				diff: { from: { name: existing.name, notes: existing.notes }, to: { name: input.name, notes: input.notes }, certificationsAdded: added, certificationsRemoved: removed }
+				diff: {
+					from: { name: existing.name, notes: existing.notes },
+					to: { name: input.name, notes: input.notes },
+					certificationsAdded: added,
+					certificationsRemoved: removed,
+					mainChanged: mainChanged.map((cert) => ({ stationId: cert.stationId, isMain: mainStationIds.has(cert.stationId) }))
+				}
 			}
 		});
 	});
