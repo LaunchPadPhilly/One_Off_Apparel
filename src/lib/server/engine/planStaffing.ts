@@ -272,19 +272,93 @@ export function planStaffingForLoads(loads: ReadonlyMap<string, StationLoad>, ca
 			return [...people.filter((w) => !canLead(w)), ...people.filter(canLead)];
 		};
 
-		// 2. Every station with work gets its lead, scarcest station first. Scarcity is
-		//    re-counted after each placement, since taking someone changes who's left. On a
-		//    tie a press goes first: opening it also puts its catches to work, where the
-		//    other station would take the only lead and leave them idle.
+		// 2a. **Mains-first pre-pass across presses (2026-10-15 — Main priority).**
+		//     Before anything else, place every free main as the lead on a press they're
+		//     certified on, scarcest-main press first (fewest certified mains, then
+		//     heaviest load). A main may lead MORE THAN ONE press on the same day
+		//     (2026-10-15 — the main physically moves between presses rather than the
+		//     planner backing off to an operator). The main is still removed from the
+		//     free pool for everything else that day (catches, non-press stations), so
+		//     they aren't double-counted as catch too. If a main is leading more than
+		//     one press, the plan says so in `reasoning` further up.
+		const mainsUsed = new Set<string>();
+		// A main already pinned to a press by step 1 is still available to lead another
+		// press through the shared-main path below, so seed `mainsUsed` from the pins.
+		for (const [, info] of lead) if (info.role === 'MAIN') mainsUsed.add(info.workerId);
+		const openPressesForMains = () => {
+			const needsLead = new Set(
+				[...stationIdsToday].filter((id) => isPress.get(id) && hasWork(id) && !isOpen(id))
+			);
+			while (needsLead.size) {
+				const ranked = [...needsLead]
+					.map((id) => ({
+						id,
+						count: workersInOrder.filter((w) => (free.has(w.id) || mainsUsed.has(w.id)) && w.isMain && w.stationIds.includes(id)).length
+					}))
+					.sort(
+						(a, b) =>
+							a.count - b.count ||
+							(loads.get(b.id)?.total ?? 0) - (loads.get(a.id)?.total ?? 0) ||
+							a.id.localeCompare(b.id)
+					);
+				const { id: stationId } = ranked.find((r) => r.count > 0) ?? ranked[0];
+				needsLead.delete(stationId);
+				// A main that's already leading another press today may lead this one too —
+				// `mainsUsed` keeps them eligible after the first placement. Prefer an
+				// unused main first so load spreads across mains; only reuse an already-
+				// leading main when no fresh one is certified on this press.
+				const unused = workersInOrder.find((w) => free.has(w.id) && w.isMain && !mainsUsed.has(w.id) && w.stationIds.includes(stationId));
+				const sharedMain = unused ? null : workersInOrder.find((w) => mainsUsed.has(w.id) && w.stationIds.includes(stationId));
+				const person = unused ?? sharedMain;
+				if (!person) continue;
+				crew.get(stationId)!.push(person.id);
+				lead.set(stationId, { workerId: person.id, role: 'MAIN' });
+				mainsUsed.add(person.id);
+			}
+			// Mains that led at least one press today are consumed — not available as
+			// catch, non-press crew, or leftovers.
+			for (const id of mainsUsed) free.delete(id);
+		};
+		openPressesForMains();
+
+		// 2b. Operator fallback — any press still without a lead gets its operator now.
+		const openPressesForLeadKind = (filter: (worker: StaffingWorker) => boolean) => {
+			const needsLead = new Set(
+				[...stationIdsToday].filter((id) => isPress.get(id) && hasWork(id) && !isOpen(id))
+			);
+			while (needsLead.size) {
+				const ranked = [...needsLead]
+					.map((id) => ({
+						id,
+						count: workersInOrder.filter((w) => free.has(w.id) && filter(w) && w.stationIds.includes(id)).length
+					}))
+					.sort(
+						(a, b) =>
+							a.count - b.count ||
+							(loads.get(b.id)?.total ?? 0) - (loads.get(a.id)?.total ?? 0) ||
+							a.id.localeCompare(b.id)
+					);
+				const { id: stationId } = ranked.find((r) => r.count > 0) ?? ranked[0];
+				needsLead.delete(stationId);
+				const person = workersInOrder.find((w) => free.has(w.id) && filter(w) && w.stationIds.includes(stationId));
+				if (person) place(person, stationId);
+			}
+		};
+		openPressesForLeadKind((w) => !w.isMain && w.isOperator);
+
+		// 2c. Non-press stations get their lead with the same scarcest-first rule as
+		//     before. Presses already have (or couldn't get) their lead, so they're
+		//     excluded here.
 		const openStations = () => {
-			const needsLead = new Set([...stationIdsToday].filter((id) => hasWork(id) && !isOpen(id)));
+			const needsLead = new Set(
+				[...stationIdsToday].filter((id) => !isPress.get(id) && hasWork(id) && !isOpen(id))
+			);
 			while (needsLead.size) {
 				const ranked = [...needsLead]
 					.map((id) => ({ id, count: eligibleLeads(id).length }))
 					.sort(
 						(a, b) =>
 							a.count - b.count ||
-							Number(isPress.get(b.id)) - Number(isPress.get(a.id)) ||
 							(loads.get(b.id)?.total ?? 0) - (loads.get(a.id)?.total ?? 0) ||
 							a.id.localeCompare(b.id)
 					);

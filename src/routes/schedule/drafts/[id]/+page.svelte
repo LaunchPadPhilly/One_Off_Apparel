@@ -788,6 +788,11 @@
 				return { ok: true, id: data.id, peers: data.peers ?? [], pushedCount: data.pushedCount ?? 0 };
 			}
 			const message = result.type === 'failure' ? (result.data as { message?: string } | undefined)?.message : undefined;
+			// A result type that isn't `success` or `failure` (e.g. an unexpected 500) was
+			// landing here with no `message` and the UI reverted silently (2026-10-15 bug
+			// report). Log it so a browser-console check surfaces the cause, and let the
+			// caller fall through to the generic refusal below.
+			if (!message && result.type !== 'failure') console.error(`${action} returned`, result);
 			return { ok: false, peers: [], pushedCount: 0, message };
 		} catch (e) {
 			console.error(`${action} failed`, e);
@@ -807,7 +812,13 @@
 	}
 
 	function showRefusal(outcome: ActionOutcome) {
-		if (outcome.message) boardNotice = { text: outcome.message, tone: 'warn' };
+		// Always surface SOMETHING so a server error (no `message`) doesn't look like the
+		// drop just didn't register (2026-10-15 — was silently reverting cross-station
+		// moves). The browser console carries the real cause from postAction.
+		boardNotice = {
+			text: outcome.message ?? "Couldn't save that change — check the browser console for details and try again.",
+			tone: 'warn'
+		};
 	}
 
 	function handleDragStart(
