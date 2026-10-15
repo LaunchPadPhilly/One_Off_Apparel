@@ -8,6 +8,7 @@
  */
 import { prisma } from '$lib/server/prisma';
 import { McpUserError } from '$lib/server/mcp/handler';
+import { wallClockEnd } from '$lib/schedule/shift';
 import { ScheduleAssignmentStatus, ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
 
 /** A refusal written for the person approving — shown as-is in chat and on the board. */
@@ -119,21 +120,120 @@ export async function commitSchedule(assignmentIds: readonly string[], approvedB
 
 /**
  * Approves every proposed job in one draft — the board's Approve button, and
- * `commit_schedule` given a draftId.
+ * `commit_schedule` given a draftId. Two-places-at-once (2026-10-15): any crew
+ * member on two jobs on the same date whose wall-clock spans overlap blocks
+ * approval, since allowing both into the live schedule would commit a plan the
+ * shop can't physically run. Both proposed-vs-proposed (within this draft) and
+ * proposed-vs-committed (already APPROVED / IN_PROGRESS elsewhere, same day)
+ * are checked; everyone with an overlap must come off one job before approval.
  *
- * @throws CommitScheduleError if the draft doesn't exist or has nothing to approve,
- *   plus anything commitSchedule throws
+ * @throws CommitScheduleError if the draft doesn't exist, has nothing to approve,
+ *   or holds a crew conflict — plus anything commitSchedule throws
  */
 export async function commitDraft(draftId: string, approvedBy: string) {
 	const draft = await prisma.scheduleDraft.findUnique({ where: { id: draftId }, select: { id: true } });
 	if (!draft) throw new CommitScheduleError(`No schedule draft with id "${draftId}".`);
 	const proposed = await prisma.scheduleAssignment.findMany({
 		where: { scheduleDraftId: draftId, status: ScheduleAssignmentStatus.PROPOSED },
-		select: { id: true }
+		select: {
+			id: true,
+			lineItemId: true,
+			stationId: true,
+			date: true,
+			startMinuteOfDay: true,
+			estimatedHours: true,
+			station: { select: { label: true } },
+			crew: { select: { workerId: true, worker: { select: { name: true } } } }
+		}
 	});
 	if (proposed.length === 0) throw new CommitScheduleError('This draft has no proposed jobs left to approve.');
+
+	await refuseIfCrewConflicts(proposed);
+
 	return commitSchedule(
 		proposed.map((row) => row.id),
 		approvedBy
 	);
+}
+
+type ProposedForCheck = {
+	id: string;
+	lineItemId: string;
+	stationId: string;
+	date: Date;
+	startMinuteOfDay: number | null;
+	estimatedHours: number;
+	station: { label: string };
+	crew: { workerId: string; worker: { name: string } }[];
+};
+
+/**
+ * Throws CommitScheduleError if any PROPOSED assignment's crew member is on another
+ * job that day — in this draft or already committed — whose wall-clock span overlaps.
+ * The message names the first offender; a reviewer removes them from one job and
+ * re-approves. Checked per (date, worker) via the same overlap rule the board uses.
+ */
+async function refuseIfCrewConflicts(proposed: ProposedForCheck[]) {
+	const dates = [...new Set(proposed.map((a) => a.date.getTime()))].map((ms) => new Date(ms));
+	if (dates.length === 0) return;
+	const committed = await prisma.scheduleAssignment.findMany({
+		where: {
+			date: { in: dates },
+			status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] }
+		},
+		select: {
+			id: true,
+			lineItemId: true,
+			stationId: true,
+			date: true,
+			startMinuteOfDay: true,
+			estimatedHours: true,
+			station: { select: { label: true } },
+			crew: { select: { workerId: true, worker: { select: { name: true } } } }
+		}
+	});
+	// A proposed job that supersedes a committed one (same line item) replaces its
+	// APPROVED/IN_PROGRESS slot on commitSchedule, so the committed slot's crew won't
+	// still be on the schedule after this approve — leave those committed rows out of
+	// the overlap check to avoid flagging a conflict with the slot being replaced.
+	const proposedLineItemIds = new Set(proposed.map((a) => a.lineItemId));
+
+	type Span = { stationId: string; stationLabel: string; startMin: number; endMin: number; workerName: string };
+	const spansByDayWorker = new Map<string, Span[]>();
+	const iso = (d: Date) => d.toISOString().slice(0, 10);
+	const add = (row: ProposedForCheck | (typeof committed)[number]) => {
+		const start = row.startMinuteOfDay ?? 8 * 60;
+		const end = wallClockEnd(start, Math.round(row.estimatedHours * 60));
+		for (const member of row.crew) {
+			const key = `${iso(row.date)}|${member.workerId}`;
+			const bucket = spansByDayWorker.get(key) ?? [];
+			bucket.push({
+				stationId: row.stationId,
+				stationLabel: row.station.label,
+				startMin: start,
+				endMin: end,
+				workerName: member.worker.name
+			});
+			spansByDayWorker.set(key, bucket);
+		}
+	};
+	for (const row of proposed) add(row);
+	for (const row of committed) if (!proposedLineItemIds.has(row.lineItemId)) add(row);
+
+	for (const [key, spans] of spansByDayWorker) {
+		if (spans.length < 2) continue;
+		for (let i = 0; i < spans.length; i++) {
+			for (let j = i + 1; j < spans.length; j++) {
+				const a = spans[i];
+				const b = spans[j];
+				if (a.stationId === b.stationId) continue; // same station = same crew all day
+				if (a.startMin >= b.endMin || b.startMin >= a.endMin) continue;
+				const date = key.split('|')[0];
+				const fmt = (m: number) => `${Math.floor(m / 60) % 12 || 12}:${String(m % 60).padStart(2, '0')}${m < 12 * 60 ? 'a' : 'p'}`;
+				throw new CommitScheduleError(
+					`Can't approve while a crew member is in two places at once: ${a.workerName} is on ${a.stationLabel} (${fmt(a.startMin)}–${fmt(a.endMin)}) and ${b.stationLabel} (${fmt(b.startMin)}–${fmt(b.endMin)}) on ${date}. Remove them from one of the jobs, then try again.`
+				);
+			}
+		}
+	}
 }
