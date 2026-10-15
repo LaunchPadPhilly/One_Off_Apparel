@@ -1128,7 +1128,10 @@ State what was verified and how. `svelte-check` proves types, not behavior; a gr
 test proves liveness, not that a secret value is valid (a broken secret fails the *next*
 deploy). RDS is private, so schema and data work runs as one-off ECS tasks. Two
 connection-string faults recur: `terraform output db_endpoint` already ends in `:5432`,
-and RDS-managed passwords contain `#`/`?`/`|` that must be percent-encoded. When live
+and RDS-managed passwords contain `#`/`?`/`|` that must be percent-encoded. A third: the
+RDS master password rotates every 7 days, so a `DATABASE_URL` on the master login breaks
+weekly (`28P01`). The app should use its own role, set up with
+`scripts/create-app-db-role.sh` (Play 14, "Database login"). When live
 state contradicts a document, report both readings rather than "fixing" either.
 
 After any deploy that changes MCP tool definitions, connected MCP clients keep a stale
