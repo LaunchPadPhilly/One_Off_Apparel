@@ -1071,8 +1071,10 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
 - **PDF extraction cost/model choice not confirmed with the client.**
   `extractOrderFromPdf.ts` calls the Claude Messages API (`claude-sonnet-5`) per uploaded
   PDF — real per-import cost, no caching, no cheaper-model fallback considered. Needs
-  `ANTHROPIC_API_KEY` in `.env.example`/`web_secret_keys` (added) but not yet in any real
-  deployed secret. Revisit the model choice once real import volume/cost is known.
+  `ANTHROPIC_API_KEY`, which is in `.env.example`, `web_secret_keys` and the secret
+  templates (UAT since 2026-10-15). Before that UAT's web app never received the key, so
+  the Orders-page Import, notes → answers and notes → rules all failed there, while
+  importing through Claude chat (which needs no server key) worked. Revisit the model choice once real import volume/cost is known.
 - **Reports (minimal) gaps.** `/reports` only shows what the schema already supports
   (estimate-vs-actual variance by station and by line item, on-time completion,
   currently-blocked count, a recent-changes feed off `audit_log`). One thing it still

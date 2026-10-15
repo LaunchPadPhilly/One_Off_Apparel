@@ -41,6 +41,8 @@ variable "web_secret_keys" {
     "GOOGLE_ALLOWED_DOMAIN", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
     "INITIAL_ADMIN_EMAIL",
     "MCP_OAUTH_ISSUER_URL", "MCP_OAUTH_SCOPES", "MCP_PUBLIC_URL",
+    # Claude API: Orders-page PDF import, answers from order notes, rules from people notes.
+    "ANTHROPIC_API_KEY",
   ]
 }
 
