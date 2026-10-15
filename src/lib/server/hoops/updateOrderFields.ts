@@ -1,5 +1,8 @@
 import { prisma } from '$lib/server/prisma';
 import type { Prisma } from '../../../../prisma/generated/prisma/client';
+import { LineItemStatus, OrderStatus } from '../../../../prisma/generated/prisma/enums';
+import { checkCompletion } from '$lib/server/engine/checkCompletion';
+import { isPatchInstall } from '$lib/schedule/patchInstall';
 import { orderCorrectionSchema, lineItemCorrectionSchema, type OrderCorrection, type LineItemCorrection } from './types';
 
 /**
@@ -63,12 +66,33 @@ export async function updateOrderFields(orderId: string, patch: OrderCorrection,
  * @param actor - who made the edit, for the audit log
  * @returns the updated LineItem row
  * @throws Error if `assignedStationId` is set on a non-OTHER row or names an archived /
- *         unknown station; ZodError if the patch fails validation
+ *         unknown station, or `outsourced: true` is set on anything but a Patch Install;
+ *         ZodError if the patch fails validation
  */
 export async function updateLineItemFields(lineItemId: string, patch: LineItemCorrection, actor: string) {
 	const validated = lineItemCorrectionSchema.parse(patch);
+	let completeAfterCommit = false;
 
-	return prisma.$transaction(async (tx) => {
+	const result = await prisma.$transaction(async (tx) => {
+		// Outsourced (2026-10-14) is Patch Install only, and the job's status follows the
+		// answer: outsourced = done, through check_completion after commit (confirmImport
+		// does it for an order still in review); switched back to in-house = schedulable
+		// again, unless the order already completed.
+		let statusChange: { status?: LineItemStatus } = {};
+		if (validated.outsourced !== undefined) {
+			const before = await tx.lineItem.findUnique({
+				where: { id: lineItemId },
+				select: { itemType: true, otherJobType: true, outsourced: true, status: true, order: { select: { status: true } } }
+			});
+			if (validated.outsourced === true && !(before && isPatchInstall(before))) throw new Error('Only a Patch Install can be marked outsourced.');
+			if (before && validated.outsourced === true && before.status !== LineItemStatus.COMPLETE && before.order.status !== OrderStatus.NEEDS_REVIEW) {
+				completeAfterCommit = true;
+			}
+			if (before && validated.outsourced !== true && before.outsourced === true && before.status === LineItemStatus.COMPLETE && before.order.status !== OrderStatus.COMPLETE) {
+				statusChange = { status: LineItemStatus.NEEDS_REVIEW };
+			}
+		}
+
 		// A station assignment (2026-09-28) only means something on an OTHER row, and
 		// must name a real, active station — refused rather than stored otherwise.
 		if (validated.assignedStationId) {
@@ -80,7 +104,7 @@ export async function updateLineItemFields(lineItemId: string, patch: LineItemCo
 			if (!station) throw new Error('That station no longer exists — pick another one.');
 		}
 
-		const updated = await tx.lineItem.update({ where: { id: lineItemId }, data: validated });
+		const updated = await tx.lineItem.update({ where: { id: lineItemId }, data: { ...validated, ...statusChange } });
 		await clearScheduleFlag(tx, updated.orderId);
 
 		await tx.domainAuditLog.create({
@@ -89,4 +113,7 @@ export async function updateLineItemFields(lineItemId: string, patch: LineItemCo
 
 		return updated;
 	});
+
+	if (completeAfterCommit) await checkCompletion(lineItemId);
+	return result;
 }

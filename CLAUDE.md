@@ -259,8 +259,12 @@ stops an order reaching Orders: the reviewer sees what's missing as questions in
 - **Patch Install (2026-10-14).** An OTHER row whose type is "Patch Install"
   (`$lib/schedule/patchInstall.ts`) asks "Outsourced, or in-house (3 min/patch)?"
   instead of asking for hours. The answer is stored in `LineItem.outsourced`, which is
-  nullable: unanswered and legacy rows are null. If outsourced, `confirmImport` marks
-  the job COMPLETE and `fetchBacklog()` never schedules it. If in-house, its hours are
+  nullable: unanswered and legacy rows are null, and only a Patch Install can be
+  outsourced (the import and `updateLineItemFields` enforce this). If outsourced, the
+  job counts as done: `confirmImport`, or a later edit through `updateLineItemFields`,
+  marks it COMPLETE via `check_completion`, which unlocks a waiting fold & bag and can
+  complete the order. `fetchBacklog()` never schedules it. Switching back to in-house
+  reopens the job (NEEDS_REVIEW) unless the order is already complete. If in-house, its hours are
   `quantity × 3 / 60`, and it still needs a station. Filter on `outsourced` as
   null-or-false, never `NOT: { outsourced: true }`: that becomes SQL
   `NOT outsourced = true`, which drops every null row.

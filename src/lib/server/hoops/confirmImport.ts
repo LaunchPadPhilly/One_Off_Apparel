@@ -2,6 +2,8 @@ import { prisma } from '$lib/server/prisma';
 import { LineItemStatus, OrderStatus } from '../../../../prisma/generated/prisma/enums';
 import { McpUserError } from '$lib/server/mcp/handler';
 import { fetchOrderGaps } from './orderReadiness';
+import { checkCompletion } from '$lib/server/engine/checkCompletion';
+import { isPatchInstall } from '$lib/schedule/patchInstall';
 import { lineItemCorrectionSchema, orderCorrectionSchema, type ImportCorrections } from './types';
 
 /**
@@ -43,6 +45,10 @@ export class ConfirmImportError extends McpUserError {
 
 export async function confirmImport(orderIds: readonly string[], confirmedBy: string, corrections?: ImportCorrections): Promise<void> {
 	if (orderIds.length === 0) return;
+
+	// One outsourced job per confirmed order, run through check_completion once the
+	// confirm commits (it has its own transaction) — see the outsourced block below.
+	const outsourcedToComplete = new Map<string, string>();
 
 	await prisma.$transaction(async (tx) => {
 		const orders = await tx.order.findMany({ where: { id: { in: [...orderIds] } } });
@@ -118,10 +124,20 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 		// scheduling backlog; marking them COMPLETE at confirm time means check_completion
 		// (and anything that walks sibling status) treats them as done, so the parent
 		// order can complete naturally without the floor needing to Start/Stop them.
+		// Only a patch install can be outsourced. One per order also goes through
+		// check_completion after commit, so an order whose only work is outsourced
+		// completes, and a fold & bag waiting on it unlocks.
+		const outsourced = (
+			await tx.lineItem.findMany({
+				where: { orderId: { in: [...orderIds] }, outsourced: true },
+				select: { id: true, orderId: true, itemType: true, otherJobType: true }
+			})
+		).filter(isPatchInstall);
 		await tx.lineItem.updateMany({
-			where: { orderId: { in: [...orderIds] }, outsourced: true, status: { not: LineItemStatus.COMPLETE } },
+			where: { id: { in: outsourced.map((item) => item.id) }, status: { not: LineItemStatus.COMPLETE } },
 			data: { status: LineItemStatus.COMPLETE }
 		});
+		for (const item of outsourced) outsourcedToComplete.set(item.orderId, item.id);
 
 		for (const orderId of orderIds) {
 			const lineItemCorrectionsForOrder = Object.fromEntries(
@@ -142,4 +158,6 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 			});
 		}
 	});
+
+	for (const lineItemId of outsourcedToComplete.values()) await checkCompletion(lineItemId);
 }

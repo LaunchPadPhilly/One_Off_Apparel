@@ -6,6 +6,7 @@ import { ALL_SIBLINGS, orderCandidateSchema, type OrderCandidate } from './types
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import { ALL_DECORATIONS_DEPENDENCY } from '$lib/server/engine/types';
 import { countDecorationColors } from '$lib/server/engine/decorationColors';
+import { isPatchInstall } from '$lib/schedule/patchInstall';
 
 /*
  * Saves extracted Hoops orders to the database for human review. Called from the Orders
@@ -121,7 +122,7 @@ async function createLineItemsForOrder(
 				// Patch Install only (2026-10-14): null until the reviewer answers "is this
 				// outsourced?" An extraction that already knows the answer can send it;
 				// everything else leaves it null for the order page / confirm_import to ask.
-				outsourced: itemCandidate.outsourced ?? null,
+				outsourced: isPatchInstall(itemCandidate) ? (itemCandidate.outsourced ?? null) : null,
 				quantity: itemCandidate.quantity,
 				sizeBreakdown: itemCandidate.sizeBreakdown,
 				reviewConfidence: itemCandidate.reviewConfidence ?? null
