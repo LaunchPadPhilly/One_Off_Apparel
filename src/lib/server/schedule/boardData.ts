@@ -75,9 +75,9 @@ export async function buildBoardData(source: BoardSource) {
 			include: {
 				lineItem: { select: { id: true, orderId: true, status: true } },
 				station: { select: { id: true, name: true, kind: true } },
-				// The day's crew on this job (planStaffing.ts, 2026-09-28), with who's the
-				// press's main printer (2026-10-14).
-				crew: { select: { isMain: true, worker: { select: { id: true, name: true } } } }
+				// The day's crew on this job (planStaffing.ts, 2026-09-28), with each
+				// member's role (2026-10-15): MAIN / OPERATOR / CATCH.
+				crew: { select: { role: true, worker: { select: { id: true, name: true } } } }
 			},
 			orderBy: [{ date: 'asc' }, { startMinuteOfDay: 'asc' }, { sequenceOrder: 'asc' }]
 		})
@@ -115,7 +115,9 @@ export async function buildBoardData(source: BoardSource) {
 				id: true,
 				name: true,
 				notes: true,
-				certifications: { where: { station: { archivedAt: null } }, select: { isMain: true, station: { select: { name: true } } } }
+				isMain: true,
+				isOperator: true,
+				certifications: { where: { station: { archivedAt: null } }, select: { station: { select: { name: true } } } }
 			}
 		}),
 		prisma.staffingPin.findMany({
@@ -213,13 +215,20 @@ export async function buildBoardData(source: BoardSource) {
 			// BLOCKED = a finisher still waiting on its print: it can't be Started yet.
 			lineItemStatus: a.lineItem.status,
 			draftId: a.scheduleDraftId,
-			// Main first; a press crew with no main isn't shown (no catch without a main) —
-			// noMain tells the board to say so instead.
+			// Lead (MAIN or OPERATOR) first; a press crew with no lead isn't shown (no
+			// catch without a lead) — noLead tells the board to say so instead. Role is
+			// carried per crew member so the details popover can show MAIN / OPERATOR /
+			// CATCH and the role-switch control knows what's selected.
 			crew: pressSafeCrew(
-				a.crew.map((member) => ({ id: member.worker.id, name: member.worker.name, isMain: member.isMain })),
+				a.crew.map((member) => ({
+					id: member.worker.id,
+					name: member.worker.name,
+					role: member.role as 'MAIN' | 'OPERATOR' | 'CATCH',
+					isMain: member.role === 'MAIN' || member.role === 'OPERATOR'
+				})),
 				isPressKind(a.station.kind)
 			),
-			noMain: isPressKind(a.station.kind) && a.crew.length > 0 && !a.crew.some((member) => member.isMain)
+			noLead: isPressKind(a.station.kind) && a.crew.length > 0 && !a.crew.some((m) => m.role === 'MAIN' || m.role === 'OPERATOR')
 		})),
 		stationNames,
 		// name → display label / formula kind, for the board's row labels, the
@@ -229,12 +238,16 @@ export async function buildBoardData(source: BoardSource) {
 		defaultStationDayHours: DEFAULT_STATION_DAY_HOURS,
 		// Who's out each day (set through Claude, 2026-09-28): date → names.
 		outByDate: groupNamesByDate(unavailability),
-		// The People panel (2026-10-14): roster, days out and pins in this window.
+		// The People panel (2026-10-14): roster, days out and pins in this window, with
+		// worker-level press-role flags (2026-10-15) for the role switcher and the
+		// "no mains?" warning.
 		people: workers.map((w) => ({
 			id: w.id,
 			name: w.name,
 			notes: w.notes,
-			certifications: w.certifications.map((c) => ({ stationName: c.station.name, isMain: c.isMain }))
+			isMain: w.isMain,
+			isOperator: w.isOperator,
+			certifications: w.certifications.map((c) => ({ stationName: c.station.name }))
 		})),
 		peopleOut: unavailability.map((row) => ({ date: iso(row.date), workerId: row.worker.id, reason: row.reason })),
 		pins: pins.map((row) => ({ date: iso(row.date), workerId: row.workerId, stationName: row.station.name }))

@@ -10,6 +10,7 @@ import { buildBoardData } from '$lib/server/schedule/boardData';
 import { unapproveSchedule, UnapproveScheduleError } from '$lib/server/schedule/unapproveSchedule';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { fetchOrderGaps } from '$lib/server/hoops/orderReadiness';
+import { isPressKind } from '$lib/schedule/stationKinds';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 import {
 	OrderStatus,
@@ -329,6 +330,83 @@ export const actions: Actions = {
 			if (err instanceof RestaffError) return fail(409, { message: err.message });
 			throw err;
 		}
+	},
+
+	// Switch one crew member's role on one assignment (2026-10-15): user hovers over a
+	// placement, then over the person on it, and picks MAIN / OPERATOR / CATCH. The
+	// change applies to every PROPOSED assignment on the same (station, day) for that
+	// worker — one person works one station per day, so the role for the day is shared.
+	// On a press changing a lead's role to CATCH is only allowed when a different lead
+	// (MAIN or OPERATOR) is still on the day's crew; otherwise the press would be left
+	// with catches but no lead (no catch without a lead).
+	setCrewRole: async ({ request, params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const form = await request.formData();
+		const assignmentId = form.get('assignmentId');
+		const workerId = form.get('workerId');
+		const role = form.get('role');
+		if (typeof assignmentId !== 'string' || !assignmentId) return fail(400, { message: 'assignmentId required' });
+		if (typeof workerId !== 'string' || !workerId) return fail(400, { message: 'workerId required' });
+		if (role !== 'MAIN' && role !== 'OPERATOR' && role !== 'CATCH') return fail(400, { message: 'role must be MAIN, OPERATOR, or CATCH' });
+
+		const assignment = await prisma.scheduleAssignment.findUnique({
+			where: { id: assignmentId },
+			select: { scheduleDraftId: true, status: true, stationId: true, date: true, station: { select: { kind: true, label: true } } }
+		});
+		if (!assignment || assignment.scheduleDraftId !== params.id) return fail(404, { message: 'Assignment not in this draft' });
+		if (assignment.status !== ScheduleAssignmentStatus.PROPOSED) return fail(409, { message: 'Approved jobs keep their approved crew; propose a new plan to change roles.' });
+
+		const worker = await prisma.worker.findUnique({ where: { id: workerId }, select: { id: true, name: true, isMain: true, isOperator: true } });
+		if (!worker) return fail(404, { message: 'Person not found.' });
+		if (role === 'MAIN' && !worker.isMain) return fail(400, { message: `${worker.name} isn't a main — tick Main in Settings → People to make them one.` });
+		if (role === 'OPERATOR' && !worker.isMain && !worker.isOperator) return fail(400, { message: `${worker.name} isn't a main or operator — set the role in Settings → People first.` });
+
+		// Every proposed assignment on this (station, day) that has this worker on it.
+		const sibling = await prisma.scheduleAssignment.findMany({
+			where: {
+				scheduleDraftId: params.id,
+				status: ScheduleAssignmentStatus.PROPOSED,
+				stationId: assignment.stationId,
+				date: assignment.date,
+				crew: { some: { workerId } }
+			},
+			select: { id: true }
+		});
+		if (sibling.length === 0) return fail(409, { message: `${worker.name} isn't on this job.` });
+
+		// No catch without a lead (client, 2026-10-14; 2026-10-15 for operator-as-lead):
+		// on a press, demoting the day's only lead to CATCH would leave the press with
+		// no one running it. Check against every proposed assignment on that (station,
+		// day) — the lead is shared across them.
+		if (isPressKind(assignment.station.kind) && role === 'CATCH') {
+			const otherLeads = await prisma.assignmentCrew.count({
+				where: {
+					assignment: { scheduleDraftId: params.id, status: ScheduleAssignmentStatus.PROPOSED, stationId: assignment.stationId, date: assignment.date },
+					role: { in: ['MAIN', 'OPERATOR'] },
+					NOT: { workerId }
+				}
+			});
+			if (otherLeads === 0) {
+				return fail(409, { message: `Can't make ${worker.name} a catch — a press needs a main or operator to run, and nobody else is leading ${assignment.station.label} today.` });
+			}
+		}
+
+		await prisma.$transaction(async (tx) => {
+			await tx.assignmentCrew.updateMany({
+				where: { assignmentId: { in: sibling.map((s) => s.id) }, workerId },
+				data: { role }
+			});
+			await tx.domainAuditLog.create({
+				data: {
+					entity: 'ScheduleAssignment',
+					entityId: assignmentId,
+					action: 'crew_role_changed',
+					actor: user.email,
+					diff: { name: worker.name, workerId, role, stationId: assignment.stationId, date: assignment.date }
+				}
+			});
+		});
+		return { success: true as const };
 	},
 
 	// "Re-plan crews" (2026-10-14): re-staff every day with proposed jobs against the

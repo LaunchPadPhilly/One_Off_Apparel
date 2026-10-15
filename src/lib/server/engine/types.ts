@@ -137,9 +137,12 @@ export interface CapacitySlot {
 	// NEW (2026-09-28): the people working this station that day (planStaffing.ts).
 	// Absent = no roster in use, so jobs are estimated for one person (the old behavior).
 	crewWorkerIds?: string[];
-	// NEW (2026-10-14): on a screen-print press, which of crewWorkerIds is the main
-	// printer (the rest are catches). Absent on every other station kind.
-	mainWorkerId?: string;
+	// NEW (2026-10-15, replacing the earlier mainWorkerId): on a screen-print press,
+	// which of crewWorkerIds is the lead and what role they're in — MAIN (first
+	// choice) or OPERATOR (fallback lead). Everyone else on a press is a CATCH.
+	// Absent on every other station kind.
+	leadWorkerId?: string;
+	leadRole?: 'MAIN' | 'OPERATOR';
 	// NEW (2026-10-05): work already committed to this slot that this run keeps in
 	// place. `availableHrs` should already have those hours taken out; these say where
 	// the day's free time starts (minute of day) and how many jobs are already queued,
@@ -165,8 +168,11 @@ export interface ProposedAssignment {
 	estimatedHours: number;
 	// NEW (2026-09-28): the crew the hours were estimated for (empty = one unnamed person).
 	crewWorkerIds: string[];
-	// NEW (2026-10-14): the press's main printer among crewWorkerIds (null off-press).
-	mainWorkerId: string | null;
+	// NEW (2026-10-15, replacing the earlier mainWorkerId): the press's lead among
+	// crewWorkerIds (null off-press) and whether they're in as the MAIN printer or
+	// as a fallback OPERATOR.
+	leadWorkerId: string | null;
+	leadRole: 'MAIN' | 'OPERATOR' | null;
 }
 
 /** A job the engine could not place on time, with why (flag_at_risk — never hidden). */

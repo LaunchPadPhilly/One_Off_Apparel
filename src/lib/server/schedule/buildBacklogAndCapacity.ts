@@ -248,7 +248,7 @@ export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInp
 	const [workers, unavailability, pins] = await Promise.all([
 		prisma.worker.findMany({
 			where: { archivedAt: null },
-			select: { id: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, isMain: true } } }
+			select: { id: true, isMain: true, isOperator: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
 		}),
 		prisma.workerUnavailability.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true } }),
 		prisma.staffingPin.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true, stationId: true } })
@@ -257,7 +257,8 @@ export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInp
 		workers: workers.map((worker) => ({
 			id: worker.id,
 			stationIds: worker.certifications.map((cert) => cert.stationId),
-			mainStationIds: worker.certifications.filter((cert) => cert.isMain).map((cert) => cert.stationId)
+			isMain: worker.isMain,
+			isOperator: worker.isOperator
 		})),
 		unavailable: new Set(unavailability.map((row) => staffingKey(row.workerId, row.date))),
 		pins: new Map(pins.map((row) => [staffingKey(row.workerId, row.date), row.stationId]))
