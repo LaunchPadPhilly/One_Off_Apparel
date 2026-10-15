@@ -39,6 +39,7 @@ Edit `$F` with `"${EDITOR:-vi}" "$F"` and set:
 | `MCP_PUBLIC_URL` | `https://uat.<domain>/api/mcp` |
 | `MCP_OAUTH_SCOPES` | `data:read reports:read schedule:read schedule:write import:write orders:read` (every scope; leaving it out lists all of them too) |
 | `MCP_SERVER_TOKEN` | **Option B only:** output of `openssl rand -base64 48` |
+| `ANTHROPIC_API_KEY` | A key from the team's Anthropic Console (API Keys). It powers the Orders page's PDF import, answering questions from order notes, and suggesting rules from people's notes; without it those three features fail for every user. Billed per use. |
 
 Leave `DATABASE_URL` as the template placeholder; the next step overwrites it.
 
@@ -51,6 +52,11 @@ Leave `DATABASE_URL` as the template placeholder; the next step overwrites it.
 The script reads `db_endpoint` and `db_master_user_secret_arn` from Terraform outputs,
 fetches the managed password, percent-encodes it, refuses duplicated ports, and merges the
 result into `$F` with mode 600. It prints only the host and database name.
+
+This first `DATABASE_URL` uses the RDS master login, and RDS rotates that password every
+7 days. Once the services are running (after Play 10), switch the app to its own login
+with `scripts/create-app-db-role.sh --env uat` (Play 14, "Database login"). If you skip
+this step, UAT goes down within a week.
 
 **EVIDENCE 09.2** — paste the script's output.
 **Accept when:** it reports success and names `<slug>-uat-db...:5432` and database

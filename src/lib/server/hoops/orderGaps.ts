@@ -114,6 +114,9 @@ export function computeOrderGaps(
 		// considered done, so it never blocks confirming or scheduling.
 		const estimate = estimateForDisplay(item);
 		if (estimate.ok) continue;
+		// Outsourced patch install (2026-10-14): the reviewer answered deliberately, so
+		// this is NOT a gap — not a question, not an info note, not blocking.
+		if (estimate.category === 'outsourced') continue;
 
 		if (estimate.category === 'missing_data') {
 			questions.push({
@@ -168,5 +171,9 @@ function fieldQuestion(field: MissingLineItemField, item: OrderGapLineItem): str
 				: `How many hours does "${design}" need? (DTF/DTG has no formula — time depends on the artwork.)`;
 		case 'assignedStationId':
 			return `What station is "${design}" assigned to? (${item.otherJobType ?? 'This job type'} isn't a job type the system knows yet.)`;
+		case 'outsourced':
+			// Only Patch Install hits this today (2026-10-14) — patchInstall.isPatchInstall
+			// gates the question. 3 min/unit is the client's assumption for in-house work.
+			return `Is "${design}" being outsourced, or done in-house (3 minutes per patch)?`;
 	}
 }

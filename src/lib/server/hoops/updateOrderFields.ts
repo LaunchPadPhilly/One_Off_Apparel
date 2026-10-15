@@ -1,4 +1,8 @@
 import { prisma } from '$lib/server/prisma';
+import type { Prisma } from '../../../../prisma/generated/prisma/client';
+import { LineItemStatus, OrderStatus, ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
+import { checkCompletion } from '$lib/server/engine/checkCompletion';
+import { isPatchInstall } from '$lib/schedule/patchInstall';
 import { orderCorrectionSchema, lineItemCorrectionSchema, type OrderCorrection, type LineItemCorrection } from './types';
 
 /**
@@ -10,6 +14,16 @@ import { orderCorrectionSchema, lineItemCorrectionSchema, type OrderCorrection, 
  * calls directly, same pattern as startAssignment/stopAssignment. Also used by
  * fillNeedsAttentionFromNotes.ts to apply answers from a reviewer's note.
  */
+
+/**
+ * Clears the red "Couldn't be scheduled" flag (proposeAndPersistSchedule.ts). It's the
+ * outcome of the last automatic plan, so an edit to the order or one of its jobs may
+ * have fixed the cause — and a flagged order is hidden from the draft board's sidebar,
+ * so a stale flag would keep a fixed order from being placed by hand.
+ */
+async function clearScheduleFlag(tx: Prisma.TransactionClient, orderId: string) {
+	await tx.order.updateMany({ where: { id: orderId, scheduleFlagReason: { not: null } }, data: { scheduleFlagReason: null, scheduleFlaggedAt: null } });
+}
 
 /**
  * Validates and saves an order-level field edit, with an audit log entry.
@@ -33,6 +47,8 @@ export async function updateOrderFields(orderId: string, patch: OrderCorrection,
 				...(validated.deadline ? { deadline: new Date(validated.deadline) } : {})
 			}
 		});
+		// An edit (other than notes) may have fixed why the last plan couldn't fit it.
+		if (Object.keys(validated).some((key) => key !== 'notes')) await clearScheduleFlag(tx, orderId);
 
 		await tx.domainAuditLog.create({
 			data: { entity: 'Order', entityId: orderId, action: 'order_field_edited', actor, diff: validated }
@@ -50,12 +66,46 @@ export async function updateOrderFields(orderId: string, patch: OrderCorrection,
  * @param actor - who made the edit, for the audit log
  * @returns the updated LineItem row
  * @throws Error if `assignedStationId` is set on a non-OTHER row or names an archived /
- *         unknown station; ZodError if the patch fails validation
+ *         unknown station, or `outsourced: true` is set on anything but a Patch Install;
+ *         ZodError if the patch fails validation
  */
 export async function updateLineItemFields(lineItemId: string, patch: LineItemCorrection, actor: string) {
 	const validated = lineItemCorrectionSchema.parse(patch);
+	let completeAfterCommit = false;
 
-	return prisma.$transaction(async (tx) => {
+	const result = await prisma.$transaction(async (tx) => {
+		// Outsourced (2026-10-14) is Patch Install only, and the job's status follows the
+		// answer: outsourced = done, through check_completion after commit (confirmImport
+		// does it for an order still in review); switched back to in-house = schedulable
+		// again, unless the order already completed.
+		let statusChange: { status?: LineItemStatus } = {};
+		if (validated.outsourced !== undefined) {
+			const before = await tx.lineItem.findUnique({
+				where: { id: lineItemId },
+				select: { itemType: true, otherJobType: true, outsourced: true, status: true, order: { select: { status: true } } }
+			});
+			if (validated.outsourced === true && !(before && isPatchInstall(before))) throw new Error('Only a Patch Install can be marked outsourced.');
+			if (validated.outsourced === true && before?.outsourced !== true) {
+				// Work that's started is being done in house; slots not started yet are freed.
+				const slots = await tx.scheduleAssignment.findMany({ where: { lineItemId }, select: { id: true, status: true, stationId: true, date: true, startMinuteOfDay: true } });
+				if (slots.some((slot) => slot.status === ScheduleAssignmentStatus.IN_PROGRESS || slot.status === ScheduleAssignmentStatus.COMPLETE)) {
+					throw new Error("This Patch Install has already been started on the floor, so it can't be marked outsourced.");
+				}
+				for (const slot of slots) {
+					await tx.domainAuditLog.create({
+						data: { entity: 'ScheduleAssignment', entityId: slot.id, action: 'schedule_removed_outsourced', actor, diff: { lineItemId, status: slot.status, stationId: slot.stationId, date: slot.date, startMinuteOfDay: slot.startMinuteOfDay } }
+					});
+				}
+				if (slots.length > 0) await tx.scheduleAssignment.deleteMany({ where: { id: { in: slots.map((slot) => slot.id) } } });
+			}
+			if (before && validated.outsourced === true && before.status !== LineItemStatus.COMPLETE && before.order.status !== OrderStatus.NEEDS_REVIEW) {
+				completeAfterCommit = true;
+			}
+			if (before && validated.outsourced !== true && before.outsourced === true && before.status === LineItemStatus.COMPLETE && before.order.status !== OrderStatus.COMPLETE) {
+				statusChange = { status: LineItemStatus.NEEDS_REVIEW };
+			}
+		}
+
 		// A station assignment (2026-09-28) only means something on an OTHER row, and
 		// must name a real, active station — refused rather than stored otherwise.
 		if (validated.assignedStationId) {
@@ -67,7 +117,8 @@ export async function updateLineItemFields(lineItemId: string, patch: LineItemCo
 			if (!station) throw new Error('That station no longer exists — pick another one.');
 		}
 
-		const updated = await tx.lineItem.update({ where: { id: lineItemId }, data: validated });
+		const updated = await tx.lineItem.update({ where: { id: lineItemId }, data: { ...validated, ...statusChange } });
+		await clearScheduleFlag(tx, updated.orderId);
 
 		await tx.domainAuditLog.create({
 			data: { entity: 'LineItem', entityId: lineItemId, action: 'line_item_field_edited', actor, diff: validated }
@@ -75,4 +126,7 @@ export async function updateLineItemFields(lineItemId: string, patch: LineItemCo
 
 		return updated;
 	});
+
+	if (completeAfterCommit) await checkCompletion(lineItemId);
+	return result;
 }

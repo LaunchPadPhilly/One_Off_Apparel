@@ -1,17 +1,27 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { pressable } from '$lib/actions/pressable.svelte';
-	import { isPressKind } from '$lib/schedule/stationKinds';
+	import { isPressKind, PRINTED_RELABEL_KIND } from '$lib/schedule/stationKinds';
 
 	/**
 	 * Settings → People (config settings, 2026-09-25): the shop-floor roster and which
-	 * stations each person is certified to run — and, on a screen-print press, whether
-	 * they may run it as the main printer (2026-10-14; everyone else on a press is a
-	 * catch). Saving notes has Claude suggest the rules they state; an admin ticks the
-	 * right ones and applies them. Server logic lives in $lib/server/config/workers.ts
-	 * and workerNoteRules.ts; this is only the forms.
+	 * stations each person is certified to run — and, as worker-level flags
+	 * (2026-10-15), whether they're a Main printer (may run any press they're certified
+	 * on as main) or an Operator (middle tier — can lead a press as a fallback when no
+	 * main is in). Everyone else certified on a press is a catch. Saving notes has
+	 * Claude suggest the rules they state; an admin ticks the right ones and applies
+	 * them. Server logic lives in $lib/server/config/workers.ts and workerNoteRules.ts;
+	 * this is only the forms.
 	 */
-	type Worker = { id: string; name: string; notes: string | null; archivedAt: Date | string | null; stationIds: string[]; mainStationIds: string[] };
+	type Worker = {
+		id: string;
+		name: string;
+		notes: string | null;
+		archivedAt: Date | string | null;
+		stationIds: string[];
+		isMain: boolean;
+		isOperator: boolean;
+	};
 	type Station = { id: string; label: string; kind: string; archivedAt: Date | string | null };
 	type Suggestions = {
 		workerId: string;
@@ -47,8 +57,7 @@
 	const activeWorkers = $derived(workers.filter((worker) => !worker.archivedAt));
 	const archivedWorkers = $derived(workers.filter((worker) => worker.archivedAt));
 
-	const isPress = (station: Station) => isPressKind(station.kind);
-	const pressIds = $derived(new Set(activeStations.filter(isPress).map((station) => station.id)));
+	const pressIds = $derived(new Set(activeStations.filter((station) => isPressKind(station.kind)).map((station) => station.id)));
 
 	const keepValues = () => async ({ update }: { update: (options?: { reset?: boolean }) => Promise<void> }) => update({ reset: false });
 
@@ -65,9 +74,27 @@
 		</label>
 		<label>
 			<span>Notes <span class="muted">(optional — Claude suggests rules from these when you save)</span></span>
-			<textarea name="notes" maxlength="500" rows="2" placeholder="Runs Auto 1 as main. Out Oct 20–24 for vacation.">{worker?.notes ?? ''}</textarea>
+			<textarea name="notes" maxlength="500" rows="2" placeholder="Runs the autos as main. Out Oct 20–24 for vacation.">{worker?.notes ?? ''}</textarea>
 		</label>
 	</div>
+	<fieldset>
+		<legend>Press role</legend>
+		<div class="press-role">
+			<label class="checkbox" title="May run any press they're certified on as the main printer.">
+				<input type="checkbox" name="isMain" checked={worker?.isMain ?? false} />
+				Main printer
+				<span class="muted">— may run any press they're certified on as main.</span>
+			</label>
+			<label class="checkbox" title="A fallback lead — can run a press when no main is in. The planner picks a main first.">
+				<input type="checkbox" name="isOperator" checked={worker?.isOperator ?? false} />
+				Operator
+				<span class="muted">— can run a press as a fallback lead; the planner picks a main first.</span>
+			</label>
+			<p class="muted hint">
+				Everyone else certified on a press is a catch (assists the lead). Main wins over Operator if both are ticked.
+			</p>
+		</div>
+	</fieldset>
 	<fieldset>
 		<legend>Certified on</legend>
 		{#if activeStations.length === 0}
@@ -83,26 +110,29 @@
 								<label class="checkbox">
 									<input type="checkbox" name="stationId" value={station.id} checked={worker?.stationIds.includes(station.id) ?? false} />
 									{station.label}
+									{#if station.kind === PRINTED_RELABEL_KIND}
+										<span class="muted">(needs a Screen Print certification too — relabel is run by the press operator)</span>
+									{/if}
 								</label>
-								{#if isPress(station)}
-									<label class="checkbox checkbox--main" title="May run this press as the main printer. Everyone else on a press is a catch.">
-										<input type="checkbox" name="mainStationId" value={station.id} checked={worker?.mainStationIds.includes(station.id) ?? false} />
-										Main
-									</label>
-								{/if}
 							</span>
 						{/each}
 					</div>
 				</div>
 			{/if}
 		{/each}
+		<p class="muted hint">
+			Printed Relabel is handled by the press operator between press runs, so anyone certified on
+			Printed Relabel must also be certified on a Screen Print station. The form will be rejected if that
+			pair isn't ticked together.
+		</p>
 	</fieldset>
 {/snippet}
 
 <p class="muted">
 	The people who work on the floor, and the stations each one is certified to run. They don't need an app login.
 	The automatic schedule only puts people on stations they're certified for, and more people on a job cut its run
-	time. A screen-print press only runs with one <strong>Main</strong> printer; everyone else on it is a catch.
+	time. A screen-print press needs a lead — a <strong>Main</strong> printer (the planner's first choice) or an
+	<strong>Operator</strong> (fallback lead) — to run; everyone else certified on a press is a catch.
 </p>
 
 {#if message}
@@ -161,10 +191,15 @@
 		<ul class="people">
 			{#each activeWorkers as worker (worker.id)}
 				{@const certified = worker.stationIds.filter((id) => stationLabel.has(id))}
+				{@const hasPressCert = certified.some((id) => pressIds.has(id))}
+				{@const pressRole = worker.isMain ? 'Main' : worker.isOperator ? 'Operator' : hasPressCert ? 'Catch' : null}
 				<li class="person">
 					<div class="person__head">
 						<div>
 							<strong>{worker.name}</strong>
+							{#if pressRole}
+								<span class="role-tag role-tag--{pressRole.toLowerCase()}">{pressRole}</span>
+							{/if}
 							{#if worker.notes}<div class="muted">{worker.notes}</div>{/if}
 						</div>
 						<form method="POST" action="?/archiveWorker" use:enhance onsubmit={(event) => confirmRemove(event, worker)}>
@@ -177,9 +212,7 @@
 							<span class="badge badge--warn">Not certified on any station</span>
 						{:else}
 							{#each certified as stationId (stationId)}
-								<span class="badge badge--on">
-									{stationLabel.get(stationId)}{#if pressIds.has(stationId)}{worker.mainStationIds.includes(stationId) ? ' · Main' : ' · Catch'}{/if}
-								</span>
+								<span class="badge badge--on">{stationLabel.get(stationId)}</span>
 							{/each}
 						{/if}
 					</div>
@@ -341,6 +374,50 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.4rem 1.1rem;
+	}
+
+	.press-role {
+		display: grid;
+		gap: 0.4rem;
+	}
+
+	.press-role .checkbox {
+		align-items: center;
+	}
+
+	.press-role .hint {
+		margin: 0.1rem 0 0;
+	}
+
+	.role-tag {
+		display: inline-block;
+		margin-left: 0.5rem;
+		padding: 0.05rem 0.4rem;
+		border-radius: 999px;
+		font-size: 0.68rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		border: 1px solid var(--border);
+		color: var(--ink-700);
+		vertical-align: middle;
+	}
+
+	.role-tag--main {
+		background: var(--brand-500);
+		border-color: var(--brand-500);
+		color: var(--on-accent, #fff);
+	}
+
+	.role-tag--operator {
+		background: var(--brand-200);
+		border-color: var(--brand-300);
+		color: var(--ink-900);
+	}
+
+	.role-tag--catch {
+		background: var(--brand-100);
+		border-color: var(--brand-200);
 	}
 
 	.people {

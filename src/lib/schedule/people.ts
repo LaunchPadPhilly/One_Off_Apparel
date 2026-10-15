@@ -20,22 +20,25 @@ export function avatarHue(id: string): number {
 	return hash % 360;
 }
 
-/** What someone does on a job: the press's main printer, a catch, or plain crew off-press. */
-export type CrewRole = 'main' | 'catch' | 'crew';
+/** What someone does on a job: the press's main printer, an operator (fallback lead),
+ *  a catch, or plain crew off-press. */
+export type CrewRole = 'main' | 'operator' | 'catch' | 'crew';
 
 export function crewRoleLabel(role: CrewRole): string {
-	return role === 'main' ? 'Main' : role === 'catch' ? 'Catch' : 'Crew';
+	return role === 'main' ? 'Main' : role === 'operator' ? 'Operator' : role === 'catch' ? 'Catch' : 'Crew';
 }
 
 /**
- * A job's crew as it may be shown or held (client, 2026-10-14): on a press the main does
- * the print and catches assist them, so there is no catch without a main — a press crew
- * with no main counts as no crew at all — and the main is listed first. Off-press, the
- * crew is listed by name.
+ * A job's crew as it may be shown or held (client, 2026-10-14; 2026-10-15 for operator):
+ * on a press the lead (MAIN or OPERATOR) runs the press and catches assist them, so there
+ * is no catch without a lead — a press crew with no lead counts as no crew at all — and
+ * the lead is listed first. Off-press, the crew is listed by name. `isMain` here means
+ * "is a press lead" so legacy callers that only knew main vs catch keep working for both
+ * main and operator leads.
  */
 export function pressSafeCrew<T extends { name: string; isMain: boolean }>(crew: readonly T[], isPress: boolean): T[] {
 	const byName = [...crew].sort((a, b) => a.name.localeCompare(b.name));
 	if (!isPress) return byName;
-	const main = byName.find((member) => member.isMain);
-	return main ? [main, ...byName.filter((member) => member !== main)] : [];
+	const lead = byName.find((member) => member.isMain);
+	return lead ? [lead, ...byName.filter((member) => member !== lead)] : [];
 }

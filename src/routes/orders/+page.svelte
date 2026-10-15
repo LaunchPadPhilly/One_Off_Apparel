@@ -77,6 +77,10 @@
 	// extra server round-trip needed.
 	const needsReviewCount = $derived(data.orders.filter((order) => order.status === 'NEEDS_REVIEW').length);
 	const reReviewCount = $derived(data.orders.filter((order) => order.status === 'CONFIRMED' && order.blockingCount > 0).length);
+	// Confirmed, valid orders the last automatic plan couldn't fit (2026-10-13).
+	const unscheduledCount = $derived(
+		data.orders.filter((order) => order.status === 'CONFIRMED' && order.blockingCount === 0 && order.scheduleFlagReason).length
+	);
 	const totalEstimatedHours = $derived(data.orders.reduce((sum, order) => sum + order.estimate.totalHours, 0));
 	const fullyEstimableCount = $derived(data.orders.filter((order) => order.estimate.unestimableCount === 0 && order.lineItemCount > 0).length);
 </script>
@@ -100,7 +104,10 @@
 			<StatCard value={data.orders.length} label="active orders" />
 			<StatCard value={needsReviewCount} label="waiting on review" tone={needsReviewCount > 0 ? 'warn' : 'default'} />
 			{#if reReviewCount > 0}
-				<StatCard value={reReviewCount} label="need re-review" tone="warn" />
+				<StatCard value={reReviewCount} label="need re-review" tone="down" />
+			{/if}
+			{#if unscheduledCount > 0}
+				<StatCard value={unscheduledCount} label="couldn't be scheduled" tone="down" />
 			{/if}
 			<StatCard value={totalEstimatedHours} format={(n) => `~${n.toFixed(1)}h`} label="estimated hours (known so far)" />
 			<StatCard value={fullyEstimableCount} label="orders fully estimated" />
@@ -277,7 +284,10 @@
 								<td>
 									{#if order.status === 'CONFIRMED' && order.blockingCount > 0}
 										<!-- Confirmed but no longer valid: flagged, not moved back to review. -->
-										<span class="badge badge--warn" title="{order.blockingCount} open item{order.blockingCount === 1 ? '' : 's'} — open the order to resolve.">Needs re-review</span>
+										<span class="badge badge--danger" title="{order.blockingCount} open item{order.blockingCount === 1 ? '' : 's'} — open the order to resolve. It stays off every schedule until then.">Needs re-review</span>
+									{:else if order.status === 'CONFIRMED' && order.scheduleFlagReason}
+										<!-- Valid, but the last automatic plan couldn't fit it (2026-10-13). -->
+										<span class="badge badge--danger" title={order.scheduleFlagReason}>Couldn't be scheduled</span>
 									{:else}
 										<span class="badge" class:badge--warn={order.status === 'NEEDS_REVIEW'}>{order.status}</span>
 										{#if order.status === 'NEEDS_REVIEW' && order.blockingCount > 0}

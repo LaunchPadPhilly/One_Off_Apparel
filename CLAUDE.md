@@ -256,6 +256,23 @@ stops an order reaching Orders: the reviewer sees what's missing as questions in
   the order couldn't be identified or re-imported.
 - Admin fee and supply rows (digitizing fees, "75 units of patches") are still never line
   items — they aren't production work.
+- **Patch Install (2026-10-14).** An OTHER row whose type is "Patch Install"
+  (`$lib/schedule/patchInstall.ts`) asks "Outsourced, or in-house (3 min/patch)?"
+  instead of asking for hours. The answer is stored in `LineItem.outsourced`, which is
+  nullable: unanswered and legacy rows are null, and only a Patch Install can be
+  outsourced (the import and `updateLineItemFields` enforce this). If outsourced, the
+  job counts as done: `confirmImport`, or a later edit through `updateLineItemFields`,
+  marks it COMPLETE via `check_completion`, which unlocks a waiting fold & bag and can
+  complete the order. Its not-started schedule slots are removed (audit
+  `schedule_removed_outsourced`); once it has started on the floor it can no longer be
+  outsourced. `fetchBacklog()` never schedules it. Switching back to in-house
+  reopens the job (NEEDS_REVIEW) unless the order is already complete. If in-house, its hours are
+  `quantity × 3 / 60`, and it still needs a station. Filter on `outsourced` as
+  null-or-false, never `NOT: { outsourced: true }`: that becomes SQL
+  `NOT outsourced = true`, which drops every null row.
+- An order with **no line items** is left out of the draft board's sidebar, and out of
+  `list_orders` once it's past review. While it's in review, `list_orders` still lists it,
+  because it needs a person.
 Every new question is a normal `computeOrderGaps` question, so confirming stays blocked
 until they're answered, by hand or via the notes box.
 
@@ -365,6 +382,12 @@ division for presses). Only presses have
 main/catch; other stations keep plain crew. `assignment_crew.is_main` records who was the main
 on each planned job. New certifications default to catch (migration
 `press_main_and_catch`) — an admin ticks **Main** per press in Settings → People.
+
+**Relabel needs a press (2026-10-14).** The press operator runs Printed Relabel between
+press runs, so anyone on a Printed Relabel station must also be certified on a
+screen-print press (`isPressKind`). This is enforced in four places:
+`createWorker`/`updateWorker`, `pinWorker` (which covers both `set_worker_station` and
+the board's People panel), and `planStaffing`'s crew picks (`workerAllowedForStation`).
 
 **Notes → suggested rules (2026-10-14).** Saving a person's notes (or "Suggest rules from
 notes") has Claude read them (`config/workerNoteRules.ts`) and suggest only rules the system can
@@ -762,6 +785,23 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   plan couldn't fit keeps its old slot and is reported as `kept_at_risk`. Simplification
   still standing: staffing (`planStaffing`) spreads the remaining backlog's workload,
   not the committed work's.
+  **Only schedulable orders reach a schedule (client, 2026-10-13 — least work for the
+  user).** (1) `fetchBacklog()` leaves out every job of an order that "Needs re-review"
+  (open items in `computeOrderGaps`). (2) Every automatic plan (`proposeIntoDraft` — the
+  board button and `propose_schedule`) is **all-or-nothing per order**
+  (`planWholeOrders`): if any job of an order can't be placed, the least urgent partly
+  placed order is dropped and the engine re-runs, so no plan holds half an order and
+  the freed time goes to the rest. (3) A dropped order gets `Order.scheduleFlagReason` /
+  `scheduleFlaggedAt` (migration `order_schedule_flag`) in plain words ("Not enough open
+  Screen print time before Oct 13…"), shown as a red **"Couldn't be scheduled"** flag on
+  the Orders list and order page (and `couldNotSchedule` in `list_orders`/`get_order`);
+  the next plan that fits the order clears it, and so does any edit to the order (other
+  than its notes) or to one of its jobs (`updateOrderFields.ts`), since the edit may have
+  fixed the cause. "Needs re-review" is red too. (4) The
+  draft board's sidebar hides all three kinds (re-review, nothing estimable, flagged) —
+  the Orders page is the one place to deal with them; `placeAssignment` refuses
+  re-review and unestimable jobs server-side. This also answers the Reports open item
+  in part: the at-risk outcome of the latest plan is now persisted per order.
 
   - **Editable formulas — done (2026-09-28).** `/settings?screen=formulas` (admin
     only) exposes every per-station rate and factor as a plain number input —
@@ -789,27 +829,21 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     (Mon–Sun) for the approved schedule on `/schedule`. Jobs with no `screens` value
     count 0 and are called out, so the total is never silently low.
   - Remaining order: daily staffing part 2 (re-plan + replace on approval).
-- **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
-  the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
-  covers the whole flow, not just Start/Stop: a date window (default 28 days from
-  today — an arbitrary "3-4 weeks" pick, not a spec), grouped by date, showing
-  proposed/approved/in-progress assignments with Propose, Approve (`commit_schedule`),
-  Edit/Remove (proposed only — reassigning station/date, or deleting the draft so its
-  line item returns to the backlog), and Start/Stop → `started_at`/`completed_at` →
-  `check_completion`. Received a visual/UX pass (2026-09-21): a stat-tile summary
-  (jobs placed / jobs at risk) instead of a plain sentence, at-risk jobs grouped into
-  three collapsible cards by *why* they're blocked (no formula / missing job data / no
-  capacity — the same three-way split `explainAtRisk.ts`'s `AtRiskCategory` already
-  made, now with an icon+color per category instead of one undifferentiated list), and
-  a standing banner when zero `Station`/`CapacityCalendar` rows exist at all (rather
-  than only surfacing that after a Propose click). Still not decided, not invented: the
-  route path (`/schedule` is a placeholder, rename freely), the actual layout/grouping
-  (per-station queue? per-day? per-order? this is still a day-grouped flat list, just a
-  better-looking one), the 28-day default window, and whether/when `LineItem.status`
-  should move to `in_production` (Start currently leaves it untouched — same category
-  of gap as "when does `Order.status` become `scheduled`," left alone rather than
-  guessed). Do not treat this route's current shape as a real spec — it's scaffolding
-  pending a real answer on all four points above, just no longer an unstyled one.
+- **Production board = the finalized schedule (2026-10-15).** `/schedule` shows the live
+  schedule — every APPROVED / IN_PROGRESS / COMPLETE job from today (or the oldest job still
+  running or overdue) for 4–12 weeks, across all drafts (approved jobs past the 12-week cap
+  are counted in a note on the page, not silently dropped) — drawn with **the same board as a
+  draft** (`routes/schedule/drafts/[id]/ScheduleBoard.svelte`, data from
+  `$lib/server/schedule/boardData.ts`' `buildBoardData`, so the two can't drift apart). It is
+  read-only ("Finalized"): no Orders tray, nothing draggable, People panel read-only. Clicking a
+  job opens its details with **Start / Stop** (`startAssignment` / `stopAssignment`; "Waiting on
+  print" for a blocked finisher), and in-progress jobs get a ring, done jobs fade. Drafts are a
+  collapsible list above it. An **approved draft** renders the same finalized way
+  ("Approved · ready to run") with **Make changes** (`reopenDraft` → `unapproveSchedule`): its
+  not-started approved jobs go back to proposed and drop off the live schedule until it's
+  approved again; started/finished jobs stay locked. Inside a draft, any non-proposed job is
+  locked (can't be dragged or removed). Still not decided: whether `LineItem.status` should move
+  to `in_production` on Start.
 - **Drafts: manual and automatic creation, both gated on CONFIRMED orders
   (2026-09-22).** `/schedule/new` (manual — pick a name/window/strategy, then place line
   items yourself in `/schedule/drafts/[id]`'s drag-and-drop workspace) and a new "Create
@@ -1031,8 +1065,10 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
 - **PDF extraction cost/model choice not confirmed with the client.**
   `extractOrderFromPdf.ts` calls the Claude Messages API (`claude-sonnet-5`) per uploaded
   PDF — real per-import cost, no caching, no cheaper-model fallback considered. Needs
-  `ANTHROPIC_API_KEY` in `.env.example`/`web_secret_keys` (added) but not yet in any real
-  deployed secret. Revisit the model choice once real import volume/cost is known.
+  `ANTHROPIC_API_KEY`, which is in `.env.example`, `web_secret_keys` and the secret
+  templates (UAT since 2026-10-15). Before that UAT's web app never received the key, so
+  the Orders-page Import, notes → answers and notes → rules all failed there, while
+  importing through Claude chat (which needs no server key) worked. Revisit the model choice once real import volume/cost is known.
 - **Reports (minimal) gaps.** `/reports` only shows what the schema already supports
   (estimate-vs-actual variance by station and by line item, on-time completion,
   currently-blocked count, a recent-changes feed off `audit_log`). One thing it still
@@ -1128,7 +1164,10 @@ State what was verified and how. `svelte-check` proves types, not behavior; a gr
 test proves liveness, not that a secret value is valid (a broken secret fails the *next*
 deploy). RDS is private, so schema and data work runs as one-off ECS tasks. Two
 connection-string faults recur: `terraform output db_endpoint` already ends in `:5432`,
-and RDS-managed passwords contain `#`/`?`/`|` that must be percent-encoded. When live
+and RDS-managed passwords contain `#`/`?`/`|` that must be percent-encoded. A third: the
+RDS master password rotates every 7 days, so a `DATABASE_URL` on the master login breaks
+weekly (`28P01`). The app should use its own role, set up with
+`scripts/create-app-db-role.sh` (Play 14, "Database login"). When live
 state contradicts a document, report both readings rather than "fixing" either.
 
 After any deploy that changes MCP tool definitions, connected MCP clients keep a stale

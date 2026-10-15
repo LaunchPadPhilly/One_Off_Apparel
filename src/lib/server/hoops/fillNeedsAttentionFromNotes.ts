@@ -57,7 +57,10 @@ const ALLOWED_VALUES: Record<string, FieldKind> = {
 	// An order imported with no Deadline, and an OTHER job's station (answered by
 	// station name; mapped to its id below).
 	deadline: 'date',
-	assignedStationId: 'station'
+	assignedStationId: 'station',
+	// Patch Install only (2026-10-14) — "is this being outsourced?" yes/no. See
+	// $lib/schedule/patchInstall.ts; converted below with the boolean handler.
+	outsourced: ['yes', 'no']
 };
 
 /** Plain-language description of a field's allowed answers, for the question list sent to Claude. */
@@ -209,14 +212,23 @@ export async function fillNeedsAttentionFromNotes(orderId: string, note: string,
 		if (!isValid) continue; // Not one of the field's real values — drop it rather than write something invalid.
 
 		unansweredCount -= 1;
-		const value: string | number =
-			allowed === 'integer' || allowed === 'hours' ? Number(answer.value) : allowed === 'station' ? stationId! : answer.value;
+		// outsourced (2026-10-14) is the one boolean field — "yes"/"no" → true/false.
+		// Keep the branch beside the integer/hours/station cases so the writable value
+		// matches each column's actual type.
+		const value: string | number | boolean =
+			question.target.field === 'outsourced'
+				? answer.value === 'yes'
+				: allowed === 'integer' || allowed === 'hours'
+					? Number(answer.value)
+					: allowed === 'station'
+						? stationId!
+						: answer.value;
 
 		if (question.target.level === 'order') {
-			(orderPatch as Record<string, string | number>)[question.target.field] = value;
+			(orderPatch as Record<string, string | number | boolean>)[question.target.field] = value;
 		} else {
 			const patch = lineItemPatches.get(question.target.lineItemId) ?? {};
-			(patch as Record<string, string | number>)[question.target.field] = value;
+			(patch as Record<string, string | number | boolean>)[question.target.field] = value;
 			lineItemPatches.set(question.target.lineItemId, patch);
 		}
 	}

@@ -68,7 +68,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			// scheduled; exposed here so there's actually a way to set them.
 			blankOrderingStatus: order.blankOrderingStatus,
 			customerApprovalStatus: order.customerApprovalStatus,
-			importFlags
+			importFlags,
+			// Why the last automatic plan left this order off (2026-10-13); null = it fit.
+			scheduleFlagReason: order.scheduleFlagReason,
+			scheduleFlaggedAt: order.scheduleFlaggedAt?.toISOString() ?? null
 		},
 		gaps,
 		// NEW (2026-09-21): shape each raw database row into exactly the fields the
@@ -112,6 +115,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			// NEW (2026-09-28): OTHER rows — the export's name for the job, and its assigned station.
 			otherJobType: item.otherJobType,
 			assignedStationId: item.assignedStationId,
+			// NEW (2026-10-14): Patch Install only — outsourced yes/no/pending. See
+			// $lib/schedule/patchInstall.ts.
+			outsourced: item.outsourced,
 			inkColorCount: item.inkColorCount,
 			decorationColors: item.decorationColors,
 			screens: item.screens,
@@ -225,6 +231,17 @@ export const actions: Actions = {
 			const raw = data.get('manualEstimatedHours');
 			const value = typeof raw === 'string' ? raw.trim() : '';
 			patch.manualEstimatedHours = value ? Number(value) : null;
+		}
+		// outsourced (2026-10-14, Patch Install only — see $lib/schedule/patchInstall.ts):
+		// a tri-state the form sends as "true"/"false", or omits to leave it alone.
+		// Same hidden-marker pattern as manualEstimatedHours above: the input is only
+		// present on the form for a patch install. The select preselects the stored
+		// answer, so it only clears (null) when someone deliberately re-picks "— choose —".
+		if (data.has('outsourcedSubmitted')) {
+			const raw = data.get('outsourced');
+			if (raw === 'true') patch.outsourced = true;
+			else if (raw === 'false') patch.outsourced = false;
+			else patch.outsourced = null;
 		}
 
 		try {

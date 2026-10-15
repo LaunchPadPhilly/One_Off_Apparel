@@ -15,6 +15,7 @@ import { ALL_DECORATIONS_DEPENDENCY, ALL_SIBLINGS_DEPENDENCY, type BacklogItem, 
 import { DEFAULT_STATION_DAY_HOURS, isWeekendDay } from '$lib/schedule/defaultCapacity';
 import { finishingDependencyRule } from '$lib/server/engine/finishingDependencies';
 import { planStaffing, staffingKey, withCommittedCrew, type StaffingInputs } from '$lib/server/engine/planStaffing';
+import { fetchOrderGaps } from '$lib/server/hoops/orderReadiness';
 import type { DateRange } from './types';
 
 /** Midnight UTC today — the cutoff for "deadline already passed". Dates are stored as UTC days. */
@@ -48,6 +49,8 @@ export interface SchedulingBacklog {
  *      even offered as a candidate — until its deadline is corrected. Loose internal
  *      deadlines are gated the same way; the tightness flag changes how at-risk reads
  *      to a human, not whether the order enters the backlog.)
+ *   7. (2026-10-13) The order has no open items (orderGaps.ts) — a confirmed order
+ *      that "Needs re-review" is left out whole until someone fixes it.
  *
  * These gates limit scheduling, not estimates — estimateHours is a pure function that
  * runs independently of approval status (e.g. at import review time).
@@ -59,7 +62,7 @@ export interface SchedulingBacklog {
  * not schedulable, so its dependents get flagged at risk rather than placed early).
  */
 export async function fetchBacklog(): Promise<SchedulingBacklog> {
-	const lineItems = await prisma.lineItem.findMany({
+	const candidateItems = await prisma.lineItem.findMany({
 		where: {
 			OR: [
 				{ itemType: LineItemType.DECORATION, status: LineItemStatus.NEEDS_REVIEW },
@@ -68,6 +71,12 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 				// reviewer has assigned it a station and hours (estimateHours flags it otherwise).
 				{ itemType: LineItemType.OTHER, status: LineItemStatus.NEEDS_REVIEW }
 			],
+			// Outsourced work is handled externally (2026-10-14) and never gets a slot on
+			// the shop's schedule — on confirm_import it's also flipped to COMPLETE so the
+			// order can complete naturally. This filter is the defense-in-depth. Written as
+			// null-or-false: `NOT: { outsourced: true }` becomes SQL `NOT outsourced = true`,
+			// which is NULL for the (usual) unset column and would drop every job.
+			AND: [{ OR: [{ outsourced: null }, { outsourced: false }] }],
 			order: {
 				status: OrderStatus.CONFIRMED,
 				deadline: { gte: startOfToday() }
@@ -76,6 +85,12 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 		include: { order: { select: { deadline: true, deadlineIsTight: true } } },
 		distinct: ['id']
 	});
+
+	// An order with open items ("Needs re-review" — e.g. a job missing its stitch count)
+	// is left out entirely (2026-10-13): none of its jobs are planned until someone fixes
+	// it on the Orders page, so no plan ever holds half of a broken order.
+	const gapsByOrder = await fetchOrderGaps([...new Set(candidateItems.map((item) => item.orderId))]);
+	const lineItems = candidateItems.filter((item) => (gapsByOrder.get(item.orderId)?.blockingCount ?? 0) === 0);
 
 	// Every line item on the orders involved, for resolving "all_siblings" and for the
 	// state of dependencies that didn't make it into the backlog.
@@ -137,6 +152,10 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			manualEstimatedHours: item.manualEstimatedHours,
 			otherJobType: item.otherJobType,
 			assignedStationId: item.assignedStationId,
+			// Carried through so estimateOtherHours can compute 3 min/unit for an in-house
+			// patch install directly from the backlog item (2026-10-14). Outsourced=true
+			// rows are already filtered by the query above.
+			outsourced: item.outsourced,
 			estimatedHoursOverride: item.estimatedHoursOverride,
 			// Never null here: the `deadline: { gte: … }` filter above excludes orders
 			// with no deadline yet (they can't be confirmed without one anyway).
@@ -229,7 +248,7 @@ export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInp
 	const [workers, unavailability, pins] = await Promise.all([
 		prisma.worker.findMany({
 			where: { archivedAt: null },
-			select: { id: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, isMain: true } } }
+			select: { id: true, isMain: true, isOperator: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
 		}),
 		prisma.workerUnavailability.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true } }),
 		prisma.staffingPin.findMany({ where: { date: { gte: from, lte: to } }, select: { workerId: true, date: true, stationId: true } })
@@ -238,7 +257,8 @@ export async function fetchStaffingInputs(range: DateRange): Promise<StaffingInp
 		workers: workers.map((worker) => ({
 			id: worker.id,
 			stationIds: worker.certifications.map((cert) => cert.stationId),
-			mainStationIds: worker.certifications.filter((cert) => cert.isMain).map((cert) => cert.stationId)
+			isMain: worker.isMain,
+			isOperator: worker.isOperator
 		})),
 		unavailable: new Set(unavailability.map((row) => staffingKey(row.workerId, row.date))),
 		pins: new Map(pins.map((row) => [staffingKey(row.workerId, row.date), row.stationId]))

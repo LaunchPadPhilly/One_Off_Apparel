@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { prisma } from '$lib/server/prisma';
 import { McpUserError } from '$lib/server/mcp/handler';
-import { isPressKind } from '$lib/schedule/stationKinds';
+import { isPressKind, PRINTED_RELABEL_KIND } from '$lib/schedule/stationKinds';
 import { pressSafeCrew } from '$lib/schedule/people';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 
@@ -67,7 +67,7 @@ const iso = (date: Date) => date.toISOString().slice(0, 10);
 async function findWorker(name: string) {
 	const workers = await prisma.worker.findMany({
 		where: { archivedAt: null },
-		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, isMain: true } } }
+		select: { id: true, name: true, isMain: true, isOperator: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
 	});
 	const lower = name.toLowerCase();
 	const exact = workers.filter((w) => w.name.toLowerCase() === lower);
@@ -103,56 +103,65 @@ export async function getStaffing(input: z.infer<typeof getStaffingSchema>) {
 			select: {
 				name: true,
 				notes: true,
-				certifications: { where: { station: { archivedAt: null } }, select: { isMain: true, station: { select: { label: true, kind: true } } } }
+				isMain: true,
+				isOperator: true,
+				certifications: { where: { station: { archivedAt: null } }, select: { station: { select: { label: true, kind: true } } } }
 			}
 		}),
 		prisma.workerUnavailability.findMany({ where: { date: { gte: from, lte: to } }, select: { date: true, reason: true, worker: { select: { name: true } } } }),
 		prisma.staffingPin.findMany({ where: { date: { gte: from, lte: to } }, select: { date: true, worker: { select: { name: true } }, station: { select: { label: true } } } }),
 		prisma.scheduleAssignment.findMany({
 			where: { date: { gte: from, lte: to }, status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] } },
-			select: { date: true, station: { select: { label: true, kind: true } }, crew: { select: { isMain: true, worker: { select: { name: true } } } } }
+			select: { date: true, station: { select: { label: true, kind: true } }, crew: { select: { role: true, worker: { select: { name: true } } } } }
 		})
 	]);
 
 	// One crew per (day, station), merged across that station's jobs that day — "|" keys
-	// are split back apart below.
-	const crews = new Map<string, { isPress: boolean; members: Map<string, { name: string; isMain: boolean }> }>();
+	// are split back apart below. Role ranks MAIN > OPERATOR > CATCH when a worker shows
+	// up more than once on the same (day, station) with different roles.
+	const roleRank = (role: 'MAIN' | 'OPERATOR' | 'CATCH') => (role === 'MAIN' ? 2 : role === 'OPERATOR' ? 1 : 0);
+	const crews = new Map<string, { isPress: boolean; members: Map<string, { name: string; role: 'MAIN' | 'OPERATOR' | 'CATCH' }> }>();
 	for (const a of assignments) {
 		const key = `${iso(a.date)}|${a.station.label}`;
 		const entry = crews.get(key) ?? { isPress: isPressKind(a.station.kind), members: new Map() };
 		for (const member of a.crew) {
 			const name = member.worker.name;
-			entry.members.set(name, { name, isMain: member.isMain || Boolean(entry.members.get(name)?.isMain) });
+			const prev = entry.members.get(name);
+			const role = !prev || roleRank(member.role) > roleRank(prev.role) ? member.role : prev.role;
+			entry.members.set(name, { name, role });
 		}
 		crews.set(key, entry);
 	}
 
 	return {
-		// mainOn (2026-10-14): presses this person may run as the main printer; on every
-		// other press they're certified on they can only catch.
+		// Worker-level press role (2026-10-15): "main" lets them lead any press they're
+		// certified on; "operator" is a fallback lead; otherwise they're a catch on any
+		// press they're certified on.
 		roster: workers.map((w) => ({
 			name: w.name,
 			notes: w.notes,
-			certifiedOn: w.certifications.map((c) => c.station.label),
-			mainOn: w.certifications.filter((c) => c.isMain && isPressKind(c.station.kind)).map((c) => c.station.label)
+			pressRole: w.isMain ? 'main' : w.isOperator ? 'operator' : 'catch',
+			certifiedOn: w.certifications.map((c) => c.station.label)
 		})),
 		out: out.map((o) => ({ date: iso(o.date), name: o.worker.name, reason: o.reason })),
 		pinned: pins.map((p) => ({ date: iso(p.date), name: p.worker.name, station: p.station.label })),
 		approvedCrews: [...crews.entries()]
 			.map(([key, { isPress, members }]) => {
 				const [date, station] = key.split('|');
-				// A press crew is its main first, then the catches who assist them. There's no
-				// catch without a main (client, 2026-10-14): a press crew with no main is
+				// A press crew is its lead first (MAIN then OPERATOR), then catches. There's no
+				// catch without a lead (client, 2026-10-14): a press crew with no lead is
 				// reported empty, with a note.
-				const crew = pressSafeCrew([...members.values()], isPress);
-				const main = isPress ? (crew[0]?.name ?? null) : null;
+				const members2 = [...members.values()].map((m) => ({ name: m.name, isMain: m.role === 'MAIN' || m.role === 'OPERATOR' }));
+				const sorted = pressSafeCrew(members2, isPress);
+				const lead = isPress ? (sorted[0] ?? null) : null;
+				const leadMember = lead ? members.get(lead.name) : null;
 				return {
 					date,
 					station,
-					main,
-					...(isPress ? { catches: crew.slice(1).map((m) => m.name) } : {}),
-					crew: crew.map((m) => m.name),
-					...(isPress && !main ? { note: 'No main printer on this press, so nobody can run it — re-plan this day.' } : {})
+					...(isPress ? { lead: lead?.name ?? null, leadRole: leadMember?.role.toLowerCase() ?? null } : {}),
+					...(isPress ? { catches: sorted.slice(1).map((m) => m.name) } : {}),
+					crew: sorted.map((m) => m.name),
+					...(isPress && !lead ? { note: 'No lead (main or operator) on this press, so nobody can run it — re-plan this day.' } : {})
 				};
 			})
 			.sort((a, b) => a.date.localeCompare(b.date) || a.station.localeCompare(b.station))
@@ -232,14 +241,15 @@ export async function setWorkerStation(input: z.infer<typeof setWorkerStationSch
 	const worker = await findWorker(input.workerName);
 	const station = input.stationName ? await findStation(input.stationName) : null;
 	await prisma.$transaction((tx) => pinWorker(tx, { workerId: worker.id, date: input.date, stationId: station?.id ?? null }, actor));
-	// A catch only assists a main (client, 2026-10-14), so say what happens without one.
-	const catchOnly = station && isPressKind(station.kind) && !worker.certifications.some((c) => c.stationId === station.id && c.isMain);
+	// A catch only assists a lead (main or operator) (client, 2026-10-14; 2026-10-15 for
+	// operator-as-lead), so say what happens without one when the pinned person is a catch.
+	const catchOnly = station && isPressKind(station.kind) && !worker.isMain && !worker.isOperator;
 	return {
 		name: worker.name,
 		date: input.date,
 		station: station?.label ?? null,
 		...(catchOnly
-			? { note: `${worker.name} can only catch on ${station.label}, so they work there only if a main printer is on it that day; otherwise the plan puts them elsewhere.` }
+			? { note: `${worker.name} can only catch on ${station.label}, so they work there only if a main or operator is on it that day; otherwise the plan puts them elsewhere.` }
 			: {})
 	};
 }
@@ -257,7 +267,8 @@ type Tx = Pick<typeof prisma, 'worker' | 'station' | 'workerUnavailability' | 's
 export async function pinWorker(tx: Tx, input: { workerId: string; date: string; stationId: string | null }, actor: string) {
 	const worker = await tx.worker.findFirst({
 		where: { id: input.workerId, archivedAt: null },
-		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
+		// `station.kind` is pulled through for the Relabel-needs-press rule below.
+		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, station: { select: { kind: true } } } } }
 	});
 	if (!worker) throw new StaffingError('That person is no longer on the roster (Settings → People).');
 	const date = new Date(`${input.date}T00:00:00Z`);
@@ -268,10 +279,17 @@ export async function pinWorker(tx: Tx, input: { workerId: string; date: string;
 		return;
 	}
 
-	const station = await tx.station.findFirst({ where: { id: input.stationId, archivedAt: null }, select: { id: true, label: true } });
+	const station = await tx.station.findFirst({ where: { id: input.stationId, archivedAt: null }, select: { id: true, label: true, kind: true } });
 	if (!station) throw new StaffingError('That station no longer exists (Settings → Stations).');
 	if (!worker.certifications.some((c) => c.stationId === station.id)) {
 		throw new StaffingError(`${worker.name} isn't certified on ${station.label}. Add the certification in Settings → People first if they should be.`);
+	}
+	// Relabel is done BY the press operator between press runs — a worker pinned to a
+	// Printed Relabel station must also be certified on at least one Screen Print (press)
+	// station. Enforced here (set_worker_station and the board's People panel), in
+	// createWorker/updateWorker, and in planStaffing so chat, UI and engine all agree.
+	if (station.kind === PRINTED_RELABEL_KIND && !worker.certifications.some((c) => isPressKind(c.station.kind))) {
+		throw new StaffingError(`${worker.name} isn't certified on a Screen Print station, so they can't run Printed Relabel — relabel is handled by the press operator between runs. Certify ${worker.name} on a Screen Print station first.`);
 	}
 	const out = await tx.workerUnavailability.findUnique({ where: { workerId_date: { workerId: worker.id, date } } });
 	if (out) throw new StaffingError(`${worker.name} is marked out on ${input.date}. Mark them available first.`);

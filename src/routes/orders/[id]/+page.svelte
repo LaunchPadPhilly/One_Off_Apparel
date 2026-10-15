@@ -5,6 +5,7 @@
 	import { pressable } from '$lib/actions/pressable.svelte';
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig } from '$lib/appConfig';
+	import { isPatchInstall, PATCH_INSTALL_MINUTES_PER_UNIT } from '$lib/schedule/patchInstall';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
@@ -35,10 +36,13 @@
 		matteSurface: 'Is the matte finish on a flat or specialty surface',
 		foldBagGarment: 'Is the garment being folded & bagged a short-sleeve tee',
 		manualEstimatedHours: 'How many hours does it need (no formula for this job type)',
-		assignedStationId: 'What station is it assigned to'
+		assignedStationId: 'What station is it assigned to',
+		outsourced: 'Is this patch install outsourced, or done in-house (3 min/patch)'
 	};
 
 	const needsReReview = $derived(data.order.status === 'CONFIRMED' && data.gaps.blockingCount > 0);
+	// Valid, but the last automatic plan couldn't fit it (2026-10-13).
+	const couldNotSchedule = $derived(data.order.status === 'CONFIRMED' && !needsReReview && data.order.scheduleFlagReason !== null);
 
 	const answerableQuestions = $derived.by(() => {
 		const items: { key: string; text: string }[] = [];
@@ -88,7 +92,12 @@
 	{#if needsReReview}
 		<p class="re-review" role="status">
 			<strong>Needs re-review:</strong> this order is confirmed but has {data.gaps.blockingCount} open
-			item{data.gaps.blockingCount === 1 ? '' : 's'} (below) — it can't be fully scheduled until they're resolved.
+			item{data.gaps.blockingCount === 1 ? '' : 's'} (below). It's kept off every schedule until they're resolved.
+		</p>
+	{:else if couldNotSchedule}
+		<p class="re-review" role="status">
+			<strong>Couldn't be scheduled:</strong> the last automatic schedule couldn't fit this order — {data.order.scheduleFlagReason}
+			It's kept off the schedule board; the next automatic schedule tries again (more capacity, people, or a later deadline will help).
 		</p>
 	{/if}
 
@@ -376,11 +385,15 @@
 								</form>
 							{/if}
 						{/if}
+					{:else if item.estimate.category === 'outsourced'}
+						<!-- NEW (2026-10-14): Patch Install the reviewer answered as outsourced
+						     — handled externally, no shop time, no "set estimate" shortcut. -->
+						<span class="badge" title={item.estimate.reason}>Outsourced</span>
 					{:else}
 						<span class="badge badge--warn" title={item.estimate.reason}>
 							{item.estimate.category === 'missing_formula' ? 'No formula yet' : 'Missing job details'}
 						</span>
-						{#if data.canEdit && (item.estimate.category === 'missing_formula' || item.estimate.field !== 'assignedStationId')}
+						{#if data.canEdit && (item.estimate.category === 'missing_formula' || (item.estimate.field !== 'assignedStationId' && item.estimate.field !== 'outsourced'))}
 							<button type="button" class="badge badge--button" onclick={() => (editingEstimateId = item.id)}>Set estimate ✎</button>
 						{/if}
 					{/if}
@@ -428,15 +441,34 @@
 							     Patch Install). The reviewer says which station it runs on; the
 							     schedule places it only on that station. Hours are entered in the
 							     universal override field further down (mandatory for this type). -->
-							<label>
-								Station
-								<select name="assignedStationId">
-									<option value="" selected={!item.assignedStationId}>— choose —</option>
-									{#each data.stations as station (station.id)}
-										<option value={station.id} selected={item.assignedStationId === station.id}>{station.label}</option>
-									{/each}
-								</select>
-							</label>
+							{#if isPatchInstall(item)}
+								<!-- NEW (2026-10-14): Patch Install is almost always outsourced.
+								     When done in-house, One Off assumes 3 min per patch — the
+								     reviewer answers this once, and the hours entry below is
+								     hidden because it's auto-computed. The hidden `outsourcedSubmitted`
+								     marker mirrors the manualEstimatedHours pattern so leaving the
+								     select on "— choose —" doesn't silently clear a prior answer. -->
+								<label>
+									Outsourced?
+									<select name="outsourced">
+										<option value="" selected={item.outsourced == null}>— choose —</option>
+										<option value="true" selected={item.outsourced === true}>Yes — outsourced (not scheduled)</option>
+										<option value="false" selected={item.outsourced === false}>No — in-house ({PATCH_INSTALL_MINUTES_PER_UNIT} min each)</option>
+									</select>
+								</label>
+								<input type="hidden" name="outsourcedSubmitted" value="1" />
+							{/if}
+							{#if !(isPatchInstall(item) && item.outsourced === true)}
+								<label>
+									Station
+									<select name="assignedStationId">
+										<option value="" selected={!item.assignedStationId}>— choose —</option>
+										{#each data.stations as station (station.id)}
+											<option value={station.id} selected={item.assignedStationId === station.id}>{station.label}</option>
+										{/each}
+									</select>
+								</label>
+							{/if}
 						{/if}
 						{#if item.itemType === 'DECORATION'}
 							<!-- NEW (2026-09-28): the colors going ON the piece (ink / thread /
@@ -503,8 +535,11 @@
 						{/if}
 						<!-- Reviewer-entered hours. Required for DTF/DTG/OTHER (no formula exists).
 						     For job types that DO have a formula, use the "edit estimate" button
-						     next to the badge above (writes to estimatedHoursOverride). -->
-						{#if item.itemType === 'OTHER' || item.decorationType === 'DTF' || item.decorationType === 'DTG'}
+						     next to the badge above (writes to estimatedHoursOverride). Patch
+						     Install (2026-10-14) is the one OTHER subtype whose hours come from a
+						     rule (3 min × quantity for in-house, nothing for outsourced), so the
+						     entry is hidden for it entirely. -->
+						{#if (item.itemType === 'OTHER' || item.decorationType === 'DTF' || item.decorationType === 'DTG') && !isPatchInstall(item)}
 							<label>
 								Hours needed
 								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />
@@ -626,7 +661,7 @@
 		flex-wrap: wrap;
 	}
 
-	/* Amber = "needs attention", matching .badge--warn and the re-review banner. */
+	/* Amber = "needs attention", matching .badge--warn. */
 	.needs-attention {
 		margin: 0.4rem 0 0.75rem;
 		padding: 0.75rem 0.95rem;
@@ -642,17 +677,18 @@
 		color: var(--warning-fg);
 	}
 
+	/* Red (2026-10-13): this order is off the schedule until it's dealt with. */
 	.re-review {
 		padding: 0.75rem 0.95rem;
-		border: 1px solid color-mix(in srgb, var(--warning-fg) 30%, transparent);
-		border-left: 3px solid var(--warning-fg);
-		background: var(--warning-bg);
+		border: 1px solid color-mix(in srgb, var(--danger-fg) 30%, transparent);
+		border-left: 3px solid var(--danger-fg);
+		background: var(--danger-bg);
 		color: var(--ink-900);
 		border-radius: var(--radius-sm);
 	}
 
 	.re-review strong {
-		color: var(--warning-fg);
+		color: var(--danger-fg);
 	}
 
 	.needs-attention ul {

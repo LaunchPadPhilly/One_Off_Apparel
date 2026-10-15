@@ -79,7 +79,7 @@ export async function buildSchedulingRun(range: DateRange, release: DateRange | 
 			status: { in: COMMITTED },
 			OR: [{ lineItemId: { in: [...relevantIds] } }, { date: { gte: new Date(range.from), lte: new Date(range.to) } }]
 		},
-		select: { id: true, lineItemId: true, stationId: true, date: true, startMinuteOfDay: true, estimatedHours: true, status: true, startedAt: true, station: { select: { kind: true } }, crew: { select: { workerId: true, isMain: true } } }
+		select: { id: true, lineItemId: true, stationId: true, date: true, startMinuteOfDay: true, estimatedHours: true, status: true, startedAt: true, station: { select: { kind: true } }, crew: { select: { workerId: true, role: true } } }
 	});
 
 	const released: ReleasedAssignment[] = [];

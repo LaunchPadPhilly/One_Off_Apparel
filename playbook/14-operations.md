@@ -55,11 +55,35 @@ old value stays live and a green smoke test proves nothing.
 **Accept when:** keys unchanged (or the intended addition, which must also be added to
 `web_secret_keys`/`mcp_secret_keys` and applied), one `AWSCURRENT`, `STABLE`.
 
+To set or replace a single key without opening the JSON (e.g. `ANTHROPIC_API_KEY`), run
+`AWS_PROFILE=<operator-profile> ./scripts/set-secret-key.sh uat/<slug>/app <KEY>`. It asks for
+the value with input hidden and leaves every other key untouched. Then force-redeploy both services, as above.
+**Set a newly listed key before anything deploys.** A key in `web_secret_keys`/`mcp_secret_keys` that
+is missing from the secret JSON stops the task from starting, and `deploy-uat.yml` runs on every
+push to `uat`. So the order is: set the key, then `terraform apply`, then deploy.
+
 Rotating the Google client secret: create a new secret on the same client in Google Cloud,
-put it here, redeploy, then delete the old one in Google Cloud. Rotating the database
-password: rotate in RDS (managed), then
+put it here, redeploy, then delete the old one in Google Cloud.
+
+**Database login.** The RDS master password is RDS-managed and Secrets Manager rotates it
+every 7 days. A `DATABASE_URL` that uses the master login breaks at the next rotation:
+every database call returns 500 and the logs show Postgres `28P01` `password authentication
+failed`. (UAT went down this way on 2026-10-15.) The app should log in as its own role
+instead, which owns the app's tables and whose password never rotates by itself. Set that
+up once per environment, after its services run (Play 10 / 12):
+
+```bash
+AWS_PROFILE=<operator-profile> ./scripts/create-app-db-role.sh --env uat
+```
+
+The script creates the role `<slug>_app` as the master login in a one-off task. Only the
+role's SCRAM verifier leaves the workstation. It then switches `DATABASE_URL` to the new
+role, runs a check task and `prisma migrate deploy` as that role, puts the old value back
+if either fails, and force-redeploys both services. To give the app role a new password
+later, re-run it with `--rotate`. If the app is still on the master login and has just
+broken, the stopgap is
 `./scripts/fix-secret-database-url.sh build --env uat --from-rds-secret --merge-into "$F"`
-in the flow above.
+in the flow above. Then run the script so it doesn't happen again.
 
 ## D. Repair a malformed `DATABASE_URL`
 

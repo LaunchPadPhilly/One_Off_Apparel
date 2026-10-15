@@ -56,6 +56,29 @@ export async function getDraft(id: string) {
 	return prisma.scheduleDraft.findUnique({ where: { id } });
 }
 
+/** The same name rules as creating a draft (required, at most 120 characters). */
+export const renameDraftSchema = createDraftSchema.pick({ name: true });
+
+/**
+ * Renames a draft (2026-10-13; admins only — the caller checks that). Only the name
+ * changes: the window, strategy, status and placements are untouched. Writes a
+ * `schedule_draft_renamed` audit entry with the old and new names.
+ *
+ * @param name - already validated with renameDraftSchema
+ * @returns the updated draft
+ * @throws Prisma's not-found error if the draft doesn't exist (the transaction rolls back)
+ */
+export async function renameDraft(id: string, name: string, actor: string) {
+	return prisma.$transaction(async (tx) => {
+		const before = await tx.scheduleDraft.findUniqueOrThrow({ where: { id }, select: { name: true } });
+		const updated = await tx.scheduleDraft.update({ where: { id }, data: { name } });
+		await tx.domainAuditLog.create({
+			data: { entity: 'ScheduleDraft', entityId: id, action: 'schedule_draft_renamed', actor, diff: { from: before.name, to: name } }
+		});
+		return updated;
+	});
+}
+
 /**
  * Delete a draft and its still-proposed assignments in one transaction. Any
  * assignments that have been committed (APPROVED / IN_PROGRESS / COMPLETE)

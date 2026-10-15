@@ -30,11 +30,14 @@ export class WorkerNoteRulesError extends Error {}
 
 const isoDate = z.iso.date();
 
-/** One rule an admin can apply. Re-validated on apply — the browser sends it back. */
+/** One rule an admin can apply. Re-validated on apply — the browser sends it back.
+ *  set_main / set_operator (2026-10-15) set the worker-level flag; they don't take a
+ *  stationId because main/operator are now general properties, not per-press. */
 export const workerRuleSchema = z.discriminatedUnion('kind', [
-	z.object({ kind: z.literal('certify'), stationId: z.string().min(1), isMain: z.boolean().optional() }),
+	z.object({ kind: z.literal('certify'), stationId: z.string().min(1) }),
 	z.object({ kind: z.literal('uncertify'), stationId: z.string().min(1) }),
-	z.object({ kind: z.literal('set_main'), stationId: z.string().min(1), isMain: z.boolean() }),
+	z.object({ kind: z.literal('set_main'), isMain: z.boolean() }),
+	z.object({ kind: z.literal('set_operator'), isOperator: z.boolean() }),
 	z.object({ kind: z.literal('out'), from: isoDate, to: isoDate, reason: z.string().trim().max(200).nullable().optional() }),
 	z.object({ kind: z.literal('pin'), date: isoDate, stationId: z.string().min(1) })
 ]);
@@ -67,9 +70,10 @@ const suggestTool: Anthropic.Tool = {
 				items: {
 					type: 'object',
 					properties: {
-						kind: { type: 'string', enum: ['certify', 'uncertify', 'set_main', 'out', 'pin'] },
-						station: { type: 'string', description: 'Exact station name from the list given (certify, uncertify, set_main, pin).' },
-						isMain: { type: 'boolean', description: 'set_main: true = may run this press as main printer, false = catch only. certify: optional, true when the note says they run it as main.' },
+						kind: { type: 'string', enum: ['certify', 'uncertify', 'set_main', 'set_operator', 'out', 'pin'] },
+						station: { type: 'string', description: 'Exact station name from the list given (certify, uncertify, pin).' },
+						isMain: { type: 'boolean', description: 'set_main: true = this person may run any press they are certified on as the main printer; false = clear the main flag.' },
+						isOperator: { type: 'boolean', description: 'set_operator: true = this person may run any press they are certified on as an operator (fallback lead below main); false = clear the operator flag.' },
 						from: { type: 'string', description: 'out: first day out, YYYY-MM-DD.' },
 						to: { type: 'string', description: 'out: last day out, YYYY-MM-DD (same as from for one day).' },
 						reason: { type: 'string', description: 'out: short reason if the note gives one.' },
@@ -98,7 +102,8 @@ const suggestTool: Anthropic.Tool = {
 const SYSTEM_PROMPT = `You turn a print shop's notes about one floor worker into structured staffing settings that a person will review before anything is applied.
 The only settings that exist:
 - certify / uncertify: the person can (or can no longer) work a station.
-- set_main: on a screen-print press only — whether they may run it as the main printer (isMain true) or only as a catch (isMain false). Every press needs one main to run; everyone else on it is a catch.
+- set_main: a worker-level flag — true means they may run any press they're certified on as the main printer; false clears the flag. (Not per-press.) Every press needs a lead to run.
+- set_operator: a worker-level flag — true means they may run any press they're certified on as an operator (a fallback lead below main); false clears the flag.
 - out: whole days they are not working, as a from–to date range.
 - pin: put them on one station for one specific day.
 Rules:
@@ -146,7 +151,7 @@ function daysBetween(from: string, to: string): number {
 export async function suggestRulesFromNotes(workerId: string): Promise<WorkerRuleSuggestions> {
 	const worker = await prisma.worker.findFirst({
 		where: { id: workerId, archivedAt: null },
-		select: { id: true, name: true, notes: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, isMain: true } } }
+		select: { id: true, name: true, notes: true, isMain: true, isOperator: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
 	});
 	if (!worker) throw new WorkerNoteRulesError('Person not found.');
 	if (!worker.notes?.trim()) throw new WorkerNoteRulesError(`${worker.name} has no notes to read.`);
@@ -155,15 +160,17 @@ export async function suggestRulesFromNotes(workerId: string): Promise<WorkerRul
 
 	const stations = await prisma.station.findMany({ where: { archivedAt: null }, orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }], select: { id: true, label: true, kind: true } });
 	const byLabel = new Map(stations.map((s) => [s.label.toLowerCase(), s]));
-	const certified = new Map(worker.certifications.map((c) => [c.stationId, c.isMain]));
+	const certified = new Set(worker.certifications.map((c) => c.stationId));
+	const pressRole = worker.isMain ? 'main' : worker.isOperator ? 'operator' : 'catch';
 	const today = new Date().toISOString().slice(0, 10);
 
 	const current = stations
 		.filter((s) => certified.has(s.id))
-		.map((s) => (isPressKind(s.kind) ? `${s.label} (${certified.get(s.id) ? 'main' : 'catch only'})` : s.label));
+		.map((s) => s.label);
 	const context = [
 		`Today: ${today} (${new Date(`${today}T00:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' })})`,
 		`Person: ${worker.name}`,
+		`Press role: ${pressRole} (main > operator > catch; main and operator apply to every press they're certified on)`,
 		`Stations: ${stations.map((s) => `${s.label}${isPressKind(s.kind) ? ' [screen-print press]' : ''}`).join(', ') || '(none)'}`,
 		`Currently certified on: ${current.join(', ') || '(nothing)'}`,
 		'',
@@ -187,7 +194,7 @@ export async function suggestRulesFromNotes(workerId: string): Promise<WorkerRul
 	const toolUse = response.content.find((block) => block.type === 'tool_use');
 	if (!toolUse || toolUse.type !== 'tool_use') throw new WorkerNoteRulesError('Claude didn’t return any rules — try again.');
 	const raw = normalizeToolInput(toolUse.input) as {
-		rules?: { kind?: string; station?: string; isMain?: boolean; from?: string; to?: string; reason?: string; date?: string; quote?: string }[];
+		rules?: { kind?: string; station?: string; isMain?: boolean; isOperator?: boolean; from?: string; to?: string; reason?: string; date?: string; quote?: string }[];
 		notRules?: { quote?: string; why?: string }[];
 	};
 
@@ -200,27 +207,26 @@ export async function suggestRulesFromNotes(workerId: string): Promise<WorkerRul
 	for (const r of raw.rules ?? []) {
 		const quote = r.quote ?? '';
 		const station = r.station ? byLabel.get(r.station.toLowerCase()) : undefined;
-		if (r.kind === 'certify' || r.kind === 'uncertify' || r.kind === 'set_main' || r.kind === 'pin') {
+		if (r.kind === 'certify' || r.kind === 'uncertify' || r.kind === 'pin') {
 			if (!station) {
 				reject(quote, `No station called "${r.station ?? ''}".`);
 				continue;
 			}
 		}
 		if (r.kind === 'certify' && station) {
-			const isMain = isPressKind(station.kind) && r.isMain === true;
-			if (certified.has(station.id) && (!isMain || certified.get(station.id))) continue; // already true
-			rules.push({ rule: { kind: 'certify', stationId: station.id, ...(isMain ? { isMain: true } : {}) }, label: `Certify on ${station.label}${isMain ? ' as main printer' : ''}`, quote });
+			if (certified.has(station.id)) continue; // already true
+			rules.push({ rule: { kind: 'certify', stationId: station.id }, label: `Certify on ${station.label}`, quote });
 		} else if (r.kind === 'uncertify' && station) {
 			if (!certified.has(station.id)) continue;
 			rules.push({ rule: { kind: 'uncertify', stationId: station.id }, label: `No longer certified on ${station.label}`, quote });
-		} else if (r.kind === 'set_main' && station) {
-			if (!isPressKind(station.kind)) {
-				reject(quote, `${station.label} isn't a screen-print press — only presses have a main printer.`);
-				continue;
-			}
+		} else if (r.kind === 'set_main') {
 			const isMain = r.isMain !== false;
-			if (certified.get(station.id) === isMain) continue;
-			rules.push({ rule: { kind: 'set_main', stationId: station.id, isMain }, label: isMain ? `Main printer on ${station.label}` : `Catch only on ${station.label}`, quote });
+			if (worker.isMain === isMain) continue;
+			rules.push({ rule: { kind: 'set_main', isMain }, label: isMain ? 'Main printer (any press they are certified on)' : 'No longer a main printer', quote });
+		} else if (r.kind === 'set_operator') {
+			const isOperator = r.isOperator !== false;
+			if (worker.isOperator === isOperator) continue;
+			rules.push({ rule: { kind: 'set_operator', isOperator }, label: isOperator ? 'Operator (fallback press lead)' : 'No longer an operator', quote });
 		} else if (r.kind === 'out') {
 			const to = r.to ?? r.from;
 			if (!isRealDate(r.from) || !isRealDate(to) || to < r.from || daysBetween(r.from, to) > MAX_OUT_DAYS) {
@@ -271,19 +277,22 @@ export async function applyWorkerRules(workerId: string, rawRules: unknown[], ac
 			const stations = new Map((await tx.station.findMany({ where: { id: { in: stationIds }, archivedAt: null }, select: { id: true, kind: true } })).map((s) => [s.id, s]));
 			if (stations.size !== stationIds.length) throw new WorkerNoteRulesError('One of those stations no longer exists — read the notes again.');
 
-			const certify = (stationId: string, isMain?: boolean) =>
+			const certify = (stationId: string) =>
 				tx.workerCertification.upsert({
 					where: { workerId_stationId: { workerId, stationId } },
-					create: { workerId, stationId, isMain: Boolean(isMain) && isPressKind(stations.get(stationId)!.kind) },
-					update: isMain === undefined ? {} : { isMain: isMain && isPressKind(stations.get(stationId)!.kind) }
+					create: { workerId, stationId },
+					update: {}
 				});
 
 			for (const rule of rules) {
-				if (rule.kind === 'certify') await certify(rule.stationId, rule.isMain);
+				if (rule.kind === 'certify') await certify(rule.stationId);
 				else if (rule.kind === 'uncertify') await tx.workerCertification.deleteMany({ where: { workerId, stationId: rule.stationId } });
 				else if (rule.kind === 'set_main') {
-					if (!isPressKind(stations.get(rule.stationId)!.kind)) throw new WorkerNoteRulesError('Only screen-print presses have a main printer.');
-					await certify(rule.stationId, rule.isMain);
+					// Main wins over operator (planStaffing never looks at operator on a main),
+					// so clear operator when a worker becomes a main — keeps the stored flag clean.
+					await tx.worker.update({ where: { id: workerId }, data: { isMain: rule.isMain, ...(rule.isMain ? { isOperator: false } : {}) } });
+				} else if (rule.kind === 'set_operator') {
+					await tx.worker.update({ where: { id: workerId }, data: { isOperator: rule.isOperator, ...(rule.isOperator ? { isMain: false } : {}) } });
 				} else if (rule.kind === 'out') {
 					if (rule.to < rule.from || daysBetween(rule.from, rule.to) > MAX_OUT_DAYS) throw new WorkerNoteRulesError('A days-out range is too long or backwards.');
 					for (let d = new Date(`${rule.from}T00:00:00Z`); d <= new Date(`${rule.to}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1)) {
@@ -299,6 +308,7 @@ export async function applyWorkerRules(workerId: string, rawRules: unknown[], ac
 					await certify(rule.stationId);
 					await pinWorker(tx, { workerId, date: rule.date, stationId: rule.stationId }, actor);
 				}
+				// (The never-reached fall-through branch catches unexpected kinds at compile time.)
 			}
 			await tx.domainAuditLog.create({
 				data: { entity: 'Worker', entityId: workerId, action: 'worker_rules_applied_from_notes', actor, diff: { name: worker.name, rules } }

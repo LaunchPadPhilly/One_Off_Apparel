@@ -43,6 +43,11 @@ export function isFinishingKind(kind: string | null | undefined): boolean {
 	return kind ? byKey.get(kind)?.category === 'finishing' : false;
 }
 
+/** The printed-relabel station kind. Relabel is done BY the press operator between press
+ *  runs, so a worker who runs it must also be certified on a press (isPressKind below).
+ *  Centralized here so UI, engine and MCP tools agree on the identifier. */
+export const PRINTED_RELABEL_KIND = 'printed_relabel';
+
 /** A human label for a kind key; falls back to title-casing an unknown key. */
 export function stationKindLabel(kind: string): string {
 	return byKey.get(kind)?.label ?? kind.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());

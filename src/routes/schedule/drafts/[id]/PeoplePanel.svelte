@@ -12,8 +12,15 @@
 	 * deterministic staffing planner's call (planStaffing.ts), never Claude's.
 	 */
 
-	type Person = { id: string; name: string; notes: string | null; certifications: { stationName: string; isMain: boolean }[] };
-	type CrewMember = { id: string; name: string; isMain: boolean };
+	type Person = {
+		id: string;
+		name: string;
+		notes: string | null;
+		isMain: boolean;
+		isOperator: boolean;
+		certifications: { stationName: string }[];
+	};
+	type CrewMember = { id: string; name: string; role: 'MAIN' | 'OPERATOR' | 'CATCH'; isMain: boolean };
 
 	let {
 		people,
@@ -23,6 +30,7 @@
 		stations,
 		days,
 		isAdmin,
+		readOnly = false,
 		busy,
 		onUnpin,
 		onReplan,
@@ -37,6 +45,8 @@
 		/** The days the board is showing, in order. */
 		days: string[];
 		isAdmin: boolean;
+		/** A finalized schedule (2026-10-15): shows who's where, no dragging or re-planning. */
+		readOnly?: boolean;
 		busy: boolean;
 		onUnpin: (workerId: string, date: string) => void;
 		/** Re-staff every day of the draft with the current roster and rules. */
@@ -85,7 +95,14 @@
 			const press = isPressKind(stationByName.get(p.stationName)?.kind);
 			for (const member of p.crew) {
 				if (working.has(member.id)) continue;
-				working.set(member.id, { stationName: p.stationName, role: press ? (member.isMain ? 'main' : 'catch') : 'crew' });
+				const role: CrewRole = !press
+					? 'crew'
+					: member.role === 'MAIN'
+						? 'main'
+						: member.role === 'OPERATOR'
+							? 'operator'
+							: 'catch';
+				working.set(member.id, { stationName: p.stationName, role });
 			}
 		}
 		const outById = new Map(peopleOut.filter((o) => o.date === day).map((o) => [o.workerId, o.reason]));
@@ -111,7 +128,7 @@
 		return 'stationName' in status ? (stationOrder.get(status.stationName) ?? 999) : 0;
 	}
 	function roleRank(status: Status): number {
-		return status.kind === 'working' ? { main: 0, catch: 1, crew: 1 }[status.role] : 0;
+		return status.kind === 'working' ? { main: 0, operator: 1, catch: 2, crew: 2 }[status.role] : 0;
 	}
 
 	const counts = $derived({
@@ -120,18 +137,21 @@
 		out: rows.filter((r) => r.status.kind === 'out').length
 	});
 
-	// With presses but nobody ticked "Main" on one, the planner can't open any press.
-	const noMains = $derived(
+	// With presses on the floor but nobody set as Main or Operator (and certified on a
+	// press), the planner can't open any press.
+	const noLeads = $derived(
 		stations.some((s) => isPressKind(s.kind)) &&
 			people.length > 0 &&
-			!people.some((p) => p.certifications.some((c) => c.isMain && isPressKind(stationByName.get(c.stationName)?.kind)))
+			!people.some(
+				(p) => (p.isMain || p.isOperator) && p.certifications.some((c) => isPressKind(stationByName.get(c.stationName)?.kind))
+			)
 	);
 
 	function certSummary(person: Person): string {
 		if (person.certifications.length === 0) return 'Not certified on any station yet';
-		return person.certifications
-			.map((c) => labelOf(c.stationName) + (c.isMain && isPressKind(stationByName.get(c.stationName)?.kind) ? ' (main)' : ''))
-			.join(', ');
+		const pressRole = person.isMain ? 'main' : person.isOperator ? 'operator' : null;
+		const stations = person.certifications.map((c) => labelOf(c.stationName)).join(', ');
+		return pressRole ? `${stations} — press role: ${pressRole}` : stations;
 	}
 
 	function dayLabel(iso: string): string {
@@ -174,7 +194,7 @@
 			<p class="people__summary muted">
 				{counts.working} working · {counts.free} free · {counts.out} out
 			</p>
-			{#if people.length > 0}
+			{#if people.length > 0 && !readOnly}
 				<button
 					type="button"
 					class="people__replan"
@@ -185,10 +205,10 @@
 			{/if}
 		</div>
 
-		{#if noMains}
+		{#if noLeads}
 			<p class="people__warn" role="status">
-				No one is set as a main printer, so no press can run.
-				{#if isAdmin}<a href="/settings?screen=people">Tick "Main" in Settings → People.</a>{:else}Ask an admin to set it in Settings → People.{/if}
+				No one is set as a main or operator for the presses, so no press can run.
+				{#if isAdmin}<a href="/settings?screen=people">Tick "Main" or "Operator" in Settings → People.</a>{:else}Ask an admin to set it in Settings → People.{/if}
 			</p>
 		{/if}
 
@@ -198,15 +218,17 @@
 				{#if isAdmin}<a href="/settings?screen=people">Add people</a>{/if}
 			</p>
 		{:else}
-			<p class="people__hint muted">Drag someone onto a station row to put them there for that day.</p>
+			{#if !readOnly}
+				<p class="people__hint muted">Drag someone onto a station row to put them there for that day.</p>
+			{/if}
 			<ul class="people__list" aria-busy={busy}>
 				{#each rows as { person, status, pinned } (person.id)}
 					{@const out = status.kind === 'out'}
 					<li
 						class="person"
 						class:person--out={out}
-						draggable={!out && !busy}
-						ondragstart={(event) => handleDragStart(event, person.id)}
+						draggable={!out && !busy && !readOnly}
+						ondragstart={readOnly ? undefined : (event) => handleDragStart(event, person.id)}
 						ondragend={onWorkerDragEnd}
 						title={[certSummary(person), person.notes ? `Notes: ${person.notes}` : ''].filter(Boolean).join('\n')}
 					>
@@ -229,7 +251,7 @@
 								<span class="person__notes">{person.notes}</span>
 							{/if}
 						</span>
-						{#if pinned && !out}
+						{#if pinned && !out && !readOnly}
 							<button
 								type="button"
 								class="person__pin"
@@ -471,6 +493,11 @@
 		background: var(--brand-500);
 		border-color: var(--brand-500);
 		color: var(--on-accent, #fff);
+	}
+
+	.role--operator {
+		background: var(--brand-200);
+		border-color: var(--brand-300);
 	}
 
 	.role--catch {

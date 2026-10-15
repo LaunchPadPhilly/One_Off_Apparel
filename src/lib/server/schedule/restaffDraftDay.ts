@@ -68,7 +68,7 @@ async function restaffDay(tx: Tx, draftId: string, isoDay: string, staffing: Sta
 				date: day,
 				status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS, ScheduleAssignmentStatus.COMPLETE] }
 			},
-			select: { lineItemId: true, stationId: true, date: true, status: true, startedAt: true, station: { select: { kind: true } }, crew: { select: { workerId: true, isMain: true } } }
+			select: { lineItemId: true, stationId: true, date: true, status: true, startedAt: true, station: { select: { kind: true } }, crew: { select: { workerId: true, role: true } } }
 		})
 	]);
 	if (staffing.workers.length === 0) return { peers: [], pushedCount: 0, closed: [], approvedKept: 0 };
@@ -109,7 +109,13 @@ async function restaffDay(tx: Tx, draftId: string, isoDay: string, staffing: Sta
 		}
 		await tx.assignmentCrew.deleteMany({ where: { assignmentId: a.id } });
 		if (crewIds.length) {
-			await tx.assignmentCrew.createMany({ data: crewIds.map((workerId) => ({ assignmentId: a.id, workerId, isMain: workerId === slot?.mainWorkerId })) });
+			await tx.assignmentCrew.createMany({
+				data: crewIds.map((workerId) => ({
+					assignmentId: a.id,
+					workerId,
+					role: workerId === slot?.leadWorkerId && slot.leadRole ? slot.leadRole : 'CATCH'
+				}))
+			});
 		}
 		if (hours !== a.estimatedHours) {
 			await tx.scheduleAssignment.update({ where: { id: a.id }, data: { estimatedHours: hours } });
