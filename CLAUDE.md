@@ -829,27 +829,20 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     (Mon–Sun) for the approved schedule on `/schedule`. Jobs with no `screens` value
     count 0 and are called out, so the total is never silently low.
   - Remaining order: daily staffing part 2 (re-plan + replace on approval).
-- **Production board (provisional).** `/schedule` (`src/routes/schedule/`) is gated on
-  the `SCHEDULE_READ`/`SCHEDULE_WRITE` scopes already used by the domain MCP tools. It
-  covers the whole flow, not just Start/Stop: a date window (default 28 days from
-  today — an arbitrary "3-4 weeks" pick, not a spec), grouped by date, showing
-  proposed/approved/in-progress assignments with Propose, Approve (`commit_schedule`),
-  Edit/Remove (proposed only — reassigning station/date, or deleting the draft so its
-  line item returns to the backlog), and Start/Stop → `started_at`/`completed_at` →
-  `check_completion`. Received a visual/UX pass (2026-09-21): a stat-tile summary
-  (jobs placed / jobs at risk) instead of a plain sentence, at-risk jobs grouped into
-  three collapsible cards by *why* they're blocked (no formula / missing job data / no
-  capacity — the same three-way split `explainAtRisk.ts`'s `AtRiskCategory` already
-  made, now with an icon+color per category instead of one undifferentiated list), and
-  a standing banner when zero `Station`/`CapacityCalendar` rows exist at all (rather
-  than only surfacing that after a Propose click). Still not decided, not invented: the
-  route path (`/schedule` is a placeholder, rename freely), the actual layout/grouping
-  (per-station queue? per-day? per-order? this is still a day-grouped flat list, just a
-  better-looking one), the 28-day default window, and whether/when `LineItem.status`
-  should move to `in_production` (Start currently leaves it untouched — same category
-  of gap as "when does `Order.status` become `scheduled`," left alone rather than
-  guessed). Do not treat this route's current shape as a real spec — it's scaffolding
-  pending a real answer on all four points above, just no longer an unstyled one.
+- **Production board = the finalized schedule (2026-10-15).** `/schedule` shows the live
+  schedule — every APPROVED / IN_PROGRESS / COMPLETE job from today (or the oldest job still
+  running or overdue) for 4–12 weeks, across all drafts — drawn with **the same board as a
+  draft** (`routes/schedule/drafts/[id]/ScheduleBoard.svelte`, data from
+  `$lib/server/schedule/boardData.ts`' `buildBoardData`, so the two can't drift apart). It is
+  read-only ("Finalized"): no Orders tray, nothing draggable, People panel read-only. Clicking a
+  job opens its details with **Start / Stop** (`startAssignment` / `stopAssignment`; "Waiting on
+  print" for a blocked finisher), and in-progress jobs get a ring, done jobs fade. Drafts are a
+  collapsible list above it. An **approved draft** renders the same finalized way
+  ("Approved · ready to run") with **Make changes** (`reopenDraft` → `unapproveSchedule`): its
+  not-started approved jobs go back to proposed and drop off the live schedule until it's
+  approved again; started/finished jobs stay locked. Inside a draft, any non-proposed job is
+  locked (can't be dragged or removed). Still not decided: whether `LineItem.status` should move
+  to `in_production` on Start.
 - **Drafts: manual and automatic creation, both gated on CONFIRMED orders
   (2026-09-22).** `/schedule/new` (manual — pick a name/window/strategy, then place line
   items yourself in `/schedule/drafts/[id]`'s drag-and-drop workspace) and a new "Create
