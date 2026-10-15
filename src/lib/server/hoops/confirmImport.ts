@@ -86,6 +86,14 @@ export async function confirmImport(orderIds: readonly string[], confirmedBy: st
 
 		for (const [lineItemId, patch] of Object.entries(corrections?.lineItems ?? {})) {
 			const validated = lineItemCorrectionSchema.parse(patch);
+			// Only a Patch Install can be outsourced (same rule as updateLineItemFields), judged
+			// on the row as this correction leaves it.
+			if (validated.outsourced === true) {
+				const row = await tx.lineItem.findUniqueOrThrow({ where: { id: lineItemId }, select: { itemType: true, otherJobType: true } });
+				if (!isPatchInstall({ itemType: validated.itemType ?? row.itemType, otherJobType: validated.otherJobType ?? row.otherJobType })) {
+					throw new ConfirmImportError(`confirm_import: only a Patch Install can be marked outsourced (line item ${lineItemId}).`);
+				}
+			}
 			await tx.lineItem.update({ where: { id: lineItemId }, data: validated });
 		}
 
