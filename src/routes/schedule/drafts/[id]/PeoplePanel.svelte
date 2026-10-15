@@ -30,6 +30,7 @@
 		stations,
 		days,
 		isAdmin,
+		readOnly = false,
 		busy,
 		onUnpin,
 		onReplan,
@@ -44,6 +45,8 @@
 		/** The days the board is showing, in order. */
 		days: string[];
 		isAdmin: boolean;
+		/** A finalized schedule (2026-10-15): shows who's where, no dragging or re-planning. */
+		readOnly?: boolean;
 		busy: boolean;
 		onUnpin: (workerId: string, date: string) => void;
 		/** Re-staff every day of the draft with the current roster and rules. */
@@ -191,7 +194,7 @@
 			<p class="people__summary muted">
 				{counts.working} working · {counts.free} free · {counts.out} out
 			</p>
-			{#if people.length > 0}
+			{#if people.length > 0 && !readOnly}
 				<button
 					type="button"
 					class="people__replan"
@@ -215,15 +218,17 @@
 				{#if isAdmin}<a href="/settings?screen=people">Add people</a>{/if}
 			</p>
 		{:else}
-			<p class="people__hint muted">Drag someone onto a station row to put them there for that day.</p>
+			{#if !readOnly}
+				<p class="people__hint muted">Drag someone onto a station row to put them there for that day.</p>
+			{/if}
 			<ul class="people__list" aria-busy={busy}>
 				{#each rows as { person, status, pinned } (person.id)}
 					{@const out = status.kind === 'out'}
 					<li
 						class="person"
 						class:person--out={out}
-						draggable={!out && !busy}
-						ondragstart={(event) => handleDragStart(event, person.id)}
+						draggable={!out && !busy && !readOnly}
+						ondragstart={readOnly ? undefined : (event) => handleDragStart(event, person.id)}
 						ondragend={onWorkerDragEnd}
 						title={[certSummary(person), person.notes ? `Notes: ${person.notes}` : ''].filter(Boolean).join('\n')}
 					>
@@ -246,7 +251,7 @@
 								<span class="person__notes">{person.notes}</span>
 							{/if}
 						</span>
-						{#if pinned && !out}
+						{#if pinned && !out && !readOnly}
 							<button
 								type="button"
 								class="person__pin"

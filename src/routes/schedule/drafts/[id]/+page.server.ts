@@ -1,17 +1,15 @@
 import { error, fail, redirect } from '@sveltejs/kit';
-import { isAdmin, requireScopePage } from '$lib/server/auth/guards';
+import { hasGrantedScope, isAdmin, requireScopePage } from '$lib/server/auth/guards';
 import { deleteDraft, getDraft, renameDraft, renameDraftSchema } from '$lib/server/schedule/draft';
 import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
 import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
 import { pinAndRestaffDraftDay, replanDraftCrews, RestaffError } from '$lib/server/schedule/restaffDraftDay';
 import { prisma } from '$lib/server/prisma';
+import { buildBoardData } from '$lib/server/schedule/boardData';
+import { unapproveSchedule, UnapproveScheduleError } from '$lib/server/schedule/unapproveSchedule';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
-import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { fetchOrderGaps } from '$lib/server/hoops/orderReadiness';
-import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
-import { pressSafeCrew } from '$lib/schedule/people';
-import { wallClockEnd } from '$lib/schedule/shift';
 import { isPressKind } from '$lib/schedule/stationKinds';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 import {
@@ -22,19 +20,6 @@ import type { Actions, PageServerLoad } from './$types';
 
 function iso(d: Date): string {
 	return d.toISOString().slice(0, 10);
-}
-
-function groupNamesByDate(rows: readonly { date: Date; worker: { name: string } }[]): Record<string, string[]> {
-	const byDate: Record<string, string[]> = {};
-	for (const row of rows) (byDate[iso(row.date)] ??= []).push(row.worker.name);
-	for (const names of Object.values(byDate)) names.sort();
-	return byDate;
-}
-
-function addDays(iso: string, days: number): Date {
-	const d = new Date(`${iso}T00:00:00Z`);
-	d.setUTCDate(d.getUTCDate() + days);
-	return d;
 }
 
 // Mirrors buildBacklogAndCapacity.ts's own startOfToday() — an order whose due date
@@ -82,19 +67,15 @@ function stationMismatchMessage(
  */
 
 /**
- * The draft detail view carries the sidebar (candidate orders + line items with
- * estimated hours) and the day-by-day timeline. Placements are ScheduleAssignment
- * rows scoped to this draft (nullable FK — legacy rows and committed rows still
- * exist without one) and are read/written directly here.
+ * The draft detail view: the Orders tray (confirmed orders not yet placed) and the
+ * day-by-day timeline of this draft's placements. The shape is shared with the live
+ * schedule on /schedule (buildBoardData), so an approved draft and the live schedule
+ * look the same.
  */
 export const load: PageServerLoad = async ({ params, locals, url }) => {
 	requireScopePage(locals.user, 'SCHEDULE_READ', url.pathname);
 	const draft = await getDraft(params.id);
 	if (!draft) throw error(404, 'Schedule draft not found');
-
-	const startIso = iso(draft.startDate);
-	const endDate = addDays(startIso, draft.weeks * 7 - 1);
-	const endIso = iso(endDate);
 
 	// One-time feedback from "Create automatic schedule" (see proposeIntoNewDraft.ts /
 	// the ?placed=&atRisk= redirect on /schedule) — not stored anywhere, just read off
@@ -104,254 +85,12 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		? { placed: Number(url.searchParams.get('placed')), atRisk: Number(url.searchParams.get('atRisk')) }
 		: null;
 
-	const [orders, stations, capacityRows, assignments] = await Promise.all([
-		// CONFIRMED only — a NEEDS_REVIEW order hasn't passed CLAUDE.md's first human
-		// approval gate (import confirmation) yet, so it has no business being placeable
-		// here even manually. This intentionally does NOT also require the stricter
-		// fetchBacklog() gates (blanks received, customer approval) —
-		// those are enforced for the *automatic* engine path (proposeIntoNewDraft.ts);
-		// a human manually planning ahead can still place a confirmed order before every
-		// pre-production gate is finalized. ALSO excludes an order whose due date has
-		// already passed (2026-09-22 decision) — it shouldn't even be offered as a
-		// candidate here, not just left unplaced by the automatic engine; see
-		// placeAssignment below for the matching server-side write-path check.
-		prisma.order.findMany({
-			// `lineItems: { some: {} }` keeps orders with zero jobs out of the tray — a
-			// shell order (e.g. a manual import that landed before any line items were
-			// attached) has nothing schedulable and should not be offered as a candidate.
-			where: { status: OrderStatus.CONFIRMED, deadline: { gte: startOfToday() }, lineItems: { some: {} } },
-			include: { lineItems: { orderBy: { id: 'asc' } } },
-			orderBy: [{ deadline: 'asc' }, { createdAt: 'desc' }]
-		}),
-		prisma.station.findMany({
-			where: { archivedAt: null },
-			orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }],
-			select: { id: true, name: true, label: true, kind: true, autoSchedule: true }
-		}),
-		prisma.capacityCalendar.findMany({
-			where: { date: { gte: draft.startDate, lte: endDate } }
-		}),
-		prisma.scheduleAssignment.findMany({
-			where: { scheduleDraftId: draft.id },
-			include: {
-				lineItem: { select: { id: true, orderId: true } },
-				station: { select: { id: true, name: true, kind: true } },
-				// The day's crew on this job (planStaffing.ts, 2026-09-28), with each
-				// member's role (2026-10-15): MAIN / OPERATOR / CATCH.
-				crew: { select: { role: true, worker: { select: { id: true, name: true } } } }
-			},
-			orderBy: [{ date: 'asc' }, { startMinuteOfDay: 'asc' }, { sequenceOrder: 'asc' }]
-		})
-	]);
-	const [unavailability, workers, pins] = await Promise.all([
-		prisma.workerUnavailability.findMany({
-			where: { date: { gte: draft.startDate, lte: endDate }, worker: { archivedAt: null } },
-			select: { date: true, reason: true, worker: { select: { id: true, name: true } } }
-		}),
-		// The People panel (2026-10-14): the active roster with certifications and notes.
-		prisma.worker.findMany({
-			where: { archivedAt: null },
-			orderBy: { name: 'asc' },
-			select: {
-				id: true,
-				name: true,
-				notes: true,
-				isMain: true,
-				isOperator: true,
-				certifications: { where: { station: { archivedAt: null } }, select: { station: { select: { name: true } } } }
-			}
-		}),
-		prisma.staffingPin.findMany({
-			where: { date: { gte: draft.startDate, lte: endDate }, worker: { archivedAt: null } },
-			select: { date: true, workerId: true, station: { select: { name: true } } }
-		})
-	]);
-
-	// One entry per (station, day) in the window; falls back to the default day
-	// length when the capacity_calendar has no row for that pair. That keeps the
-	// timeline usable before capacity_calendar has been seeded for a shop.
-	const days: string[] = [];
-	for (let i = 0; i < draft.weeks * 7; i++) {
-		days.push(iso(addDays(startIso, i)));
-	}
-	// Row order is the admin's (sortOrder, then label). No fallback list any more —
-	// the migration seeds the original stations, and an empty list means an admin
-	// archived them all.
-	const stationNames = stations.map((station) => station.name);
-	const capacityMap = new Map<string, number>();
-	for (const row of capacityRows) {
-		capacityMap.set(`${row.stationId}:${iso(row.date)}`, row.availableHrs);
-	}
-	const stationIdByName = new Map(stations.map((station) => [station.name, station.id]));
-
-	const capacity = days.map((day) => ({
-		date: day,
-		stations: stationNames.map((name) => {
-			const stationId = stationIdByName.get(name);
-			const hrs = stationId ? capacityMap.get(`${stationId}:${day}`) : undefined;
-			return {
-				name,
-				availableHrs: hrs ?? DEFAULT_STATION_DAY_HOURS
-			};
-		})
-	}));
-
-	// Crew-overlap flags (2026-10-15): since a main may now lead more than one press
-	// in a day (physically moving between presses), a crew member can end up on two
-	// jobs on different stations whose wall-clock spans overlap — "they can't be in
-	// two places at once." Compute once over every assignment and attach per-crew-
-	// member conflicts to each placement; the board shows them in the hover popover
-	// instead of refusing the plan, matching the client's "flag it, don't hide it".
-	const stationLabelByName = new Map(stations.map((s) => [s.name, s.label]));
-	type Span = { assignmentId: string; stationName: string; startMin: number; endMin: number };
-	const spansByDayWorker = new Map<string, Span[]>();
-	for (const a of assignments) {
-		const start = a.startMinuteOfDay ?? 8 * 60;
-		const end = wallClockEnd(start, Math.round(a.estimatedHours * 60));
-		const key = iso(a.date);
-		for (const member of a.crew) {
-			const bucketKey = `${key}|${member.worker.id}`;
-			const bucket = spansByDayWorker.get(bucketKey) ?? [];
-			bucket.push({ assignmentId: a.id, stationName: a.station.name, startMin: start, endMin: end });
-			spansByDayWorker.set(bucketKey, bucket);
-		}
-	}
-	type CrewConflict = { stationName: string; stationLabel: string; startMin: number; endMin: number };
-	// (assignmentId, workerId) → conflicts with other assignments the same person
-	// is on that day, where the two spans overlap in wall-clock minutes.
-	const conflictsByAssignmentWorker = new Map<string, CrewConflict[]>();
-	for (const [bucketKey, spans] of spansByDayWorker) {
-		if (spans.length < 2) continue;
-		const workerId = bucketKey.split('|')[1];
-		for (let i = 0; i < spans.length; i++) {
-			for (let j = 0; j < spans.length; j++) {
-				if (i === j) continue;
-				const a = spans[i];
-				const b = spans[j];
-				if (a.stationName === b.stationName) continue; // same station, same day — one person works it all day
-				if (a.startMin >= b.endMin || b.startMin >= a.endMin) continue;
-				const key = `${a.assignmentId}|${workerId}`;
-				const list = conflictsByAssignmentWorker.get(key) ?? [];
-				list.push({
-					stationName: b.stationName,
-					stationLabel: stationLabelByName.get(b.stationName) ?? b.stationName,
-					startMin: b.startMin,
-					endMin: b.endMin
-				});
-				conflictsByAssignmentWorker.set(key, list);
-			}
-		}
-	}
-
 	return {
+		...(await buildBoardData({ kind: 'draft', draft })),
 		autoProposeFeedback,
 		// Renaming a draft is admin-only (2026-10-13); the action re-checks this.
 		canRename: isAdmin(locals.user),
-		draft: {
-			id: draft.id,
-			name: draft.name,
-			description: draft.description,
-			startDate: startIso,
-			endDate: endIso,
-			weeks: draft.weeks,
-			strategy: draft.strategy,
-			status: draft.status,
-			createdBy: draft.createdBy,
-			createdAt: draft.createdAt.toISOString()
-		},
-		orders: orders.map((order) => ({
-			id: order.id,
-			hoopsOrderId: order.hoopsOrderId,
-			customerName: order.customerName,
-			displayTitle: order.displayTitle,
-			colorHex: order.colorHex,
-			// Never null: the candidate query's deadline filter excludes orders with no date.
-			deadline: iso(order.deadline!),
-			deadlineIsTight: order.deadlineIsTight,
-			status: order.status,
-			// Open items (orderGaps.ts) — a confirmed order with any is flagged "Needs
-			// re-review" on its card, linking to the order page to fix it.
-			blockingCount: computeOrderGaps(
-				{ deadline: order.deadline, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
-				order.lineItems
-			).blockingCount,
-			// Left off the last automatic plan for lack of room (2026-10-13) — kept off the
-			// board until a plan fits it; the red flag and reason show on the Orders pages.
-			scheduleFlagged: order.scheduleFlagReason !== null,
-			lineItems: order.lineItems.map((item) => ({
-				id: item.id,
-				design: item.design,
-				itemType: item.itemType,
-				decorationType: item.decorationType,
-				// For the weekly screen count.
-				screens: item.screens,
-				finishingStep: item.finishingStep,
-				printLocation: item.printLocation,
-				// OTHER rows (2026-09-28): the export's name for the job, e.g. "Patch Install".
-				otherJobType: item.otherJobType,
-				inkColorCount: item.inkColorCount,
-				// The colors going on the piece (2026-09-28) — shown on cards and hover details.
-				decorationColors: item.decorationColors,
-				quantity: item.quantity,
-				status: item.status,
-				// For the timeline's "waits on …" tooltip on finisher blocks.
-				dependsOn: item.dependsOn,
-				// The live estimate (same estimateForDisplay() the Orders page already uses),
-				// not the dormant LineItem.estimatedHours column this used to read — that
-				// column is never written to (see CLAUDE.md), so hours and "why can't this be
-				// placed" never actually showed here before this fix; they just silently
-				// always came back null.
-				estimate: estimateForDisplay(item)
-			}))
-		})),
-		assignments: assignments.map((a) => ({
-			id: a.id,
-			lineItemId: a.lineItemId,
-			orderId: a.lineItem.orderId,
-			stationName: a.station.name,
-			date: iso(a.date),
-			startMinuteOfDay: a.startMinuteOfDay ?? 8 * 60,
-			estimatedHours: a.estimatedHours,
-			status: a.status,
-			// Lead (MAIN or OPERATOR) first; a press crew with no lead isn't shown (no
-			// catch without a lead) — noLead tells the board to say so instead. Role is
-			// carried per crew member so the hover popover can show MAIN / OPERATOR /
-			// CATCH and the role-switch control knows what's selected. `conflicts` is
-			// the other jobs that same person is on this day whose spans overlap this
-			// one's — empty for everyone with no overlap.
-			crew: pressSafeCrew(
-				a.crew.map((member) => ({
-					id: member.worker.id,
-					name: member.worker.name,
-					role: member.role as 'MAIN' | 'OPERATOR' | 'CATCH',
-					isMain: member.role === 'MAIN' || member.role === 'OPERATOR',
-					conflicts: conflictsByAssignmentWorker.get(`${a.id}|${member.worker.id}`) ?? []
-				})),
-				isPressKind(a.station.kind)
-			),
-			noLead: isPressKind(a.station.kind) && a.crew.length > 0 && !a.crew.some((m) => m.role === 'MAIN' || m.role === 'OPERATOR')
-		})),
-		stationNames,
-		// name → display label / formula kind, for the board's row labels, the
-		// finishing-group split and the drop restriction.
-		stations: stations.map((station) => ({ name: station.name, label: station.label, kind: station.kind, autoSchedule: station.autoSchedule })),
-		capacity,
-		defaultStationDayHours: DEFAULT_STATION_DAY_HOURS,
-		// Who's out each day of the draft (set through Claude, 2026-09-28): date → names.
-		outByDate: groupNamesByDate(unavailability),
-		// The People panel (2026-10-14): roster, days out and pins in this window, with
-		// worker-level press-role flags (2026-10-15) for the role switcher and the
-		// "no mains?" warning.
-		people: workers.map((w) => ({
-			id: w.id,
-			name: w.name,
-			notes: w.notes,
-			isMain: w.isMain,
-			isOperator: w.isOperator,
-			certifications: w.certifications.map((c) => ({ stationName: c.station.name }))
-		})),
-		peopleOut: unavailability.map((row) => ({ date: iso(row.date), workerId: row.worker.id, reason: row.reason })),
-		pins: pins.map((row) => ({ date: iso(row.date), workerId: row.workerId, stationName: row.station.name }))
+		canEdit: hasGrantedScope(locals.user, 'SCHEDULE_WRITE')
 	};
 };
 
@@ -795,6 +534,28 @@ export const actions: Actions = {
 			if (err instanceof CommitScheduleError) return fail(409, { message: err.message });
 			throw err;
 		}
+	},
+
+	// "Make changes" on a finalized (approved) draft (2026-10-15): its approved jobs that
+	// haven't started go back to proposed, so they can be dragged again and re-approved.
+	// Started and finished jobs stay as they are. Same path as the unapprove_schedule
+	// MCP tool; the draft returns to DRAFT.
+	reopenDraft: async ({ params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		const approved = await prisma.scheduleAssignment.findMany({
+			where: { scheduleDraftId: params.id, status: ScheduleAssignmentStatus.APPROVED },
+			select: { id: true }
+		});
+		if (approved.length === 0) return fail(409, { message: 'Nothing on this schedule can be changed — every job has already started or finished.' });
+		try {
+			await unapproveSchedule(approved.map((a) => a.id), user.email);
+		} catch (err) {
+			if (err instanceof UnapproveScheduleError) return fail(409, { message: err.message });
+			throw err;
+		}
+		return { reopened: true as const, reopenedCount: approved.length };
 	},
 
 	// Rename a draft — admins only (2026-10-13). Checked here on the server, not just by

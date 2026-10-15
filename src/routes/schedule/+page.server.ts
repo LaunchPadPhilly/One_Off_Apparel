@@ -1,48 +1,32 @@
 import { fail, redirect } from '@sveltejs/kit';
-import { prisma } from '$lib/server/prisma';
 import { hasGrantedScope, requireScopePage } from '$lib/server/auth/guards';
 import { startAssignment } from '$lib/server/schedule/startAssignment';
 import { stopAssignment } from '$lib/server/schedule/stopAssignment';
 import { deleteDrafts, listDrafts } from '$lib/server/schedule/draft';
 import { proposeIntoNewDraft } from '$lib/server/schedule/proposeIntoNewDraft';
-import { ScheduleAssignmentStatus } from '../../../prisma/generated/prisma/enums';
+import { buildBoardData, liveWindow } from '$lib/server/schedule/boardData';
 import type { Actions, PageServerLoad } from './$types';
 
 /**
- * Placeholder Production Board — see CLAUDE.md's "Production board (provisional)" open
- * item. This route, its flat unlayout-ed list, and the /schedule path itself are all
- * explicitly provisional: no grouping (per-station/per-day/per-order), no design, no
- * date filtering — a bare list of every currently-actionable assignment, gated on the
- * same SCHEDULE_READ/SCHEDULE_WRITE scopes the domain MCP tools already use (see
- * src/lib/server/auth/guards.ts and +layout.svelte's scope-gated-nav-link convention).
+ * The production board (2026-10-15): the live schedule — every approved, running and
+ * finished job in the window, across all drafts — drawn with the same board as a draft
+ * (ScheduleBoard.svelte via buildBoardData), finalized and read-only, with Start / Stop
+ * on each job. Drafts are listed above it.
  */
 export const load: PageServerLoad = async ({ locals, url }) => {
 	requireScopePage(locals.user, 'SCHEDULE_READ', url.pathname);
 
-	const [assignments, drafts] = await Promise.all([
-		prisma.scheduleAssignment.findMany({
-			where: { status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] } },
-			include: {
-				lineItem: { select: { id: true, design: true, itemType: true, decorationType: true, finishingStep: true, orderId: true, status: true, screens: true } },
-				station: { select: { id: true, name: true, label: true } }
-			},
-			orderBy: [{ stationId: 'asc' }, { sequenceOrder: 'asc' }]
-		}),
-		listDrafts()
-	]);
+	const [window, drafts] = await Promise.all([liveWindow(), listDrafts()]);
+	const board = await buildBoardData({ kind: 'live', from: window.from, weeks: window.weeks });
 
 	return {
-		canAct: hasGrantedScope(locals.user, 'SCHEDULE_WRITE'),
+		...board,
+		// Approved jobs past the board's 12-week cap — named on the page, not silently dropped.
+		laterJobs: window.later,
+		autoProposeFeedback: null,
+		canRename: false,
+		canEdit: hasGrantedScope(locals.user, 'SCHEDULE_WRITE'),
 		canCreate: hasGrantedScope(locals.user, 'SCHEDULE_WRITE'),
-		assignments: assignments.map((assignment) => ({
-			id: assignment.id,
-			status: assignment.status,
-			date: assignment.date.toISOString().slice(0, 10),
-			estimatedHours: assignment.estimatedHours,
-			startedAt: assignment.startedAt?.toISOString() ?? null,
-			station: assignment.station,
-			lineItem: assignment.lineItem
-		})),
 		drafts: drafts.map((draft) => ({
 			id: draft.id,
 			name: draft.name,

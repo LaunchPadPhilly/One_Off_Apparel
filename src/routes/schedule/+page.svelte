@@ -1,35 +1,17 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { enhance } from '$app/forms';
-	import { fly, fade } from 'svelte/transition';
 	import { pressable } from '$lib/actions/pressable.svelte';
-	import { screenEnter, screenExit } from '$lib/motion';
-	import { appConfig } from '$lib/appConfig';
-	import { screensByCalendarWeek } from '$lib/schedule/screenCount';
 	import { shortDraftCode } from '$lib/schedule/shortDraftCode';
+	import ScheduleBoard from './drafts/[id]/ScheduleBoard.svelte';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
 
-	// Weekly screen count: screens to prep per calendar week (Mon–Sun) for the
-	// approved / in-progress schedule.
-	const weeklyScreens = $derived(
-		screensByCalendarWeek(
-			data.assignments.map((assignment) => ({
-				lineItemId: assignment.lineItem.id,
-				date: assignment.date,
-				decorationType: assignment.lineItem.decorationType,
-				screens: assignment.lineItem.screens
-			}))
-		)
-	);
-
-	function weekLabel(weekStart: string): string {
-		const start = new Date(`${weekStart}T00:00:00Z`);
-		const end = new Date(start);
-		end.setUTCDate(end.getUTCDate() + 6);
-		const fmt = (d: Date) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-		return `${fmt(start)} – ${fmt(end)}`;
-	}
+	// The live schedule (2026-10-15) is the same board a draft uses, finalized: what's
+	// approved is what the floor runs. Drafts sit above it.
+	// Collapsed once there's live work, so the board is what you see first.
+	let draftsOpen = $state(untrack(() => data.assignments.length === 0));
 
 	// Draft ids selected via the per-card checkboxes. Not persisted across reloads
 	// — this is one-off cleanup, not a saved view — so localStorage is deliberately
@@ -75,255 +57,154 @@
 	}
 </script>
 
-<svelte:head>
-	<title>Schedule — {appConfig.displayName}</title>
-</svelte:head>
-
-<div class="page" in:fly={screenEnter} out:fade={screenExit}>
-	<div class="header-row">
-		<div>
-			<span class="eyebrow">Production board</span>
-			<h1>Schedule</h1>
-		</div>
+<ScheduleBoard data={data} form={form && 'message' in form ? { message: form.message } : null}>
+	{#snippet headerActions()}
 		{#if data.canCreate}
-			<div class="header-actions">
-				<a class="button button--secondary" use:pressable href="/schedule/new">Create schedule</a>
-				<!-- NEW: runs the deterministic propose_schedule engine against confirmed,
-				     approval-gated orders and drops the result into a brand-new draft — see
-				     proposeIntoNewDraft.ts. No live LLM call decides placements, per
-				     CLAUDE.md's non-negotiable "Claude never computes a schedule" rule. -->
-				<form method="POST" action="?/createAutomatic" use:enhance>
-					<button class="button" use:pressable type="submit">Create automatic schedule</button>
-				</form>
-			</div>
+			<a class="button button--secondary" use:pressable href="/schedule/new">Create schedule</a>
+			<!-- Runs the deterministic propose_schedule engine and drops the result into a
+			     brand-new draft — see proposeIntoNewDraft.ts. No LLM decides placements. -->
+			<form method="POST" action="?/createAutomatic" use:enhance>
+				<button class="button" use:pressable type="submit">Create automatic schedule</button>
+			</form>
 		{/if}
-	</div>
-	<p class="muted">
-		Provisional scaffolding — no layout, grouping or route path has been decided yet. See
-		CLAUDE.md's "Production board (provisional)" open item.
-	</p>
+	{/snippet}
 
-	{#if form?.message}
-		<p class="error">{form.message}</p>
-	{/if}
-
-	<section class="card">
-		<div class="card__title">
-			<h2>Drafts</h2>
-			<span class="muted">{data.drafts.length} {data.drafts.length === 1 ? 'draft' : 'drafts'}</span>
-		</div>
-		{#if data.drafts.length === 0}
-			<p class="muted">
-				No drafts yet.
-				{#if data.canCreate}
-					<a href="/schedule/new">Create one</a> to hold a candidate schedule window.
-				{/if}
-			</p>
-		{:else}
-			<!-- Bulk selection toolbar. Only interactive to users with SCHEDULE_WRITE
-			     (canCreate mirrors that scope for this route). Renders in one of two
-			     states so the toolbar doesn't shift the drafts list up and down as
-			     rows are selected: a resting row with "Select all" / count, or an
-			     active row with the delete form. -->
-			{#if data.canCreate}
-				<div class="draft-toolbar" class:draft-toolbar--active={liveSelected.length > 0}>
-					<label class="draft-toolbar__select-all">
-						<input
-							type="checkbox"
-							checked={allSelected}
-							indeterminate={liveSelected.length > 0 && !allSelected}
-							onchange={toggleSelectAll}
-						/>
-						<span>Select all</span>
-					</label>
-					{#if liveSelected.length > 0}
-						<span class="draft-toolbar__count">
-							{liveSelected.length} selected
-						</span>
-						<form
-							method="POST"
-							action="?/deleteDrafts"
-							use:enhance={confirmBulkDelete}
-							class="draft-toolbar__form"
-						>
-							{#each liveSelected as id (id)}
-								<input type="hidden" name="draftId" value={id} />
-							{/each}
-							<button
-								type="button"
-								class="button button--secondary"
-								onclick={clearSelection}
-							>
-								Clear
-							</button>
-							<button type="submit" class="button button--danger" use:pressable>
-								Delete {liveSelected.length} draft{liveSelected.length === 1 ? '' : 's'}
-							</button>
-						</form>
-					{/if}
-				</div>
-			{/if}
-			<ul class="draft-list">
-				{#each data.drafts as draft (draft.id)}
-					{@const isSelected = liveSelected.includes(draft.id)}
-					<li class="draft-card" class:draft-card--selected={isSelected}>
+	{#snippet intro()}
+		<section class="card drafts-card">
+			<button type="button" class="card__title drafts-card__toggle" aria-expanded={draftsOpen} onclick={() => (draftsOpen = !draftsOpen)}>
+				<h2>{draftsOpen ? '▾' : '▸'} Drafts</h2>
+				<span class="muted">{data.drafts.length} {data.drafts.length === 1 ? 'draft' : 'drafts'} · approve one to put it on the schedule below</span>
+			</button>
+			{#if draftsOpen}
+				{#if data.drafts.length === 0}
+					<p class="muted">
+						No drafts yet.
 						{#if data.canCreate}
-							<!-- Checkbox is a sibling of the anchor, NOT nested inside it — an
-							     anchor would otherwise swallow the click and navigate instead of
-							     toggling. Siblings don't bubble to each other so no
-							     stopPropagation is needed. -->
-							<label class="draft-card__select">
+							<a href="/schedule/new">Create one</a> to plan a schedule.
+						{/if}
+					</p>
+				{:else}
+					<!-- Bulk selection toolbar. Only interactive to users with SCHEDULE_WRITE. -->
+					{#if data.canCreate}
+						<div class="draft-toolbar" class:draft-toolbar--active={liveSelected.length > 0}>
+							<label class="draft-toolbar__select-all">
 								<input
 									type="checkbox"
-									name="draft-select"
-									aria-label="Select {draft.name}"
-									bind:group={selectedDraftIds}
-									value={draft.id}
+									checked={allSelected}
+									indeterminate={liveSelected.length > 0 && !allSelected}
+									onchange={toggleSelectAll}
 								/>
+								<span>Select all</span>
 							</label>
-						{/if}
-						<a href="/schedule/drafts/{draft.id}" class="draft-card__link">
-							<div class="draft-card__head">
-								<span class="draft-card__name">{draft.name}</span>
-								<span class="badge">{draft.status}</span>
-							</div>
-							<div class="draft-card__meta muted">
-								<code
-									class="draft-card__code"
-									title="Short code — paste into Claude chat to refer to this draft unambiguously (same-day auto-drafts share names)"
-									>{shortDraftCode(draft.id)}</code
+							{#if liveSelected.length > 0}
+								<span class="draft-toolbar__count">
+									{liveSelected.length} selected
+								</span>
+								<form
+									method="POST"
+									action="?/deleteDrafts"
+									use:enhance={confirmBulkDelete}
+									class="draft-toolbar__form"
 								>
-								· {draft.startDate} · {draft.weeks} {draft.weeks === 1 ? 'week' : 'weeks'} ·
-								{draft.strategy === 'BATCH_OPTIMIZE' ? 'Batch-optimize' : 'Strict due-date'}
-							</div>
-						</a>
-					</li>
-				{/each}
-			</ul>
-			{#if form && 'deleted' in form && typeof form.deleted === 'number'}
-				<p class="muted draft-list__feedback">
-					Deleted {form.deleted} draft{form.deleted === 1 ? '' : 's'}.
-				</p>
-			{/if}
-		{/if}
-	</section>
-
-	<section class="card">
-		<div class="card__title"><h2>Screens to prep</h2></div>
-		{#if weeklyScreens.length === 0}
-			<p class="muted">No screen-print jobs on the approved schedule yet.</p>
-		{:else}
-			<table>
-				<thead>
-					<tr><th>Week</th><th>Screens</th><th>Screen-print jobs</th></tr>
-				</thead>
-				<tbody>
-					{#each weeklyScreens as week (week.weekStart)}
-						<tr>
-							<td>{weekLabel(week.weekStart)}</td>
-							<td>
-								<strong>{week.count.screens}</strong>
-								{#if week.count.missingCount > 0}
-									<span class="muted" title="These jobs have no screen count set, so the total may be low.">
-										(+{week.count.missingCount} job{week.count.missingCount === 1 ? '' : 's'} with no screen count)
-									</span>
-								{/if}
-							</td>
-							<td>{week.count.jobCount}</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		{/if}
-	</section>
-
-	<section class="card">
-		{#if data.assignments.length === 0}
-			<p class="muted">Nothing approved or in progress right now.</p>
-		{:else}
-			<table>
-				<thead>
-					<tr>
-						<th>Station</th>
-						<th>Design</th>
-						<th>Date</th>
-						<th>Status</th>
-						{#if data.canAct}<th></th>{/if}
-					</tr>
-				</thead>
-				<tbody>
-					{#each data.assignments as assignment (assignment.id)}
-						<tr>
-							<td>{assignment.station.label}</td>
-							<td>{assignment.lineItem.design}</td>
-							<td>{assignment.date}</td>
-							<td><span class="badge">{assignment.status}</span></td>
-							{#if data.canAct}
-								<td>
-									{#if assignment.status === 'APPROVED' && assignment.lineItem.status === 'BLOCKED'}
-										<!-- Scheduled ahead of time, but locked on the floor until the job it
-										     waits on is Stopped (startAssignment.ts enforces this server-side). -->
-										<span class="badge" title="Stop the job this waits on first — then this unlocks.">Waiting on print</span>
-									{:else if assignment.status === 'APPROVED'}
-										<form method="POST" action="?/start" use:enhance>
-											<input type="hidden" name="assignmentId" value={assignment.id} />
-											<button class="button" use:pressable type="submit">Start</button>
-										</form>
-									{:else if assignment.status === 'IN_PROGRESS'}
-										<form method="POST" action="?/stop" use:enhance>
-											<input type="hidden" name="assignmentId" value={assignment.id} />
-											<button class="button button--secondary" use:pressable type="submit">Stop</button>
-										</form>
-									{/if}
-								</td>
+									{#each liveSelected as id (id)}
+										<input type="hidden" name="draftId" value={id} />
+									{/each}
+									<button
+										type="button"
+										class="button button--secondary"
+										onclick={clearSelection}
+									>
+										Clear
+									</button>
+									<button type="submit" class="button button--danger" use:pressable>
+										Delete {liveSelected.length} draft{liveSelected.length === 1 ? '' : 's'}
+									</button>
+								</form>
 							{/if}
-						</tr>
-					{/each}
-				</tbody>
-			</table>
+						</div>
+					{/if}
+					<ul class="draft-list">
+						{#each data.drafts as draft (draft.id)}
+							{@const isSelected = liveSelected.includes(draft.id)}
+							<li class="draft-card" class:draft-card--selected={isSelected}>
+								{#if data.canCreate}
+									<!-- Checkbox is a sibling of the anchor, not inside it, so a click
+									     toggles it instead of navigating. -->
+									<label class="draft-card__select">
+										<input
+											type="checkbox"
+											name="draft-select"
+											aria-label="Select {draft.name}"
+											bind:group={selectedDraftIds}
+											value={draft.id}
+										/>
+									</label>
+								{/if}
+								<a href="/schedule/drafts/{draft.id}" class="draft-card__link">
+									<div class="draft-card__head">
+										<span class="draft-card__name">{draft.name}</span>
+										<span class="badge" class:badge--success={draft.status === 'APPROVED'}>{draft.status === 'APPROVED' ? 'Approved' : 'Draft'}</span>
+									</div>
+									<div class="draft-card__meta muted">
+										<code
+											class="draft-card__code"
+											title="Short code — paste into Claude chat to refer to this draft unambiguously (same-day auto-drafts share names)"
+											>{shortDraftCode(draft.id)}</code
+										>
+										· {draft.startDate} · {draft.weeks} {draft.weeks === 1 ? 'week' : 'weeks'} ·
+										{draft.strategy === 'BATCH_OPTIMIZE' ? 'Batch-optimize' : 'Strict due-date'}
+									</div>
+								</a>
+							</li>
+						{/each}
+					</ul>
+					{#if form && 'deleted' in form && typeof form.deleted === 'number'}
+						<p class="muted draft-list__feedback">
+							Deleted {form.deleted} draft{form.deleted === 1 ? '' : 's'}.
+						</p>
+					{/if}
+				{/if}
+			{/if}
+		</section>
+
+		{#if data.laterJobs.count > 0}
+			<p class="muted empty-live">
+				{data.laterJobs.count} more approved job{data.laterJobs.count === 1 ? '' : 's'} from {data.laterJobs.firstDate} on
+				{data.laterJobs.count === 1 ? 'is' : 'are'} past the 12 weeks shown here — open {data.laterJobs.count === 1 ? 'its' : 'their'} draft to see {data.laterJobs.count === 1 ? 'it' : 'them'}.
+			</p>
 		{/if}
-	</section>
-</div>
+		{#if data.assignments.length === 0}
+			<p class="muted empty-live">
+				Nothing approved yet. Open a draft and approve it — it shows up here, finalized, exactly as it looked in the draft.
+			</p>
+		{/if}
+	{/snippet}
+</ScheduleBoard>
 
 <style>
-	table {
+	.drafts-card {
+		margin-bottom: var(--space-4);
+	}
+
+	/* The card title doubles as a collapse toggle, so the board is one click away. */
+	.drafts-card__toggle {
 		width: 100%;
-		border-collapse: collapse;
-	}
-
-	th,
-	td {
+		background: none;
+		border: none;
+		padding: 0;
+		color: inherit;
+		font: inherit;
 		text-align: left;
-		padding: 0.6rem 0.75rem;
-		border-bottom: 1px solid var(--border);
-	}
-
-	th {
-		color: var(--ink-500);
-		font-size: 0.85rem;
-		font-weight: 550;
-	}
-
-	tbody tr:last-child td {
-		border-bottom: none;
-	}
-
-	.error {
-		color: var(--danger-fg);
-	}
-
-	.header-row {
+		cursor: pointer;
 		display: flex;
-		align-items: flex-start;
+		align-items: baseline;
 		justify-content: space-between;
-		gap: 1rem;
-		margin-bottom: 0.25rem;
+		gap: 0.75rem;
+		flex-wrap: wrap;
 	}
 
-	.header-actions {
-		display: flex;
-		gap: 0.5rem;
-		flex-wrap: wrap;
+	.empty-live {
+		margin: 0 0 var(--space-4);
 	}
 
 	.draft-list {
