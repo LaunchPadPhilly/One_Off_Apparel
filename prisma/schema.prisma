@@ -426,10 +426,19 @@ model Station {
 
 // A person on the shop floor (2026-09-25). A roster of names, deliberately NOT
 // linked to User — floor staff don't log in. `archivedAt` is "delete".
+//
+// Press role flags (2026-10-15, replacing the earlier per-certification isMain):
+// `isMain` and `isOperator` are worker-level, not per-press — someone marked main
+// may run any press they're certified on as the main printer, and the planner
+// prefers them to open a press. Someone marked operator is a middle tier: they
+// can run the press (open it when no main is available) but the planner picks a
+// main first. Everyone else certified on a press is a catch.
 model Worker {
   id             String                 @id @default(cuid())
   name           String
   notes          String?
+  isMain         Boolean                @default(false)
+  isOperator     Boolean                @default(false)
   archivedAt     DateTime?
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
@@ -440,14 +449,11 @@ model Worker {
 }
 
 // Which stations a worker is certified to run. Per station rather than per kind,
-// so e.g. someone can be cleared for the autos but not the manual press.
+// so e.g. someone can be cleared for the autos but not the manual press. Who may
+// run a press as its main / operator is now on Worker (not per-certification).
 model WorkerCertification {
   workerId  String
   stationId String
-  // Screen-print presses only (2026-10-14): may run this press as its main printer.
-  // A press needs exactly one main to run that day; everyone else on it is a catch.
-  // Ignored on every other station kind.
-  isMain    Boolean  @default(false)
   createdAt DateTime @default(now())
   worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
   station   Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
@@ -490,14 +496,25 @@ model StaffingPin {
 model AssignmentCrew {
   assignmentId String
   workerId     String
-  // The press's main printer that day (2026-10-14); false = a catch, or plain crew
-  // on a station that isn't a screen-print press.
-  isMain       Boolean            @default(false)
+  // Who-does-what on a press that day (2026-10-15, replacing the earlier boolean
+  // isMain): MAIN runs the press as the main printer, OPERATOR is a non-main who
+  // may still run it (fallback lead), CATCH assists. Off-press jobs store CATCH
+  // and the display layer labels them "Crew".
+  role         CrewRole           @default(CATCH)
   assignment   ScheduleAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   worker       Worker             @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
   @@id([assignmentId, workerId])
   @@index([workerId])
+}
+
+// Crew role on one scheduled job (2026-10-15). On a press: MAIN prints, OPERATOR
+// is a non-main lead (fallback), CATCH assists. Off-press rows store CATCH and
+// render as "Crew".
+enum CrewRole {
+  MAIN
+  OPERATOR
+  CATCH
 }
 
 model CapacityCalendar {

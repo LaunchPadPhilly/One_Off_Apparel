@@ -12,8 +12,15 @@
 	 * deterministic staffing planner's call (planStaffing.ts), never Claude's.
 	 */
 
-	type Person = { id: string; name: string; notes: string | null; certifications: { stationName: string; isMain: boolean }[] };
-	type CrewMember = { id: string; name: string; isMain: boolean };
+	type Person = {
+		id: string;
+		name: string;
+		notes: string | null;
+		isMain: boolean;
+		isOperator: boolean;
+		certifications: { stationName: string }[];
+	};
+	type CrewMember = { id: string; name: string; role: 'MAIN' | 'OPERATOR' | 'CATCH'; isMain: boolean };
 
 	let {
 		people,
@@ -85,7 +92,14 @@
 			const press = isPressKind(stationByName.get(p.stationName)?.kind);
 			for (const member of p.crew) {
 				if (working.has(member.id)) continue;
-				working.set(member.id, { stationName: p.stationName, role: press ? (member.isMain ? 'main' : 'catch') : 'crew' });
+				const role: CrewRole = !press
+					? 'crew'
+					: member.role === 'MAIN'
+						? 'main'
+						: member.role === 'OPERATOR'
+							? 'operator'
+							: 'catch';
+				working.set(member.id, { stationName: p.stationName, role });
 			}
 		}
 		const outById = new Map(peopleOut.filter((o) => o.date === day).map((o) => [o.workerId, o.reason]));
@@ -111,7 +125,7 @@
 		return 'stationName' in status ? (stationOrder.get(status.stationName) ?? 999) : 0;
 	}
 	function roleRank(status: Status): number {
-		return status.kind === 'working' ? { main: 0, catch: 1, crew: 1 }[status.role] : 0;
+		return status.kind === 'working' ? { main: 0, operator: 1, catch: 2, crew: 2 }[status.role] : 0;
 	}
 
 	const counts = $derived({
@@ -120,18 +134,21 @@
 		out: rows.filter((r) => r.status.kind === 'out').length
 	});
 
-	// With presses but nobody ticked "Main" on one, the planner can't open any press.
-	const noMains = $derived(
+	// With presses on the floor but nobody set as Main or Operator (and certified on a
+	// press), the planner can't open any press.
+	const noLeads = $derived(
 		stations.some((s) => isPressKind(s.kind)) &&
 			people.length > 0 &&
-			!people.some((p) => p.certifications.some((c) => c.isMain && isPressKind(stationByName.get(c.stationName)?.kind)))
+			!people.some(
+				(p) => (p.isMain || p.isOperator) && p.certifications.some((c) => isPressKind(stationByName.get(c.stationName)?.kind))
+			)
 	);
 
 	function certSummary(person: Person): string {
 		if (person.certifications.length === 0) return 'Not certified on any station yet';
-		return person.certifications
-			.map((c) => labelOf(c.stationName) + (c.isMain && isPressKind(stationByName.get(c.stationName)?.kind) ? ' (main)' : ''))
-			.join(', ');
+		const pressRole = person.isMain ? 'main' : person.isOperator ? 'operator' : null;
+		const stations = person.certifications.map((c) => labelOf(c.stationName)).join(', ');
+		return pressRole ? `${stations} — press role: ${pressRole}` : stations;
 	}
 
 	function dayLabel(iso: string): string {
@@ -185,10 +202,10 @@
 			{/if}
 		</div>
 
-		{#if noMains}
+		{#if noLeads}
 			<p class="people__warn" role="status">
-				No one is set as a main printer, so no press can run.
-				{#if isAdmin}<a href="/settings?screen=people">Tick "Main" in Settings → People.</a>{:else}Ask an admin to set it in Settings → People.{/if}
+				No one is set as a main or operator for the presses, so no press can run.
+				{#if isAdmin}<a href="/settings?screen=people">Tick "Main" or "Operator" in Settings → People.</a>{:else}Ask an admin to set it in Settings → People.{/if}
 			</p>
 		{/if}
 
@@ -471,6 +488,11 @@
 		background: var(--brand-500);
 		border-color: var(--brand-500);
 		color: var(--on-accent, #fff);
+	}
+
+	.role--operator {
+		background: var(--brand-200);
+		border-color: var(--brand-300);
 	}
 
 	.role--catch {

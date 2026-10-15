@@ -171,8 +171,15 @@ export async function proposeIntoDraft(options: ProposeOptions): Promise<Propose
 					status: ScheduleAssignmentStatus.PROPOSED,
 					proposedBy: actor,
 					scheduleDraftId: draft.id,
-					// The day's crew on this station (planStaffing.ts, 2026-09-28).
-					crew: { create: assignment.crewWorkerIds.map((workerId) => ({ workerId, isMain: workerId === assignment.mainWorkerId })) }
+					// The day's crew on this station (planStaffing.ts, 2026-09-28). Role per
+					// member (2026-10-15): the lead (MAIN or OPERATOR, from planStaffing);
+					// everyone else is CATCH (off-press crew render as "Crew").
+					crew: {
+						create: assignment.crewWorkerIds.map((workerId) => ({
+							workerId,
+							role: workerId === assignment.leadWorkerId && assignment.leadRole ? assignment.leadRole : 'CATCH'
+						}))
+					}
 				}
 			});
 			ids.push(row.id);

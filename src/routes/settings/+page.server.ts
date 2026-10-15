@@ -144,7 +144,8 @@ export const actions: Actions = {
 				name: data.get('name'),
 				notes: data.get('notes') ?? '',
 				stationIds: data.getAll('stationId'),
-				mainStationIds: data.getAll('mainStationId')
+				isMain: data.get('isMain') === 'on',
+				isOperator: data.get('isOperator') === 'on'
 			});
 			const worker = await createWorker(input, actor);
 			return withNoteSuggestions(`Added ${input.name}.`, input.notes ? worker.id : null);
@@ -160,7 +161,8 @@ export const actions: Actions = {
 				name: data.get('name'),
 				notes: data.get('notes') ?? '',
 				stationIds: data.getAll('stationId'),
-				mainStationIds: data.getAll('mainStationId')
+				isMain: data.get('isMain') === 'on',
+				isOperator: data.get('isOperator') === 'on'
 			});
 			const before = await prisma.worker.findUnique({ where: { id: input.id }, select: { notes: true } });
 			await updateWorker(input, actor);
