@@ -140,14 +140,18 @@ export async function moveDraftAssignment(
 
 	try {
 		return await prisma.$transaction(async (tx) => {
+			// The row's station / date / startMinuteOfDay are deliberately NOT updated
+			// here (2026-10-15 fix): repackDraftDays loads the draft from the DB with
+			// `loadContext`, applies the move in memory via the cascade helpers, and
+			// writes the new position in its final pass. Updating the row first put the
+			// assignment at the NEW station before `cascadeRemove(originPeers, …)` ran,
+			// so it couldn't find the moved item on its origin day and threw
+			// "That item is no longer on this day — reload the board." We only touch
+			// `proposedBy` here (not a position field) so the audit record names the
+			// actor who did the move.
 			await tx.scheduleAssignment.update({
 				where: { id: input.assignmentId },
-				data: {
-					stationId: station.id,
-					date,
-					startMinuteOfDay: targetStartMin,
-					proposedBy: actor
-				}
+				data: { proposedBy: actor }
 			});
 
 			// Crew was planned for the (station, day) the job left; a cross-slot move
