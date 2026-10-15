@@ -115,7 +115,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		// candidate here, not just left unplaced by the automatic engine; see
 		// placeAssignment below for the matching server-side write-path check.
 		prisma.order.findMany({
-			where: { status: OrderStatus.CONFIRMED, deadline: { gte: startOfToday() } },
+			// `lineItems: { some: {} }` keeps orders with zero jobs out of the tray — a
+			// shell order (e.g. a manual import that landed before any line items were
+			// attached) has nothing schedulable and should not be offered as a candidate.
+			where: { status: OrderStatus.CONFIRMED, deadline: { gte: startOfToday() }, lineItems: { some: {} } },
 			include: { lineItems: { orderBy: { id: 'asc' } } },
 			orderBy: [{ deadline: 'asc' }, { createdAt: 'desc' }]
 		}),

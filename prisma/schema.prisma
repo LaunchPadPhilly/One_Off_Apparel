@@ -363,6 +363,14 @@ model LineItem {
   otherJobType           String?
   assignedStationId      String?
   assignedStation        Station?               @relation(fields: [assignedStationId], references: [id], onDelete: SetNull)
+  // NEW (2026-10-14): Patch Install only. Patch installs are usually outsourced; when
+  // done in-house they're assumed 3 minutes per unit. null = the reviewer hasn't
+  // answered yet (blocks confirm — same gate as other missing_data fields); true =
+  // handled externally (filtered out of the backlog, and the status is flipped to
+  // COMPLETE on confirm so the order can complete naturally); false = in-house (hours
+  // are auto-computed from quantity * 3min). Nullable so legacy OTHER rows (which never
+  // had this concept) still surface the question on their next review.
+  outsourced             Boolean?
   // Either another LineItem's id, or the literal string "all_siblings"
   // (waits on every other line item under the same order). This is
   // deliberately a plain string, not a Prisma relation: a real FK

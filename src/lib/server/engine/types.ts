@@ -59,6 +59,11 @@ export interface EstimateHoursInput {
 	// "Patch Install") — the export's name for it, and the station a reviewer assigned.
 	otherJobType?: string | null;
 	assignedStationId?: string | null;
+	// NEW (2026-10-14): Patch Install only — see $lib/schedule/patchInstall.ts and the
+	// LineItem.outsourced schema comment. null blocks the estimate with a reviewer
+	// question; true marks the item not-schedulable (handled externally); false
+	// auto-computes hours at 3 min/unit without needing manualEstimatedHours.
+	outsourced?: boolean | null;
 	// NEW (2026-09-28): a person's corrected one-person estimate (order page). Replaces
 	// the formula's hours when set — see estimateHours.ts' applyEstimateOverride.
 	estimatedHoursOverride?: number | null;

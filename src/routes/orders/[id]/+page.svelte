@@ -5,6 +5,7 @@
 	import { pressable } from '$lib/actions/pressable.svelte';
 	import { screenEnter, screenExit } from '$lib/motion';
 	import { appConfig } from '$lib/appConfig';
+	import { isPatchInstall, PATCH_INSTALL_MINUTES_PER_UNIT } from '$lib/schedule/patchInstall';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
@@ -35,7 +36,8 @@
 		matteSurface: 'Is the matte finish on a flat or specialty surface',
 		foldBagGarment: 'Is the garment being folded & bagged a short-sleeve tee',
 		manualEstimatedHours: 'How many hours does it need (no formula for this job type)',
-		assignedStationId: 'What station is it assigned to'
+		assignedStationId: 'What station is it assigned to',
+		outsourced: 'Is this patch install outsourced, or done in-house (3 min/patch)'
 	};
 
 	const needsReReview = $derived(data.order.status === 'CONFIRMED' && data.gaps.blockingCount > 0);
@@ -383,11 +385,15 @@
 								</form>
 							{/if}
 						{/if}
+					{:else if item.estimate.category === 'outsourced'}
+						<!-- NEW (2026-10-14): Patch Install the reviewer answered as outsourced
+						     — handled externally, no shop time, no "set estimate" shortcut. -->
+						<span class="badge" title={item.estimate.reason}>Outsourced</span>
 					{:else}
 						<span class="badge badge--warn" title={item.estimate.reason}>
 							{item.estimate.category === 'missing_formula' ? 'No formula yet' : 'Missing job details'}
 						</span>
-						{#if data.canEdit && (item.estimate.category === 'missing_formula' || item.estimate.field !== 'assignedStationId')}
+						{#if data.canEdit && (item.estimate.category === 'missing_formula' || (item.estimate.field !== 'assignedStationId' && item.estimate.field !== 'outsourced'))}
 							<button type="button" class="badge badge--button" onclick={() => (editingEstimateId = item.id)}>Set estimate ✎</button>
 						{/if}
 					{/if}
@@ -435,15 +441,34 @@
 							     Patch Install). The reviewer says which station it runs on; the
 							     schedule places it only on that station. Hours are entered in the
 							     universal override field further down (mandatory for this type). -->
-							<label>
-								Station
-								<select name="assignedStationId">
-									<option value="" selected={!item.assignedStationId}>— choose —</option>
-									{#each data.stations as station (station.id)}
-										<option value={station.id} selected={item.assignedStationId === station.id}>{station.label}</option>
-									{/each}
-								</select>
-							</label>
+							{#if isPatchInstall(item)}
+								<!-- NEW (2026-10-14): Patch Install is almost always outsourced.
+								     When done in-house, One Off assumes 3 min per patch — the
+								     reviewer answers this once, and the hours entry below is
+								     hidden because it's auto-computed. The hidden `outsourcedSubmitted`
+								     marker mirrors the manualEstimatedHours pattern so leaving the
+								     select on "— choose —" doesn't silently clear a prior answer. -->
+								<label>
+									Outsourced?
+									<select name="outsourced">
+										<option value="" selected={item.outsourced == null}>— choose —</option>
+										<option value="true" selected={item.outsourced === true}>Yes — outsourced (not scheduled)</option>
+										<option value="false" selected={item.outsourced === false}>No — in-house ({PATCH_INSTALL_MINUTES_PER_UNIT} min each)</option>
+									</select>
+								</label>
+								<input type="hidden" name="outsourcedSubmitted" value="1" />
+							{/if}
+							{#if !(isPatchInstall(item) && item.outsourced === true)}
+								<label>
+									Station
+									<select name="assignedStationId">
+										<option value="" selected={!item.assignedStationId}>— choose —</option>
+										{#each data.stations as station (station.id)}
+											<option value={station.id} selected={item.assignedStationId === station.id}>{station.label}</option>
+										{/each}
+									</select>
+								</label>
+							{/if}
 						{/if}
 						{#if item.itemType === 'DECORATION'}
 							<!-- NEW (2026-09-28): the colors going ON the piece (ink / thread /
@@ -510,8 +535,11 @@
 						{/if}
 						<!-- Reviewer-entered hours. Required for DTF/DTG/OTHER (no formula exists).
 						     For job types that DO have a formula, use the "edit estimate" button
-						     next to the badge above (writes to estimatedHoursOverride). -->
-						{#if item.itemType === 'OTHER' || item.decorationType === 'DTF' || item.decorationType === 'DTG'}
+						     next to the badge above (writes to estimatedHoursOverride). Patch
+						     Install (2026-10-14) is the one OTHER subtype whose hours come from a
+						     rule (3 min × quantity for in-house, nothing for outsourced), so the
+						     entry is hidden for it entirely. -->
+						{#if (item.itemType === 'OTHER' || item.decorationType === 'DTF' || item.decorationType === 'DTG') && !isPatchInstall(item)}
 							<label>
 								Hours needed
 								<input name="manualEstimatedHours" type="number" min="0.25" step="0.25" value={item.manualEstimatedHours ?? ''} autocomplete="off" />

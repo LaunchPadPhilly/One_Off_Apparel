@@ -1,5 +1,5 @@
 import { estimateHours, EstimationError } from './estimateHours';
-import { isPressKind } from '$lib/schedule/stationKinds';
+import { isPressKind, PRINTED_RELABEL_KIND } from '$lib/schedule/stationKinds';
 import type { BacklogItem, CapacitySlot } from './types';
 
 /**
@@ -181,6 +181,23 @@ export function planStaffingForLoads(loads: ReadonlyMap<string, StationLoad>, ca
 	const workersInOrder = [...inputs.workers].sort((a, b) => a.stationIds.length - b.stationIds.length || byId(a, b));
 	const canMain = (worker: StaffingWorker) => worker.mainStationIds.length > 0;
 
+	// Relabel-needs-press rule (CLAUDE.md Change 2 / 2026-10-14): Relabel is done BY the
+	// press operator between press runs, so a candidate for a Printed Relabel station
+	// must also be certified on at least one Screen Print (press) station. The engine
+	// enforces this at crew-selection time; set_worker_station and the People form
+	// enforce it on the write path.
+	const stationKindById = new Map<string, string>();
+	const pressStationIds = new Set<string>();
+	for (const slot of capacity) {
+		stationKindById.set(slot.stationId, slot.stationKind);
+		if (isPressKind(slot.stationKind)) pressStationIds.add(slot.stationId);
+	}
+	const pressQualified = new Set<string>(
+		inputs.workers.filter((w) => w.stationIds.some((id) => pressStationIds.has(id))).map((w) => w.id)
+	);
+	const workerAllowedForStation = (workerId: string, stationId: string) =>
+		stationKindById.get(stationId) === PRINTED_RELABEL_KIND ? pressQualified.has(workerId) : true;
+
 	const slotsByDay = new Map<string, CapacitySlot[]>();
 	for (const slot of capacity) {
 		const day = slot.date.toISOString().slice(0, 10);
@@ -206,12 +223,15 @@ export function planStaffingForLoads(loads: ReadonlyMap<string, StationLoad>, ca
 		};
 
 		// 1. Pinned people stay where a human put them; people who are out are skipped.
-		//    A pinned main-capable person on a press without a main becomes its main.
+		//    A pinned main-capable person on a press without a main becomes its main. A pin
+		//    to a Printed Relabel station is only honored if the worker is press-qualified
+		//    (set_worker_station already refuses the pin, but a later certification change
+		//    could break the rule — fail safe here too).
 		for (const worker of workersInOrder) {
 			if (inputs.unavailable.has(staffingKey(worker.id, day))) continue;
 			const pinned = inputs.pins.get(staffingKey(worker.id, day));
 			if (pinned) {
-				if (stationIdsToday.has(pinned)) place(worker, pinned);
+				if (stationIdsToday.has(pinned) && workerAllowedForStation(worker.id, pinned)) place(worker, pinned);
 				continue; // pinned somewhere not scheduled today (e.g. the manual press): not free either
 			}
 			free.add(worker.id);
@@ -221,12 +241,12 @@ export function planStaffingForLoads(loads: ReadonlyMap<string, StationLoad>, ca
 		// elsewhere, non-mains first so mains stay free for the presses.
 		const eligibleLeads = (stationId: string) => {
 			if (isPress.get(stationId)) return workersInOrder.filter((w) => free.has(w.id) && w.mainStationIds.includes(stationId));
-			const people = workersInOrder.filter((w) => free.has(w.id) && w.stationIds.includes(stationId));
+			const people = workersInOrder.filter((w) => free.has(w.id) && w.stationIds.includes(stationId) && workerAllowedForStation(w.id, stationId));
 			return [...people.filter((w) => !canMain(w)), ...people.filter(canMain)];
 		};
 		// Free people certified on `stationId`, non-mains first (for catches and extras).
 		const eligibleCrew = (stationId: string) => {
-			const people = workersInOrder.filter((w) => free.has(w.id) && w.stationIds.includes(stationId));
+			const people = workersInOrder.filter((w) => free.has(w.id) && w.stationIds.includes(stationId) && workerAllowedForStation(w.id, stationId));
 			return [...people.filter((w) => !canMain(w)), ...people.filter(canMain)];
 		};
 
@@ -288,6 +308,7 @@ export function planStaffingForLoads(loads: ReadonlyMap<string, StationLoad>, ca
 			let bestSaving = 0;
 			for (const stationId of worker.stationIds) {
 				if (!stationIdsToday.has(stationId) || !hasWork(stationId) || !isOpen(stationId)) continue; // step 2 already tried to open it
+				if (!workerAllowedForStation(worker.id, stationId)) continue;
 				const n = crew.get(stationId)!.length;
 				if (isPress.get(stationId) && n >= 1 + idealCatches(loads.get(stationId))) continue; // a press's crew is its main + ideal catches
 				const saving = (loads.get(stationId)?.divisible ?? 0) / (n * (n + 1)); // time saved by the (n+1)th person

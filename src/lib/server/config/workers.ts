@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { prisma } from '$lib/server/prisma';
-import { isPressKind } from '$lib/schedule/stationKinds';
+import { isPressKind, PRINTED_RELABEL_KIND } from '$lib/schedule/stationKinds';
 
 /**
  * The shop-floor roster (config settings, 2026-09-25): people by name, each with the
@@ -56,11 +56,21 @@ export async function listWorkers() {
 }
 
 /** Only active stations can be certified on — a hand-crafted POST naming an archived
- *  or unknown station id is refused rather than silently stored. */
+ *  or unknown station id is refused rather than silently stored. ALSO enforces the
+ *  Relabel-needs-press rule: a worker certified on a Printed Relabel station must also
+ *  be certified on at least one Screen Print (press) station, because Relabel is done by
+ *  the press operator between press runs. The rule is enforced here, in the staffing
+ *  pin (setWorkerStation), in planStaffing's crew selection, and surfaced in the People
+ *  screen — all four so the chat, UI and engine paths agree. */
 async function assertActiveStations(tx: Pick<typeof prisma, 'station'>, stationIds: string[]) {
 	if (stationIds.length === 0) return;
-	const found = await tx.station.count({ where: { id: { in: stationIds }, archivedAt: null } });
-	if (found !== new Set(stationIds).size) throw new WorkerConfigError('One of the selected stations no longer exists — reload and try again.');
+	const rows = await tx.station.findMany({ where: { id: { in: stationIds }, archivedAt: null }, select: { kind: true } });
+	if (rows.length !== new Set(stationIds).size) throw new WorkerConfigError('One of the selected stations no longer exists — reload and try again.');
+	const hasRelabel = rows.some((r) => r.kind === PRINTED_RELABEL_KIND);
+	const hasPress = rows.some((r) => isPressKind(r.kind));
+	if (hasRelabel && !hasPress) {
+		throw new WorkerConfigError('Printed Relabel can only be run by a press operator — also tick a Screen Print station for this person, or untick Printed Relabel.');
+	}
 }
 
 /** The certified station ids (a "Main" tick certifies too) and, of those, the presses

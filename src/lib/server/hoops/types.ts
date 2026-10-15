@@ -45,6 +45,11 @@ export const lineItemCandidateBaseSchema = z.object({
 	// override of a real formula; that's estimatedHoursOverride (corrections only, below).
 	// See LineItem.manualEstimatedHours in prisma/schema.prisma.
 	manualEstimatedHours: z.number().positive().max(200).nullish(),
+	// NEW (2026-10-14): Patch Install only — see $lib/schedule/patchInstall.ts and the
+	// LineItem.outsourced schema comment. Settable at import candidate time (an
+	// extraction that knows the answer can send it) and in corrections (the reviewer
+	// usually fills it on the order page).
+	outsourced: z.boolean().nullish(),
 	// Another line item's `localId` in this same order candidate, or the literal
 	// "all_siblings" sentinel — never a real LineItem.id (none exist yet at import time).
 	dependsOn: z.string().nullish(),

@@ -256,6 +256,23 @@ stops an order reaching Orders: the reviewer sees what's missing as questions in
   the order couldn't be identified or re-imported.
 - Admin fee and supply rows (digitizing fees, "75 units of patches") are still never line
   items — they aren't production work.
+- **Patch Install (2026-10-14).** An OTHER row whose type is "Patch Install"
+  (`$lib/schedule/patchInstall.ts`) asks "Outsourced, or in-house (3 min/patch)?"
+  instead of asking for hours. The answer is stored in `LineItem.outsourced`, which is
+  nullable: unanswered and legacy rows are null, and only a Patch Install can be
+  outsourced (the import and `updateLineItemFields` enforce this). If outsourced, the
+  job counts as done: `confirmImport`, or a later edit through `updateLineItemFields`,
+  marks it COMPLETE via `check_completion`, which unlocks a waiting fold & bag and can
+  complete the order. Its not-started schedule slots are removed (audit
+  `schedule_removed_outsourced`); once it has started on the floor it can no longer be
+  outsourced. `fetchBacklog()` never schedules it. Switching back to in-house
+  reopens the job (NEEDS_REVIEW) unless the order is already complete. If in-house, its hours are
+  `quantity × 3 / 60`, and it still needs a station. Filter on `outsourced` as
+  null-or-false, never `NOT: { outsourced: true }`: that becomes SQL
+  `NOT outsourced = true`, which drops every null row.
+- An order with **no line items** is left out of the draft board's sidebar, and out of
+  `list_orders` once it's past review. While it's in review, `list_orders` still lists it,
+  because it needs a person.
 Every new question is a normal `computeOrderGaps` question, so confirming stays blocked
 until they're answered, by hand or via the notes box.
 
@@ -365,6 +382,12 @@ division for presses). Only presses have
 main/catch; other stations keep plain crew. `assignment_crew.is_main` records who was the main
 on each planned job. New certifications default to catch (migration
 `press_main_and_catch`) — an admin ticks **Main** per press in Settings → People.
+
+**Relabel needs a press (2026-10-14).** The press operator runs Printed Relabel between
+press runs, so anyone on a Printed Relabel station must also be certified on a
+screen-print press (`isPressKind`). This is enforced in four places:
+`createWorker`/`updateWorker`, `pinWorker` (which covers both `set_worker_station` and
+the board's People panel), and `planStaffing`'s crew picks (`workerAllowedForStation`).
 
 **Notes → suggested rules (2026-10-14).** Saving a person's notes (or "Suggest rules from
 notes") has Claude read them (`config/workerNoteRules.ts`) and suggest only rules the system can

@@ -71,6 +71,12 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 				// reviewer has assigned it a station and hours (estimateHours flags it otherwise).
 				{ itemType: LineItemType.OTHER, status: LineItemStatus.NEEDS_REVIEW }
 			],
+			// Outsourced work is handled externally (2026-10-14) and never gets a slot on
+			// the shop's schedule — on confirm_import it's also flipped to COMPLETE so the
+			// order can complete naturally. This filter is the defense-in-depth. Written as
+			// null-or-false: `NOT: { outsourced: true }` becomes SQL `NOT outsourced = true`,
+			// which is NULL for the (usual) unset column and would drop every job.
+			AND: [{ OR: [{ outsourced: null }, { outsourced: false }] }],
 			order: {
 				status: OrderStatus.CONFIRMED,
 				deadline: { gte: startOfToday() }
@@ -146,6 +152,10 @@ export async function fetchBacklog(): Promise<SchedulingBacklog> {
 			manualEstimatedHours: item.manualEstimatedHours,
 			otherJobType: item.otherJobType,
 			assignedStationId: item.assignedStationId,
+			// Carried through so estimateOtherHours can compute 3 min/unit for an in-house
+			// patch install directly from the backlog item (2026-10-14). Outsourced=true
+			// rows are already filtered by the query above.
+			outsourced: item.outsourced,
 			estimatedHoursOverride: item.estimatedHoursOverride,
 			// Never null here: the `deadline: { gte: … }` filter above excludes orders
 			// with no deadline yet (they can't be confirmed without one anyway).

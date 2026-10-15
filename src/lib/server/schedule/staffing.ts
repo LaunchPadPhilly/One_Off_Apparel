@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { prisma } from '$lib/server/prisma';
 import { McpUserError } from '$lib/server/mcp/handler';
-import { isPressKind } from '$lib/schedule/stationKinds';
+import { isPressKind, PRINTED_RELABEL_KIND } from '$lib/schedule/stationKinds';
 import { pressSafeCrew } from '$lib/schedule/people';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 
@@ -257,7 +257,8 @@ type Tx = Pick<typeof prisma, 'worker' | 'station' | 'workerUnavailability' | 's
 export async function pinWorker(tx: Tx, input: { workerId: string; date: string; stationId: string | null }, actor: string) {
 	const worker = await tx.worker.findFirst({
 		where: { id: input.workerId, archivedAt: null },
-		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
+		// `station.kind` is pulled through for the Relabel-needs-press rule below.
+		select: { id: true, name: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true, station: { select: { kind: true } } } } }
 	});
 	if (!worker) throw new StaffingError('That person is no longer on the roster (Settings → People).');
 	const date = new Date(`${input.date}T00:00:00Z`);
@@ -268,10 +269,17 @@ export async function pinWorker(tx: Tx, input: { workerId: string; date: string;
 		return;
 	}
 
-	const station = await tx.station.findFirst({ where: { id: input.stationId, archivedAt: null }, select: { id: true, label: true } });
+	const station = await tx.station.findFirst({ where: { id: input.stationId, archivedAt: null }, select: { id: true, label: true, kind: true } });
 	if (!station) throw new StaffingError('That station no longer exists (Settings → Stations).');
 	if (!worker.certifications.some((c) => c.stationId === station.id)) {
 		throw new StaffingError(`${worker.name} isn't certified on ${station.label}. Add the certification in Settings → People first if they should be.`);
+	}
+	// Relabel is done BY the press operator between press runs — a worker pinned to a
+	// Printed Relabel station must also be certified on at least one Screen Print (press)
+	// station. Enforced here (set_worker_station and the board's People panel), in
+	// createWorker/updateWorker, and in planStaffing so chat, UI and engine all agree.
+	if (station.kind === PRINTED_RELABEL_KIND && !worker.certifications.some((c) => isPressKind(c.station.kind))) {
+		throw new StaffingError(`${worker.name} isn't certified on a Screen Print station, so they can't run Printed Relabel — relabel is handled by the press operator between runs. Certify ${worker.name} on a Screen Print station first.`);
 	}
 	const out = await tx.workerUnavailability.findUnique({ where: { workerId_date: { workerId: worker.id, date } } });
 	if (out) throw new StaffingError(`${worker.name} is marked out on ${input.date}. Mark them available first.`);

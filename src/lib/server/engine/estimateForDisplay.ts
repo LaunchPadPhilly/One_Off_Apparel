@@ -1,4 +1,4 @@
-import { estimateHours, MissingFormulaError, MissingLineItemDataError, type MissingLineItemField } from './estimateHours';
+import { estimateHours, MissingFormulaError, MissingLineItemDataError, OutsourcedLineItemError, type MissingLineItemField } from './estimateHours';
 import type { EstimateHoursInput } from './types';
 
 /**
@@ -54,7 +54,12 @@ import type { EstimateHoursInput } from './types';
 export type DisplayEstimate =
 	| { ok: true; hours: number; station: string; overridden: boolean; formulaHours: number | null }
 	| { ok: false; category: 'missing_formula'; reason: string }
-	| { ok: false; category: 'missing_data'; reason: string; field: MissingLineItemField };
+	| { ok: false; category: 'missing_data'; reason: string; field: MissingLineItemField }
+	// NEW (2026-10-14): a Patch Install the reviewer answered as outsourced. Not an
+	// error and not pending — the shop isn't doing this one, deliberately. Callers
+	// render an "Outsourced" chip and skip it from totals rather than showing it as
+	// "pending" or counting hours. See $lib/schedule/patchInstall.ts.
+	| { ok: false; category: 'outsourced'; reason: string };
 
 /**
  * Estimates one line item for display (one-person hours — no crew size). Never throws
@@ -67,6 +72,7 @@ export function estimateForDisplay(item: EstimateHoursInput): DisplayEstimate {
 		// overridden/formulaHours (2026-09-28): a person's edited estimate, and what the formula says.
 		return { ok: true, hours: result.hours, station: result.station, overridden: result.overridden ?? false, formulaHours: result.overridden ? (result.formulaHours ?? null) : result.hours };
 	} catch (err) {
+		if (err instanceof OutsourcedLineItemError) return { ok: false, category: 'outsourced', reason: err.message };
 		if (err instanceof MissingFormulaError) return { ok: false, category: 'missing_formula', reason: err.message };
 		if (err instanceof MissingLineItemDataError) return { ok: false, category: 'missing_data', reason: err.message, field: err.field };
 		throw err;
@@ -96,6 +102,10 @@ export function summarizeOrderEstimate(lineItems: readonly EstimateHoursInput[])
 		if (estimate.ok) {
 			totalHours += estimate.hours;
 			estimableCount += 1;
+		} else if (estimate.category === 'outsourced') {
+			// Deliberately not in-house (2026-10-14) — contributes zero hours and never
+			// counts toward the "pending" badge. The order's total ignores it.
+			continue;
 		} else {
 			unestimableCount += 1;
 		}
