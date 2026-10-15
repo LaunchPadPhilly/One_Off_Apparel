@@ -493,14 +493,16 @@
 		stationName: string;
 		startMin: number;
 		durationMin: number;
-		// The day's crew on this job (planStaffing.ts, 2026-09-28), main printer first
-		// on a press (2026-10-14). Empty for hand-placed or hand-moved jobs, and for a
-		// press job whose crew had no main (there's no catch without a main).
+		// The day's crew on this job (planStaffing.ts, 2026-09-28), lead (MAIN or
+		// OPERATOR) first on a press (2026-10-14; 2026-10-15 for operator). Empty for
+		// hand-placed or hand-moved jobs, and for a press job whose crew had no lead
+		// (there's no catch without a lead).
 		crew: CrewMember[];
-		/** A press job planned without a main printer — its crew isn't shown. */
-		noMain?: boolean;
+		/** A press job planned without a lead (main or operator) — its crew isn't shown. */
+		noLead?: boolean;
 	};
-	type CrewMember = { id: string; name: string; isMain: boolean };
+	type CrewRoleEnum = 'MAIN' | 'OPERATOR' | 'CATCH';
+	type CrewMember = { id: string; name: string; role: CrewRoleEnum; isMain: boolean };
 	// Hydrate from server: each ScheduleAssignment tied to this draft becomes a
 	// placement. estimatedHours * 60 is the working duration; startMinuteOfDay
 	// is minutes-from-midnight, aligned with the client's SHIFT_START_MIN.
@@ -514,7 +516,7 @@
 			startMin: a.startMinuteOfDay,
 			durationMin: Math.max(15, Math.round(a.estimatedHours * 60)),
 			crew: a.crew,
-			noMain: a.noMain
+			noLead: a.noLead
 		}));
 	}
 	// Initial copy only; later server changes are applied by hand (or re-hydrated after a crew change).
@@ -529,12 +531,15 @@
 		)
 	);
 
-	/** "Main" / "Catch" on a press, "Crew" anywhere else. */
+	/** "Main" / "Operator" / "Catch" on a press, "Crew" anywhere else. */
 	function roleOf(member: CrewMember, stationName: string): string {
-		return crewRoleLabel(isPressKind(kindOf(stationName)) ? (member.isMain ? 'main' : 'catch') : 'crew');
+		if (!isPressKind(kindOf(stationName))) return crewRoleLabel('crew');
+		if (member.role === 'MAIN') return crewRoleLabel('main');
+		if (member.role === 'OPERATOR') return crewRoleLabel('operator');
+		return crewRoleLabel('catch');
 	}
 
-	/** Everyone on a station's day, main first — one person works one station all day. */
+	/** Everyone on a station's day, lead first — one person works one station all day. */
 	function rowCrewOf(rowPlacements: readonly Placement[]): CrewMember[] {
 		const byId = new Map<string, CrewMember>();
 		for (const p of rowPlacements) for (const m of p.crew) if (!byId.has(m.id) || m.isMain) byId.set(m.id, m);
@@ -614,12 +619,82 @@
 	// details popover renders on the first segment. Set on mouseenter of any
 	// segment, cleared on mouseleave; a plain :hover CSS rule would only expand
 	// one segment at a time and each segment would want its own popover.
+	//
+	// A short close delay (2026-10-15) lets the cursor cross the small gap between
+	// the placement bar and the popover without the popover vanishing — so a role
+	// switch inside the popover is actually clickable. endHover schedules a close
+	// and both the placement AND the popover's own mouseenter cancel it.
 	let hoveredPlacementId = $state<string | null>(null);
+	let hoverCloseTimer: ReturnType<typeof setTimeout> | null = null;
+	function cancelClose() {
+		if (hoverCloseTimer) {
+			clearTimeout(hoverCloseTimer);
+			hoverCloseTimer = null;
+		}
+	}
 	function beginHover(id: string) {
+		cancelClose();
 		hoveredPlacementId = id;
 	}
 	function endHover(id: string) {
-		if (hoveredPlacementId === id) hoveredPlacementId = null;
+		cancelClose();
+		hoverCloseTimer = setTimeout(() => {
+			if (hoveredPlacementId === id) hoveredPlacementId = null;
+			hoverCloseTimer = null;
+		}, 180);
+	}
+
+	// Role switch (2026-10-15): change one crew member's role on a placement from the
+	// hover popover. The server also updates every other PROPOSED assignment on the
+	// same (station, day) for that worker — one person works one station per day, so
+	// the role is shared.
+	let roleMenuMemberId = $state<string | null>(null);
+	let roleBusy = $state(false);
+	function toggleRoleMenu(memberId: string) {
+		roleMenuMemberId = roleMenuMemberId === memberId ? null : memberId;
+	}
+	function closeRoleMenu() {
+		roleMenuMemberId = null;
+	}
+	async function submitRoleChange(assignmentId: string, workerId: string, role: CrewRoleEnum) {
+		if (roleBusy) return;
+		roleBusy = true;
+		try {
+			const body = new FormData();
+			body.set('assignmentId', assignmentId);
+			body.set('workerId', workerId);
+			body.set('role', role);
+			const res = await fetch(`?/setCrewRole`, { method: 'POST', body, headers: { 'x-sveltekit-action': 'true' } });
+			const result = deserialize(await res.text());
+			if (result.type === 'success') {
+				await invalidateAll();
+				placements = hydratePlacements(data.assignments);
+				closeRoleMenu();
+			} else {
+				const message = result.type === 'failure' ? (result.data as { message?: string } | undefined)?.message : undefined;
+				boardNotice = { text: message ?? "Couldn't change the role — try again.", tone: 'warn' };
+			}
+		} catch (e) {
+			console.error('setCrewRole failed', e);
+			boardNotice = { text: "Couldn't change the role — try again.", tone: 'warn' };
+		} finally {
+			roleBusy = false;
+		}
+	}
+	// Which roles a worker can take on this press. A main or operator may also work as
+	// catch; a non-lead can only ever be catch. Off-press, only catch is meaningful (the
+	// menu isn't shown).
+	function availableRoles(workerId: string): CrewRoleEnum[] {
+		const person = peopleById.get(workerId);
+		if (!person) return ['CATCH'];
+		const roles: CrewRoleEnum[] = [];
+		if (person.isMain) roles.push('MAIN');
+		if (person.isMain || person.isOperator) roles.push('OPERATOR');
+		roles.push('CATCH');
+		return roles;
+	}
+	function roleButtonLabel(role: CrewRoleEnum): string {
+		return role === 'MAIN' ? 'Main' : role === 'OPERATOR' ? 'Operator' : 'Catch';
 	}
 
 	// Which line items already have a placement somewhere in this draft — the sidebar
@@ -713,6 +788,11 @@
 				return { ok: true, id: data.id, peers: data.peers ?? [], pushedCount: data.pushedCount ?? 0 };
 			}
 			const message = result.type === 'failure' ? (result.data as { message?: string } | undefined)?.message : undefined;
+			// A result type that isn't `success` or `failure` (e.g. an unexpected 500) was
+			// landing here with no `message` and the UI reverted silently (2026-10-15 bug
+			// report). Log it so a browser-console check surfaces the cause, and let the
+			// caller fall through to the generic refusal below.
+			if (!message && result.type !== 'failure') console.error(`${action} returned`, result);
 			return { ok: false, peers: [], pushedCount: 0, message };
 		} catch (e) {
 			console.error(`${action} failed`, e);
@@ -732,7 +812,13 @@
 	}
 
 	function showRefusal(outcome: ActionOutcome) {
-		if (outcome.message) boardNotice = { text: outcome.message, tone: 'warn' };
+		// Always surface SOMETHING so a server error (no `message`) doesn't look like the
+		// drop just didn't register (2026-10-15 — was silently reverting cross-station
+		// moves). The browser console carries the real cause from postAction.
+		boardNotice = {
+			text: outcome.message ?? "Couldn't save that change — check the browser console for details and try again.",
+			tone: 'warn'
+		};
 	}
 
 	function handleDragStart(
@@ -1549,7 +1635,13 @@
 																onclick={() => removePlacement(placement.id)}
 															>×</button>
 															{#if isHovered}
-																<div class="placement__details" role="tooltip">
+																{@const stationIsPress = isPressKind(kindOf(placement.stationName))}
+																<div
+																	class="placement__details"
+																	role="tooltip"
+																	onmouseenter={() => beginHover(placement.id)}
+																	onmouseleave={() => endHover(placement.id)}
+																>
 																	<div class="placement__details-design">
 																		{lineItem?.design || '(no design)'}
 																	</div>
@@ -1577,15 +1669,46 @@
 																	{#if placement.crew.length}
 																		<ul class="placement__details-crew" aria-label="Crew">
 																			{#each placement.crew as member (member.id)}
+																				{@const canSwitch = stationIsPress && availableRoles(member.id).length > 1}
+																				{@const menuOpen = roleMenuMemberId === member.id}
 																				<li>
 																					<span class="mini-avatar" class:mini-avatar--main={member.isMain} style="--avatar-hue: {avatarHue(member.id)}">{initials(member.name)}</span>
 																					<span class="placement__details-crew-name">{member.name}</span>
-																					<span class="placement__details-role" class:placement__details-role--main={member.isMain}>{roleOf(member, placement.stationName)}</span>
+																					{#if canSwitch}
+																						<span class="role-switch">
+																							<button
+																								type="button"
+																								class="placement__details-role placement__details-role--switch"
+																								class:placement__details-role--main={member.isMain}
+																								onclick={() => toggleRoleMenu(member.id)}
+																								aria-haspopup="true"
+																								aria-expanded={menuOpen}
+																								title="Change role on this job"
+																							>{roleOf(member, placement.stationName)} ▾</button>
+																							{#if menuOpen}
+																								<span class="role-switch__menu" role="menu">
+																									{#each availableRoles(member.id) as option (option)}
+																										{@const isCurrent = option === member.role}
+																										<button
+																											type="button"
+																											role="menuitem"
+																											class="role-switch__option"
+																											class:role-switch__option--current={isCurrent}
+																											disabled={isCurrent || roleBusy}
+																											onclick={() => submitRoleChange(placement.id, member.id, option)}
+																										>{roleButtonLabel(option)}{#if isCurrent} · now{/if}</button>
+																									{/each}
+																								</span>
+																							{/if}
+																						</span>
+																					{:else}
+																						<span class="placement__details-role" class:placement__details-role--main={member.isMain}>{roleOf(member, placement.stationName)}</span>
+																					{/if}
 																				</li>
 																			{/each}
 																		</ul>
-																	{:else if placement.noMain}
-																		<div class="placement__details-waits">No main printer on this press, so no crew — a catch only assists a main. Tick Main for the press operators in Settings → People, then Re-plan crews.</div>
+																	{:else if placement.noLead}
+																		<div class="placement__details-waits">No main or operator on this press, so no crew — a catch only assists a lead. Tick Main or Operator for the press people in Settings → People, then Re-plan crews.</div>
 																	{:else if data.people.length}
 																		<div class="placement__details-waits">No crew planned — drag someone from People onto this row.</div>
 																	{/if}
@@ -1903,6 +2026,78 @@
 
 	.placement__details-role--main {
 		color: var(--brand-700);
+	}
+
+	/* Role switch control (2026-10-15): the role chip becomes a tiny button that
+	   opens a menu of the roles the person can take on this press. */
+	.role-switch {
+		position: relative;
+		display: inline-flex;
+	}
+
+	.placement__details-role--switch {
+		background: var(--secondary-bg, var(--brand-100));
+		border: 1px solid var(--secondary-border, var(--border));
+		border-radius: var(--radius-sm);
+		padding: 0.08rem 0.35rem;
+		font: inherit;
+		font-size: 0.66rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--ink-700);
+		cursor: pointer;
+		line-height: 1;
+	}
+
+	.placement__details-role--switch:hover {
+		background: var(--secondary-hover, var(--brand-200));
+	}
+
+	.placement__details-role--switch.placement__details-role--main {
+		background: var(--brand-500);
+		border-color: var(--brand-500);
+		color: var(--on-accent, #fff);
+	}
+
+	.role-switch__menu {
+		position: absolute;
+		right: 0;
+		top: calc(100% + 4px);
+		z-index: 2;
+		display: flex;
+		flex-direction: column;
+		min-width: 7rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		box-shadow: 0 6px 18px rgb(0 0 0 / 25%);
+		overflow: hidden;
+	}
+
+	.role-switch__option {
+		background: transparent;
+		border: none;
+		box-shadow: none;
+		padding: 0.35rem 0.6rem;
+		font-size: var(--fs-xs);
+		text-align: left;
+		color: var(--ink-900);
+		cursor: pointer;
+	}
+
+	.role-switch__option:hover:not(:disabled) {
+		background: var(--secondary-hover, var(--brand-100));
+	}
+
+	.role-switch__option--current {
+		color: var(--ink-500);
+		cursor: default;
+	}
+
+	.role-switch__option:disabled {
+		opacity: 0.65;
+		cursor: default;
 	}
 
 	/* --- Side tray --- */
@@ -2772,7 +2967,11 @@
 		gap: 0.35rem;
 		font-weight: 400;
 		cursor: default;
-		pointer-events: none; /* purely presentational; drag/click passes through */
+		/* The popover is now interactive (2026-10-15 role switcher), so pointer
+		   events reach it. A short close delay in beginHover/endHover lets the
+		   cursor cross the gap between the bar and the popover without the
+		   popover vanishing before it's reached. */
+		pointer-events: auto;
 		animation: placement-details-in 120ms var(--ease-standard);
 	}
 
