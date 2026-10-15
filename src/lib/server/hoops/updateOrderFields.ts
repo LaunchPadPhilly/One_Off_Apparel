@@ -1,4 +1,5 @@
 import { prisma } from '$lib/server/prisma';
+import type { Prisma } from '../../../../prisma/generated/prisma/client';
 import { orderCorrectionSchema, lineItemCorrectionSchema, type OrderCorrection, type LineItemCorrection } from './types';
 
 /**
@@ -10,6 +11,16 @@ import { orderCorrectionSchema, lineItemCorrectionSchema, type OrderCorrection, 
  * calls directly, same pattern as startAssignment/stopAssignment. Also used by
  * fillNeedsAttentionFromNotes.ts to apply answers from a reviewer's note.
  */
+
+/**
+ * Clears the red "Couldn't be scheduled" flag (proposeAndPersistSchedule.ts). It's the
+ * outcome of the last automatic plan, so an edit to the order or one of its jobs may
+ * have fixed the cause — and a flagged order is hidden from the draft board's sidebar,
+ * so a stale flag would keep a fixed order from being placed by hand.
+ */
+async function clearScheduleFlag(tx: Prisma.TransactionClient, orderId: string) {
+	await tx.order.updateMany({ where: { id: orderId, scheduleFlagReason: { not: null } }, data: { scheduleFlagReason: null, scheduleFlaggedAt: null } });
+}
 
 /**
  * Validates and saves an order-level field edit, with an audit log entry.
@@ -33,6 +44,8 @@ export async function updateOrderFields(orderId: string, patch: OrderCorrection,
 				...(validated.deadline ? { deadline: new Date(validated.deadline) } : {})
 			}
 		});
+		// An edit (other than notes) may have fixed why the last plan couldn't fit it.
+		if (Object.keys(validated).some((key) => key !== 'notes')) await clearScheduleFlag(tx, orderId);
 
 		await tx.domainAuditLog.create({
 			data: { entity: 'Order', entityId: orderId, action: 'order_field_edited', actor, diff: validated }
@@ -68,6 +81,7 @@ export async function updateLineItemFields(lineItemId: string, patch: LineItemCo
 		}
 
 		const updated = await tx.lineItem.update({ where: { id: lineItemId }, data: validated });
+		await clearScheduleFlag(tx, updated.orderId);
 
 		await tx.domainAuditLog.create({
 			data: { entity: 'LineItem', entityId: lineItemId, action: 'line_item_field_edited', actor, diff: validated }

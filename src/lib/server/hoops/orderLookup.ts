@@ -55,7 +55,7 @@ export async function listOrders(input: z.infer<typeof listOrdersSchema>) {
 		},
 		orderBy: [{ deadline: { sort: 'asc', nulls: 'first' } }, { createdAt: 'desc' }],
 		take: input.limit,
-		select: { id: true, hoopsOrderId: true, customerName: true, status: true, deadline: true, deadlineIsTight: true, lineItems: true }
+		select: { id: true, hoopsOrderId: true, customerName: true, status: true, deadline: true, deadlineIsTight: true, scheduleFlagReason: true, lineItems: true }
 	});
 	const gaps = await fetchOrderGaps(orders.map((order) => order.id));
 
@@ -73,7 +73,9 @@ export async function listOrders(input: z.infer<typeof listOrdersSchema>) {
 				jobCount: order.lineItems.length,
 				estimatedHours: Math.round(estimate.totalHours * 100) / 100,
 				openItems,
-				needsReReview: order.status === OrderStatus.CONFIRMED && openItems > 0
+				needsReReview: order.status === OrderStatus.CONFIRMED && openItems > 0,
+				// Why the last automatic plan couldn't fit it (2026-10-13); null = it fit.
+				couldNotSchedule: order.scheduleFlagReason
 			};
 		})
 	};
@@ -122,6 +124,8 @@ export async function getOrder(input: z.infer<typeof getOrderSchema>) {
 		deadlineIsTight: order.deadlineIsTight,
 		notes: order.notes,
 		canConfirm: order.status === OrderStatus.NEEDS_REVIEW && gaps.blockingCount === 0,
+		// Why the last automatic plan couldn't fit it (2026-10-13); null = it fit.
+		couldNotSchedule: order.scheduleFlagReason,
 		openQuestions: gaps.questions.map((question) => ({ question: question.question, answersField: question.target })),
 		importNotes: gaps.infoNotes,
 		jobs: order.lineItems.map((item) => {

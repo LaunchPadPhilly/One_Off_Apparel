@@ -41,6 +41,8 @@
 	};
 
 	const needsReReview = $derived(data.order.status === 'CONFIRMED' && data.gaps.blockingCount > 0);
+	// Valid, but the last automatic plan couldn't fit it (2026-10-13).
+	const couldNotSchedule = $derived(data.order.status === 'CONFIRMED' && !needsReReview && data.order.scheduleFlagReason !== null);
 
 	const answerableQuestions = $derived.by(() => {
 		const items: { key: string; text: string }[] = [];
@@ -90,7 +92,12 @@
 	{#if needsReReview}
 		<p class="re-review" role="status">
 			<strong>Needs re-review:</strong> this order is confirmed but has {data.gaps.blockingCount} open
-			item{data.gaps.blockingCount === 1 ? '' : 's'} (below) — it can't be fully scheduled until they're resolved.
+			item{data.gaps.blockingCount === 1 ? '' : 's'} (below). It's kept off every schedule until they're resolved.
+		</p>
+	{:else if couldNotSchedule}
+		<p class="re-review" role="status">
+			<strong>Couldn't be scheduled:</strong> the last automatic schedule couldn't fit this order — {data.order.scheduleFlagReason}
+			It's kept off the schedule board; the next automatic schedule tries again (more capacity, people, or a later deadline will help).
 		</p>
 	{/if}
 
@@ -654,7 +661,7 @@
 		flex-wrap: wrap;
 	}
 
-	/* Amber = "needs attention", matching .badge--warn and the re-review banner. */
+	/* Amber = "needs attention", matching .badge--warn. */
 	.needs-attention {
 		margin: 0.4rem 0 0.75rem;
 		padding: 0.75rem 0.95rem;
@@ -670,17 +677,18 @@
 		color: var(--warning-fg);
 	}
 
+	/* Red (2026-10-13): this order is off the schedule until it's dealt with. */
 	.re-review {
 		padding: 0.75rem 0.95rem;
-		border: 1px solid color-mix(in srgb, var(--warning-fg) 30%, transparent);
-		border-left: 3px solid var(--warning-fg);
-		background: var(--warning-bg);
+		border: 1px solid color-mix(in srgb, var(--danger-fg) 30%, transparent);
+		border-left: 3px solid var(--danger-fg);
+		background: var(--danger-bg);
 		color: var(--ink-900);
 		border-radius: var(--radius-sm);
 	}
 
 	.re-review strong {
-		color: var(--warning-fg);
+		color: var(--danger-fg);
 	}
 
 	.needs-attention ul {

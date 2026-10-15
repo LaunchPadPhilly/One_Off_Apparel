@@ -294,6 +294,13 @@ model Order {
   // (customerName for title, hash(id) for color).
   displayTitle           String?
   colorHex               String?
+  // Why the most recent automatic plan couldn't fit this order (2026-10-13) — e.g. no
+  // room before its deadline. Set when any of its jobs couldn't be placed (the whole
+  // order is then left off that plan); cleared when a later plan fits all of it. Shown
+  // as a red "Couldn't be scheduled" flag on the Orders pages; the order is kept off
+  // the schedule board while it's set. Null = no problem from the last plan.
+  scheduleFlagReason     String?
+  scheduleFlaggedAt      DateTime?
   lineItems              LineItem[]
 }
 

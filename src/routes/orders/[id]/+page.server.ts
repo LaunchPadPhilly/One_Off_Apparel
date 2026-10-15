@@ -68,7 +68,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			// scheduled; exposed here so there's actually a way to set them.
 			blankOrderingStatus: order.blankOrderingStatus,
 			customerApprovalStatus: order.customerApprovalStatus,
-			importFlags
+			importFlags,
+			// Why the last automatic plan left this order off (2026-10-13); null = it fit.
+			scheduleFlagReason: order.scheduleFlagReason,
+			scheduleFlaggedAt: order.scheduleFlaggedAt?.toISOString() ?? null
 		},
 		gaps,
 		// NEW (2026-09-21): shape each raw database row into exactly the fields the
