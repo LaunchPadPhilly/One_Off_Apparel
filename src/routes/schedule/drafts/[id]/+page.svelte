@@ -595,6 +595,7 @@
 	// so the board reloads its placements afterwards.
 	async function submitStaffing(action: 'pinWorker' | 'replanCrews', body: FormData) {
 		staffingBusy = true;
+		const priorConflictSig = conflictSnapshot();
 		try {
 			const res = await fetch(`?/${action}`, { method: 'POST', body, headers: { 'x-sveltekit-action': 'true' } });
 			const result = deserialize(await res.text());
@@ -603,6 +604,7 @@
 				placements = hydratePlacements(data.assignments);
 				const notice = (result.data as { notice?: string } | undefined)?.notice;
 				if (notice) boardNotice = { text: notice, tone: notice.includes('Nobody can run') ? 'warn' : 'info' };
+				warnIfNewConflict(priorConflictSig);
 			} else {
 				const message = result.type === 'failure' ? (result.data as { message?: string } | undefined)?.message : undefined;
 				boardNotice = { text: message ?? 'Couldn’t change the crew — try again.', tone: 'warn' };
@@ -729,6 +731,93 @@
 
 	function conflictLabel(c: CrewConflict): string {
 		return `${c.stationLabel} (${formatClock(c.startMin)}–${formatClock(c.endMin)})`;
+	}
+
+	// Live crew-overlap map (2026-10-15): computed from the current `placements` so a
+	// freshly-dropped job's conflict shows immediately — the server's precomputed value
+	// goes stale as soon as the client applies an optimistic move. Keyed by placement id,
+	// value is one entry per overlapping crew member: who they are, and where else they
+	// are at the same time. Also exposes a signature so a drop handler can tell when a
+	// NEW conflict has appeared (post-drop toast — a hover popover is too easy to miss).
+	type LiveConflict = { workerId: string; workerName: string; others: CrewConflict[] };
+	const stationLabelLive = $derived(new Map(data.stations.map((s) => [s.name, s.label])));
+	const liveConflicts = $derived.by(() => {
+		type Span = { placementId: string; stationName: string; startMin: number; endMin: number };
+		const spansByDayWorker = new Map<string, Span[]>();
+		const namesByWorker = new Map<string, string>();
+		for (const p of placements) {
+			const end = wallClockEnd(p.startMin, p.durationMin);
+			for (const m of p.crew) {
+				namesByWorker.set(m.id, m.name);
+				const key = `${p.date}|${m.id}`;
+				const bucket = spansByDayWorker.get(key) ?? [];
+				bucket.push({ placementId: p.id, stationName: p.stationName, startMin: p.startMin, endMin: end });
+				spansByDayWorker.set(key, bucket);
+			}
+		}
+		const result = new Map<string, LiveConflict[]>();
+		for (const [key, spans] of spansByDayWorker) {
+			if (spans.length < 2) continue;
+			const workerId = key.split('|')[1];
+			const workerName = namesByWorker.get(workerId) ?? workerId;
+			for (let i = 0; i < spans.length; i++) {
+				const a = spans[i];
+				const others: CrewConflict[] = [];
+				for (let j = 0; j < spans.length; j++) {
+					if (i === j) continue;
+					const b = spans[j];
+					if (a.stationName === b.stationName) continue;
+					if (a.startMin >= b.endMin || b.startMin >= a.endMin) continue;
+					others.push({
+						stationName: b.stationName,
+						stationLabel: stationLabelLive.get(b.stationName) ?? b.stationName,
+						startMin: b.startMin,
+						endMin: b.endMin
+					});
+				}
+				if (others.length === 0) continue;
+				const list = result.get(a.placementId) ?? [];
+				list.push({ workerId, workerName, others });
+				result.set(a.placementId, list);
+			}
+		}
+		return result;
+	});
+
+	/** Pair signature for change-detection — a stable string listing every (placementId,
+	 *  workerId) in conflict, sorted so order-only changes don't look like new conflicts. */
+	function conflictSignature(map: Map<string, LiveConflict[]>): string {
+		const pairs: string[] = [];
+		for (const [pid, list] of map) for (const c of list) pairs.push(`${pid}|${c.workerId}`);
+		return pairs.sort().join(',');
+	}
+
+	/** Snapshot the current conflict signature; a drop handler calls this before mutating
+	 *  and `warnIfNewConflict(before)` after to surface any newly-created overlap. */
+	function conflictSnapshot(): string {
+		return conflictSignature(liveConflicts);
+	}
+	function warnIfNewConflict(before: string) {
+		const after = conflictSignature(liveConflicts);
+		if (after === before) return;
+		const beforeSet = new Set(before.split(','));
+		const newOnes: string[] = [];
+		for (const [pid, list] of liveConflicts) {
+			for (const c of list) {
+				const sig = `${pid}|${c.workerId}`;
+				if (!beforeSet.has(sig)) {
+					const first = c.others[0];
+					newOnes.push(first ? `${c.workerName} is also on ${first.stationLabel} ${formatClock(first.startMin)}–${formatClock(first.endMin)}` : c.workerName);
+				}
+			}
+		}
+		if (newOnes.length === 0) return;
+		// Dedupe (same worker shows up on both overlapping placements).
+		const unique = [...new Set(newOnes)];
+		boardNotice = {
+			text: `Two places at once: ${unique.join('; ')}. Nothing was blocked — remove the crew member from one of the jobs if that's wrong.`,
+			tone: 'warn'
+		};
 	}
 
 	// Which line items already have a placement somewhere in this draft — the sidebar
@@ -1030,6 +1119,7 @@
 			}
 
 			const priorSnapshot = placements;
+			const priorConflictSig = conflictSnapshot();
 			const originDate = existing.date;
 			const originStation = existing.stationName;
 			const stayedOnSameDay = originDate === date && originStation === stationName;
@@ -1094,6 +1184,7 @@
 				showRefusal(outcome);
 			} else {
 				applyOutcome(outcome);
+				warnIfNewConflict(priorConflictSig);
 			}
 			return;
 		}
@@ -1639,6 +1730,8 @@
 												{@const segments = computeSegments(placement.startMin, placement.durationMin)}
 												{@const wallEnd = wallClockEnd(placement.startMin, placement.durationMin)}
 												{@const isHovered = hoveredPlacementId === placement.id}
+												{@const liveConflictsHere = liveConflicts.get(placement.id) ?? []}
+												{@const hasConflict = liveConflictsHere.length > 0}
 												{#each segments as seg, i (seg.start)}
 													{@const isFirst = i === 0}
 													{@const isLast = i === segments.length - 1}
@@ -1648,6 +1741,7 @@
 														class:placement--last={isLast}
 														class:placement--middle={!isFirst && !isLast}
 														class:placement--hover={isHovered}
+														class:placement--conflict={hasConflict}
 														role="button"
 														tabindex="0"
 														draggable="true"
@@ -1662,6 +1756,14 @@
 														{#if isFirst}
 															<span class="placement__label">{lineItem?.design || title}</span>
 															<span class="placement__time">{formatMinutes(placement.durationMin)}</span>
+															{#if hasConflict}
+																{@const first = liveConflictsHere[0]}
+																<span
+																	class="placement__conflict"
+																	title={`Two places at once: ${liveConflictsHere.map((c) => `${c.workerName} is also on ${c.others[0]?.stationLabel ?? '(elsewhere)'} ${c.others[0] ? formatClock(c.others[0].startMin) + '–' + formatClock(c.others[0].endMin) : ''}`).join('; ')}`}
+																	aria-label="This job has a crew conflict"
+																>⚠ {first.workerName}{liveConflictsHere.length > 1 ? ` +${liveConflictsHere.length - 1}` : ''}</span>
+															{/if}
 															<button
 																type="button"
 																class="placement__remove"
@@ -1705,6 +1807,7 @@
 																			{#each placement.crew as member (member.id)}
 																				{@const canSwitch = stationIsPress && availableRoles(member.id).length > 1}
 																				{@const menuOpen = roleMenuMemberId === member.id}
+																				{@const memberLive = liveConflictsHere.find((c) => c.workerId === member.id)}
 																				<li class="placement__details-crew-item">
 																					<div class="placement__details-crew-row">
 																						<span class="mini-avatar" class:mini-avatar--main={member.isMain} style="--avatar-hue: {avatarHue(member.id)}">{initials(member.name)}</span>
@@ -1748,9 +1851,9 @@
 																							aria-label="Remove {member.name} from this job"
 																						>×</button>
 																					</div>
-																					{#if member.conflicts.length}
+																					{#if memberLive}
 																						<span class="placement__details-conflict" title="This person can't be in two places at once">
-																							⚠ Also on {member.conflicts.map(conflictLabel).join(', ')}
+																							⚠ Also on {memberLive.others.map(conflictLabel).join(', ')}
 																						</span>
 																					{/if}
 																				</li>
@@ -2100,6 +2203,33 @@
 		border-radius: var(--radius-sm);
 		padding: 0.1rem 0.4rem;
 		align-self: flex-start;
+	}
+
+	/* Visible crew-conflict badge on the placement bar itself (2026-10-15) — no hover
+	   needed. Red/orange border on the bar + a solid pill with the first conflicting
+	   person's name. The pill tooltip spells out everyone the person overlaps with. */
+	.placement--conflict {
+		outline: 2px solid var(--warning-fg, #c04000);
+		outline-offset: -2px;
+	}
+
+	.placement__conflict {
+		position: absolute;
+		top: 4px;
+		right: 28px;
+		background: var(--warning-fg, #c04000);
+		color: #fff;
+		font-size: 0.65rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		padding: 0.08rem 0.4rem;
+		border-radius: 999px;
+		max-width: calc(100% - 48px);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		pointer-events: auto;
+		cursor: help;
 	}
 
 	.placement__details-role {
