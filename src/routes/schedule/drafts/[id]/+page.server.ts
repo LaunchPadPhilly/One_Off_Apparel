@@ -11,6 +11,7 @@ import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
 import { fetchOrderGaps } from '$lib/server/hoops/orderReadiness';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { pressSafeCrew } from '$lib/schedule/people';
+import { wallClockEnd } from '$lib/schedule/shift';
 import { isPressKind } from '$lib/schedule/stationKinds';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
 import {
@@ -195,6 +196,53 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		})
 	}));
 
+	// Crew-overlap flags (2026-10-15): since a main may now lead more than one press
+	// in a day (physically moving between presses), a crew member can end up on two
+	// jobs on different stations whose wall-clock spans overlap — "they can't be in
+	// two places at once." Compute once over every assignment and attach per-crew-
+	// member conflicts to each placement; the board shows them in the hover popover
+	// instead of refusing the plan, matching the client's "flag it, don't hide it".
+	const stationLabelByName = new Map(stations.map((s) => [s.name, s.label]));
+	type Span = { assignmentId: string; stationName: string; startMin: number; endMin: number };
+	const spansByDayWorker = new Map<string, Span[]>();
+	for (const a of assignments) {
+		const start = a.startMinuteOfDay ?? 8 * 60;
+		const end = wallClockEnd(start, Math.round(a.estimatedHours * 60));
+		const key = iso(a.date);
+		for (const member of a.crew) {
+			const bucketKey = `${key}|${member.worker.id}`;
+			const bucket = spansByDayWorker.get(bucketKey) ?? [];
+			bucket.push({ assignmentId: a.id, stationName: a.station.name, startMin: start, endMin: end });
+			spansByDayWorker.set(bucketKey, bucket);
+		}
+	}
+	type CrewConflict = { stationName: string; stationLabel: string; startMin: number; endMin: number };
+	// (assignmentId, workerId) → conflicts with other assignments the same person
+	// is on that day, where the two spans overlap in wall-clock minutes.
+	const conflictsByAssignmentWorker = new Map<string, CrewConflict[]>();
+	for (const [bucketKey, spans] of spansByDayWorker) {
+		if (spans.length < 2) continue;
+		const workerId = bucketKey.split('|')[1];
+		for (let i = 0; i < spans.length; i++) {
+			for (let j = 0; j < spans.length; j++) {
+				if (i === j) continue;
+				const a = spans[i];
+				const b = spans[j];
+				if (a.stationName === b.stationName) continue; // same station, same day — one person works it all day
+				if (a.startMin >= b.endMin || b.startMin >= a.endMin) continue;
+				const key = `${a.assignmentId}|${workerId}`;
+				const list = conflictsByAssignmentWorker.get(key) ?? [];
+				list.push({
+					stationName: b.stationName,
+					stationLabel: stationLabelByName.get(b.stationName) ?? b.stationName,
+					startMin: b.startMin,
+					endMin: b.endMin
+				});
+				conflictsByAssignmentWorker.set(key, list);
+			}
+		}
+	}
+
 	return {
 		autoProposeFeedback,
 		// Renaming a draft is admin-only (2026-10-13); the action re-checks this.
@@ -268,13 +316,16 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			// Lead (MAIN or OPERATOR) first; a press crew with no lead isn't shown (no
 			// catch without a lead) — noLead tells the board to say so instead. Role is
 			// carried per crew member so the hover popover can show MAIN / OPERATOR /
-			// CATCH and the role-switch control knows what's selected.
+			// CATCH and the role-switch control knows what's selected. `conflicts` is
+			// the other jobs that same person is on this day whose spans overlap this
+			// one's — empty for everyone with no overlap.
 			crew: pressSafeCrew(
 				a.crew.map((member) => ({
 					id: member.worker.id,
 					name: member.worker.name,
 					role: member.role as 'MAIN' | 'OPERATOR' | 'CATCH',
-					isMain: member.role === 'MAIN' || member.role === 'OPERATOR'
+					isMain: member.role === 'MAIN' || member.role === 'OPERATOR',
+					conflicts: conflictsByAssignmentWorker.get(`${a.id}|${member.worker.id}`) ?? []
 				})),
 				isPressKind(a.station.kind)
 			),
@@ -613,6 +664,84 @@ export const actions: Actions = {
 					action: 'crew_role_changed',
 					actor: user.email,
 					diff: { name: worker.name, workerId, role, stationId: assignment.stationId, date: assignment.date }
+				}
+			});
+		});
+		return { success: true as const };
+	},
+
+	// Remove one crew member from a proposed job (2026-10-15). Mirrors the role switch:
+	// takes a (assignmentId, workerId), then drops that worker from EVERY proposed
+	// assignment on the same (station, day) — one person works one station per day, so
+	// removing them from one job removes them from the station for the day. The last
+	// lead on a press cannot be removed via this action; use the role switch to replace
+	// them, or add another lead first. Approved rows keep their approved crew.
+	removeCrewMember: async ({ request, params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const form = await request.formData();
+		const assignmentId = form.get('assignmentId');
+		const workerId = form.get('workerId');
+		if (typeof assignmentId !== 'string' || !assignmentId) return fail(400, { message: 'assignmentId required' });
+		if (typeof workerId !== 'string' || !workerId) return fail(400, { message: 'workerId required' });
+
+		const assignment = await prisma.scheduleAssignment.findUnique({
+			where: { id: assignmentId },
+			select: { scheduleDraftId: true, status: true, stationId: true, date: true, station: { select: { kind: true, label: true } } }
+		});
+		if (!assignment || assignment.scheduleDraftId !== params.id) return fail(404, { message: 'Assignment not in this draft' });
+		if (assignment.status !== ScheduleAssignmentStatus.PROPOSED) return fail(409, { message: 'Approved jobs keep their approved crew; propose a new plan to change them.' });
+
+		const worker = await prisma.worker.findUnique({ where: { id: workerId }, select: { name: true } });
+		if (!worker) return fail(404, { message: 'Person not found.' });
+
+		// Every proposed assignment on this (station, day) that has this worker on it.
+		const sibling = await prisma.scheduleAssignment.findMany({
+			where: {
+				scheduleDraftId: params.id,
+				status: ScheduleAssignmentStatus.PROPOSED,
+				stationId: assignment.stationId,
+				date: assignment.date,
+				crew: { some: { workerId } }
+			},
+			select: { id: true }
+		});
+		if (sibling.length === 0) return fail(409, { message: `${worker.name} isn't on this job.` });
+
+		// Press-only guard: if the worker being removed is the only lead on this
+		// (station, day), the press would be left with catches but no lead — refuse so
+		// the user adds a replacement (or demotes the lead to catch after a replacement
+		// is in). Off-press stations have no equivalent constraint.
+		if (isPressKind(assignment.station.kind)) {
+			const otherLeads = await prisma.assignmentCrew.count({
+				where: {
+					assignment: { scheduleDraftId: params.id, status: ScheduleAssignmentStatus.PROPOSED, stationId: assignment.stationId, date: assignment.date },
+					role: { in: ['MAIN', 'OPERATOR'] },
+					NOT: { workerId }
+				}
+			});
+			const selfIsLead = await prisma.assignmentCrew.count({
+				where: {
+					assignment: { scheduleDraftId: params.id, status: ScheduleAssignmentStatus.PROPOSED, stationId: assignment.stationId, date: assignment.date },
+					workerId,
+					role: { in: ['MAIN', 'OPERATOR'] }
+				}
+			});
+			if (selfIsLead > 0 && otherLeads === 0) {
+				return fail(409, { message: `${worker.name} is the only main or operator on ${assignment.station.label} today — add a replacement first, or demote them to catch.` });
+			}
+		}
+
+		await prisma.$transaction(async (tx) => {
+			await tx.assignmentCrew.deleteMany({
+				where: { assignmentId: { in: sibling.map((s) => s.id) }, workerId }
+			});
+			await tx.domainAuditLog.create({
+				data: {
+					entity: 'ScheduleAssignment',
+					entityId: assignmentId,
+					action: 'crew_member_removed',
+					actor: user.email,
+					diff: { name: worker.name, workerId, stationId: assignment.stationId, date: assignment.date }
 				}
 			});
 		});

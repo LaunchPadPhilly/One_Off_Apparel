@@ -502,7 +502,8 @@
 		noLead?: boolean;
 	};
 	type CrewRoleEnum = 'MAIN' | 'OPERATOR' | 'CATCH';
-	type CrewMember = { id: string; name: string; role: CrewRoleEnum; isMain: boolean };
+	type CrewConflict = { stationName: string; stationLabel: string; startMin: number; endMin: number };
+	type CrewMember = { id: string; name: string; role: CrewRoleEnum; isMain: boolean; conflicts: CrewConflict[] };
 	// Hydrate from server: each ScheduleAssignment tied to this draft becomes a
 	// placement. estimatedHours * 60 is the working duration; startMinuteOfDay
 	// is minutes-from-midnight, aligned with the client's SHIFT_START_MIN.
@@ -695,6 +696,39 @@
 	}
 	function roleButtonLabel(role: CrewRoleEnum): string {
 		return role === 'MAIN' ? 'Main' : role === 'OPERATOR' ? 'Operator' : 'Catch';
+	}
+
+	// Remove a crew member from a job (2026-10-15). Mirrors the role switch: posts to
+	// the server, which drops the worker from every PROPOSED assignment on the same
+	// (station, day). Refuses (surfaced via boardNotice) if the worker is the only
+	// lead on a press — add a replacement or demote first.
+	async function submitRemoveCrew(assignmentId: string, workerId: string) {
+		if (roleBusy) return;
+		roleBusy = true;
+		try {
+			const body = new FormData();
+			body.set('assignmentId', assignmentId);
+			body.set('workerId', workerId);
+			const res = await fetch(`?/removeCrewMember`, { method: 'POST', body, headers: { 'x-sveltekit-action': 'true' } });
+			const result = deserialize(await res.text());
+			if (result.type === 'success') {
+				await invalidateAll();
+				placements = hydratePlacements(data.assignments);
+				closeRoleMenu();
+			} else {
+				const message = result.type === 'failure' ? (result.data as { message?: string } | undefined)?.message : undefined;
+				boardNotice = { text: message ?? "Couldn't remove that person — try again.", tone: 'warn' };
+			}
+		} catch (e) {
+			console.error('removeCrewMember failed', e);
+			boardNotice = { text: "Couldn't remove that person — try again.", tone: 'warn' };
+		} finally {
+			roleBusy = false;
+		}
+	}
+
+	function conflictLabel(c: CrewConflict): string {
+		return `${c.stationLabel} (${formatClock(c.startMin)}–${formatClock(c.endMin)})`;
 	}
 
 	// Which line items already have a placement somewhere in this draft — the sidebar
@@ -1671,38 +1705,53 @@
 																			{#each placement.crew as member (member.id)}
 																				{@const canSwitch = stationIsPress && availableRoles(member.id).length > 1}
 																				{@const menuOpen = roleMenuMemberId === member.id}
-																				<li>
-																					<span class="mini-avatar" class:mini-avatar--main={member.isMain} style="--avatar-hue: {avatarHue(member.id)}">{initials(member.name)}</span>
-																					<span class="placement__details-crew-name">{member.name}</span>
-																					{#if canSwitch}
-																						<span class="role-switch">
-																							<button
-																								type="button"
-																								class="placement__details-role placement__details-role--switch"
-																								class:placement__details-role--main={member.isMain}
-																								onclick={() => toggleRoleMenu(member.id)}
-																								aria-haspopup="true"
-																								aria-expanded={menuOpen}
-																								title="Change role on this job"
-																							>{roleOf(member, placement.stationName)} ▾</button>
-																							{#if menuOpen}
-																								<span class="role-switch__menu" role="menu">
-																									{#each availableRoles(member.id) as option (option)}
-																										{@const isCurrent = option === member.role}
-																										<button
-																											type="button"
-																											role="menuitem"
-																											class="role-switch__option"
-																											class:role-switch__option--current={isCurrent}
-																											disabled={isCurrent || roleBusy}
-																											onclick={() => submitRoleChange(placement.id, member.id, option)}
-																										>{roleButtonLabel(option)}{#if isCurrent} · now{/if}</button>
-																									{/each}
-																								</span>
-																							{/if}
+																				<li class="placement__details-crew-item">
+																					<div class="placement__details-crew-row">
+																						<span class="mini-avatar" class:mini-avatar--main={member.isMain} style="--avatar-hue: {avatarHue(member.id)}">{initials(member.name)}</span>
+																						<span class="placement__details-crew-name">{member.name}</span>
+																						{#if canSwitch}
+																							<span class="role-switch">
+																								<button
+																									type="button"
+																									class="placement__details-role placement__details-role--switch"
+																									class:placement__details-role--main={member.isMain}
+																									onclick={() => toggleRoleMenu(member.id)}
+																									aria-haspopup="true"
+																									aria-expanded={menuOpen}
+																									title="Change role on this job"
+																								>{roleOf(member, placement.stationName)} ▾</button>
+																								{#if menuOpen}
+																									<span class="role-switch__menu" role="menu">
+																										{#each availableRoles(member.id) as option (option)}
+																											{@const isCurrent = option === member.role}
+																											<button
+																												type="button"
+																												role="menuitem"
+																												class="role-switch__option"
+																												class:role-switch__option--current={isCurrent}
+																												disabled={isCurrent || roleBusy}
+																												onclick={() => submitRoleChange(placement.id, member.id, option)}
+																											>{roleButtonLabel(option)}{#if isCurrent} · now{/if}</button>
+																										{/each}
+																									</span>
+																								{/if}
+																							</span>
+																						{:else}
+																							<span class="placement__details-role" class:placement__details-role--main={member.isMain}>{roleOf(member, placement.stationName)}</span>
+																						{/if}
+																						<button
+																							type="button"
+																							class="placement__details-crew-remove"
+																							disabled={roleBusy}
+																							onclick={() => submitRemoveCrew(placement.id, member.id)}
+																							title="Remove {member.name} from this job"
+																							aria-label="Remove {member.name} from this job"
+																						>×</button>
+																					</div>
+																					{#if member.conflicts.length}
+																						<span class="placement__details-conflict" title="This person can't be in two places at once">
+																							⚠ Also on {member.conflicts.map(conflictLabel).join(', ')}
 																						</span>
-																					{:else}
-																						<span class="placement__details-role" class:placement__details-role--main={member.isMain}>{roleOf(member, placement.stationName)}</span>
 																					{/if}
 																				</li>
 																			{/each}
@@ -2005,15 +2054,52 @@
 
 	.placement__details-crew li {
 		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		font-size: var(--fs-xs);
+	}
+
+	.placement__details-crew-row {
+		display: flex;
 		align-items: center;
 		gap: 0.4rem;
-		font-size: var(--fs-xs);
 	}
 
 	.placement__details-crew-name {
 		color: var(--ink-900);
 		font-weight: 600;
 		flex: 1;
+	}
+
+	.placement__details-crew-remove {
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		box-shadow: none;
+		color: var(--ink-500);
+		cursor: pointer;
+		font-size: 0.72rem;
+		line-height: 1;
+		padding: 0.08rem 0.4rem;
+	}
+
+	.placement__details-crew-remove:hover:not(:disabled) {
+		color: var(--ink-900);
+		border-color: var(--ink-500);
+	}
+
+	.placement__details-crew-remove:disabled {
+		opacity: 0.5;
+		cursor: default;
+	}
+
+	.placement__details-conflict {
+		font-size: 0.72rem;
+		color: var(--warning-fg, #a04c00);
+		background: var(--warning-bg, rgb(255 196 120 / 20%));
+		border-radius: var(--radius-sm);
+		padding: 0.1rem 0.4rem;
+		align-self: flex-start;
 	}
 
 	.placement__details-role {
