@@ -52,6 +52,11 @@ The script reads `db_endpoint` and `db_master_user_secret_arn` from Terraform ou
 fetches the managed password, percent-encodes it, refuses duplicated ports, and merges the
 result into `$F` with mode 600. It prints only the host and database name.
 
+This first `DATABASE_URL` uses the RDS master login, and RDS rotates that password every
+7 days. Once the services are running (after Play 10), switch the app to its own login
+with `scripts/create-app-db-role.sh --env uat` (Play 14, "Database login"). If you skip
+this step, UAT goes down within a week.
+
 **EVIDENCE 09.2** — paste the script's output.
 **Accept when:** it reports success and names `<slug>-uat-db...:5432` and database
 `<slug>`; no password fragment is visible.
