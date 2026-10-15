@@ -16,10 +16,13 @@ import type { Actions, PageServerLoad } from './$types';
 export const load: PageServerLoad = async ({ locals, url }) => {
 	requireScopePage(locals.user, 'SCHEDULE_READ', url.pathname);
 
-	const [board, drafts] = await Promise.all([liveWindow().then((window) => buildBoardData({ kind: 'live', ...window })), listDrafts()]);
+	const [window, drafts] = await Promise.all([liveWindow(), listDrafts()]);
+	const board = await buildBoardData({ kind: 'live', from: window.from, weeks: window.weeks });
 
 	return {
 		...board,
+		// Approved jobs past the board's 12-week cap — named on the page, not silently dropped.
+		laterJobs: window.later,
 		autoProposeFeedback: null,
 		canRename: false,
 		canEdit: hasGrantedScope(locals.user, 'SCHEDULE_WRITE'),

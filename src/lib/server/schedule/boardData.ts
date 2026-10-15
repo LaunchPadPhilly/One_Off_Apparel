@@ -260,8 +260,9 @@ export type BoardData = Awaited<ReturnType<typeof buildBoardData>>;
  * The live schedule's window: from today — or earlier, back to the oldest job that's
  * still running or was due to start and hasn't (overdue work stays in view) — for at
  * least 4 weeks and long enough to reach the last approved job, capped at 12 weeks.
+ * `later` counts committed jobs past the cap, so the page can say they're not shown.
  */
-export async function liveWindow(): Promise<{ from: Date; weeks: number }> {
+export async function liveWindow(): Promise<{ from: Date; weeks: number; later: { count: number; firstDate: string | null } }> {
 	const today = startOfToday();
 	const [unfinished, last] = await Promise.all([
 		prisma.scheduleAssignment.aggregate({
@@ -273,5 +274,14 @@ export async function liveWindow(): Promise<{ from: Date; weeks: number }> {
 	const from = unfinished._min.date && unfinished._min.date < today ? unfinished._min.date : today;
 	const lastDate = last._max.date;
 	const spanDays = lastDate ? Math.round((lastDate.getTime() - from.getTime()) / 86_400_000) + 1 : 0;
-	return { from, weeks: Math.min(12, Math.max(4, Math.ceil(spanDays / 7))) };
+	const weeks = Math.min(12, Math.max(4, Math.ceil(spanDays / 7)));
+
+	const end = new Date(from);
+	end.setUTCDate(end.getUTCDate() + weeks * 7 - 1);
+	const laterWhere = { status: { in: COMMITTED }, date: { gt: end } };
+	const [count, first] = await Promise.all([
+		prisma.scheduleAssignment.count({ where: laterWhere }),
+		prisma.scheduleAssignment.aggregate({ where: laterWhere, _min: { date: true } })
+	]);
+	return { from, weeks, later: { count, firstDate: first._min.date ? iso(first._min.date) : null } };
 }

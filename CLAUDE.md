@@ -831,7 +831,8 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   - Remaining order: daily staffing part 2 (re-plan + replace on approval).
 - **Production board = the finalized schedule (2026-10-15).** `/schedule` shows the live
   schedule — every APPROVED / IN_PROGRESS / COMPLETE job from today (or the oldest job still
-  running or overdue) for 4–12 weeks, across all drafts — drawn with **the same board as a
+  running or overdue) for 4–12 weeks, across all drafts (approved jobs past the 12-week cap
+  are counted in a note on the page, not silently dropped) — drawn with **the same board as a
   draft** (`routes/schedule/drafts/[id]/ScheduleBoard.svelte`, data from
   `$lib/server/schedule/boardData.ts`' `buildBoardData`, so the two can't drift apart). It is
   read-only ("Finalized"): no Orders tray, nothing draggable, People panel read-only. Clicking a

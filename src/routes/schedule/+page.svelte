@@ -167,6 +167,12 @@
 			{/if}
 		</section>
 
+		{#if data.laterJobs.count > 0}
+			<p class="muted empty-live">
+				{data.laterJobs.count} more approved job{data.laterJobs.count === 1 ? '' : 's'} from {data.laterJobs.firstDate} on
+				{data.laterJobs.count === 1 ? 'is' : 'are'} past the 12 weeks shown here — open {data.laterJobs.count === 1 ? 'its' : 'their'} draft to see {data.laterJobs.count === 1 ? 'it' : 'them'}.
+			</p>
+		{/if}
 		{#if data.assignments.length === 0}
 			<p class="muted empty-live">
 				Nothing approved yet. Open a draft and approve it — it shows up here, finalized, exactly as it looked in the draft.
