@@ -18,6 +18,9 @@
 
 	let { data, form }: PageProps = $props();
 
+	// Renaming the draft (admins only — the server re-checks).
+	let renaming = $state(false);
+
 	// Proposed jobs still waiting for a person's yes — what Approve would make official.
 	const proposedCount = $derived(data.assignments.filter((a) => a.status === 'PROPOSED').length);
 
@@ -627,6 +630,35 @@
 	// added/removed/dragged, not just on page load.
 	let placedLineItemIds = $derived(new Set(placements.map((p) => p.lineItemId)));
 
+	// Orders with a job still to place go to the top of the sidebar (2026-10-13), so it's
+	// obvious what hasn't been scheduled yet; fully placed orders follow. Within each
+	// group the original order is kept (Array.prototype.sort is stable). Updates live as
+	// jobs are dropped on or removed from the board.
+	let trayOrders = $derived(
+		filteredOrders.filter(isSchedulable).sort((a, b) => Number(isFullyPlaced(a)) - Number(isFullyPlaced(b)))
+	);
+
+	// Orders that can't be scheduled (2026-10-13) stay off the board entirely: one with
+	// open items ("Needs re-review"), one with no job the engine can estimate, or one the
+	// last automatic plan couldn't fit. They get a red flag on the Orders pages instead —
+	// that's the one place to deal with them. The server refuses placing the first two
+	// (placeAssignment). `data.orders` itself is left whole, so any of their jobs already
+	// on the board keep their labels.
+	let blockedCount = $derived(data.orders.filter((order) => !isSchedulable(order)).length);
+
+	/** The jobs the sidebar offers: ones with an estimate, plus any already on the board. */
+	function schedulableItems(order: (typeof data.orders)[number]) {
+		return order.lineItems.filter((item) => item.estimate.ok || placedLineItemIds.has(item.id));
+	}
+
+	function isSchedulable(order: (typeof data.orders)[number]): boolean {
+		return order.blockingCount === 0 && !order.scheduleFlagged && schedulableItems(order).length > 0;
+	}
+
+	function isFullyPlaced(order: (typeof data.orders)[number]): boolean {
+		return schedulableItems(order).every((item) => placedLineItemIds.has(item.id));
+	}
+
 	function placementsForDay(date: string, stationName: string): Placement[] {
 		return placements
 			.filter((p) => p.date === date && p.stationName === stationName)
@@ -1066,7 +1098,21 @@
 	<div class="header-row">
 		<div>
 			<span class="eyebrow">Schedule draft</span>
-			<h1>{data.draft.name}</h1>
+			{#if renaming}
+				<form method="POST" action="?/renameDraft" class="rename-form">
+					<!-- svelte-ignore a11y_autofocus -->
+					<input name="name" class="rename-form__input" value={data.draft.name} maxlength="120" required autofocus aria-label="Schedule name" />
+					<button type="submit" class="button">Save</button>
+					<button type="button" class="button button--secondary" onclick={() => (renaming = false)}>Cancel</button>
+				</form>
+			{:else}
+				<h1 class="draft-title">
+					{data.draft.name}
+					{#if data.canRename}
+						<button type="button" class="rename-button" onclick={() => (renaming = true)} aria-label="Rename schedule" title="Rename schedule">✎</button>
+					{/if}
+				</h1>
+			{/if}
 			<p class="muted meta">
 				<code
 					class="draft-code"
@@ -1100,7 +1146,9 @@
 		</div>
 	</div>
 
-	{#if form && 'approved' in form && form.approved}
+	{#if form && 'renamed' in form && form.renamed}
+		<p class="auto-propose-feedback">Schedule renamed.</p>
+	{:else if form && 'approved' in form && form.approved}
 		<p class="auto-propose-feedback">
 			Approved {form.approvedCount} job{form.approvedCount === 1 ? '' : 's'} — they're on the live schedule now{form.replacedCount > 0 ? `, replacing ${form.replacedCount} old slot${form.replacedCount === 1 ? '' : 's'}` : ''}.
 		</p>
@@ -1137,7 +1185,7 @@
 			<div class="tray__head">
 				<h2>Orders</h2>
 				<div class="tray__head-actions">
-					<span class="muted">{filteredOrders.length} of {data.orders.length}</span>
+					<span class="muted">{trayOrders.length} of {data.orders.length - blockedCount}</span>
 					{#if data.orders.length > 1}
 						<button
 							type="button"
@@ -1157,7 +1205,7 @@
 				aria-label="Filter orders"
 			/>
 			<div class="tray__list" role="list">
-				{#each filteredOrders as order (order.id)}
+				{#each trayOrders as order (order.id)}
 					{@const color = orderColor(order.id)}
 					<article
 						class="order"
@@ -1253,7 +1301,7 @@
 							</div>
 							{#if !collapsed}
 							<ul class="line-items" id="order-items-{order.id}">
-								{#each order.lineItems as item (item.id)}
+								{#each schedulableItems(order) as item (item.id)}
 									{@const hours = estimateHours(item.estimate)}
 									{@const err = estimateError(item.estimate)}
 									{@const stationName = estimateStation(item.estimate)}
@@ -1682,6 +1730,41 @@
 
 	.header-row h1 {
 		margin: 0.1rem 0 0.15rem;
+	}
+
+	.draft-title {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+	}
+
+	.rename-button {
+		border: none;
+		background: none;
+		cursor: pointer;
+		font-size: 1rem;
+		line-height: 1;
+		padding: 0.25rem;
+		opacity: 0.55;
+		color: inherit;
+	}
+
+	.rename-button:hover,
+	.rename-button:focus-visible {
+		opacity: 1;
+	}
+
+	.rename-form {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-2);
+		margin: 0.1rem 0 0.15rem;
+	}
+
+	.rename-form__input {
+		font-size: 1.25rem;
+		min-width: min(28rem, 100%);
 	}
 
 	.placement__details-waits {

@@ -1,6 +1,6 @@
 import { error, fail, redirect } from '@sveltejs/kit';
-import { requireScopePage } from '$lib/server/auth/guards';
-import { deleteDraft, getDraft } from '$lib/server/schedule/draft';
+import { isAdmin, requireScopePage } from '$lib/server/auth/guards';
+import { deleteDraft, getDraft, renameDraft, renameDraftSchema } from '$lib/server/schedule/draft';
 import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
 import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
 import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
@@ -8,6 +8,7 @@ import { pinAndRestaffDraftDay, replanDraftCrews, RestaffError } from '$lib/serv
 import { prisma } from '$lib/server/prisma';
 import { estimateForDisplay } from '$lib/server/engine/estimateForDisplay';
 import { computeOrderGaps } from '$lib/server/hoops/orderGaps';
+import { fetchOrderGaps } from '$lib/server/hoops/orderReadiness';
 import { DEFAULT_STATION_DAY_HOURS } from '$lib/schedule/defaultCapacity';
 import { pressSafeCrew } from '$lib/schedule/people';
 import { isPressKind } from '$lib/schedule/stationKinds';
@@ -191,6 +192,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 
 	return {
 		autoProposeFeedback,
+		// Renaming a draft is admin-only (2026-10-13); the action re-checks this.
+		canRename: isAdmin(locals.user),
 		draft: {
 			id: draft.id,
 			name: draft.name,
@@ -219,6 +222,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				{ deadline: order.deadline, blankOrderingStatus: order.blankOrderingStatus, customerApprovalStatus: order.customerApprovalStatus, importFlags: [] },
 				order.lineItems
 			).blockingCount,
+			// Left off the last automatic plan for lack of room (2026-10-13) — kept off the
+			// board until a plan fits it; the red flag and reason show on the Orders pages.
+			scheduleFlagged: order.scheduleFlagReason !== null,
 			lineItems: order.lineItems.map((item) => ({
 				id: item.id,
 				design: item.design,
@@ -331,6 +337,7 @@ export const actions: Actions = {
 		const lineItem = await prisma.lineItem.findUnique({
 			where: { id: lineItemId },
 			select: {
+				orderId: true,
 				itemType: true,
 				assignedStationId: true,
 				decorationType: true,
@@ -347,6 +354,17 @@ export const actions: Actions = {
 		}
 		if (lineItem.order.deadline.getTime() < startOfToday().getTime()) {
 			return fail(400, { message: "This order's deadline has already passed — it can't be scheduled until the deadline is corrected." });
+		}
+		// Same rule the sidebar applies (2026-10-13): an order with open items ("Needs
+		// re-review") or a job the engine can't estimate isn't schedulable yet.
+		const gaps = (await fetchOrderGaps([lineItem.orderId])).get(lineItem.orderId);
+		if (gaps && gaps.blockingCount > 0) {
+			return fail(400, { message: 'This order needs re-review — fix its open items on the order page before scheduling it.' });
+		}
+		const fullItem = await prisma.lineItem.findUniqueOrThrow({ where: { id: lineItemId } });
+		const itemEstimate = estimateForDisplay(fullItem);
+		if (!itemEstimate.ok) {
+			return fail(400, { message: `This job can't be scheduled yet: ${itemEstimate.reason}` });
 		}
 
 		const station = await findActiveStation(stationName);
@@ -555,6 +573,20 @@ export const actions: Actions = {
 			if (err instanceof CommitScheduleError) return fail(409, { message: err.message });
 			throw err;
 		}
+	},
+
+	// Rename a draft — admins only (2026-10-13). Checked here on the server, not just by
+	// hiding the button, so a non-admin can't rename by posting the form directly.
+	renameDraft: async ({ request, params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		if (!isAdmin(user)) return fail(403, { message: 'Only admins can rename a schedule.' });
+		const draft = await getDraft(params.id);
+		if (!draft) throw error(404, 'Schedule draft not found');
+		const form = await request.formData();
+		const parsed = renameDraftSchema.safeParse({ name: form.get('name') });
+		if (!parsed.success) return fail(400, { message: parsed.error.issues[0]?.message ?? 'Invalid name' });
+		await renameDraft(params.id, parsed.data.name, user.email);
+		return { renamed: true as const };
 	},
 
 	deleteDraft: async ({ params, locals, url }) => {

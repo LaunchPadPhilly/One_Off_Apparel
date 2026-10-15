@@ -201,8 +201,11 @@ export const mcpTools: readonly McpToolDefinition[] = [
 			'flagged at risk, never dropped. Show the person `changes` (new / moved / kept_at_risk) and `atRisk`, and ' +
 			"link `draftPath`; nothing is real until they approve it (commit_schedule with the draftId, or Approve on " +
 			"the board). At most 28 days. Example: 'Maria is out Tuesday, fix the schedule' → { from: '2026-10-06', " +
-			"to: '2026-11-02', replanFrom: '2026-10-06', replanTo: '2026-10-06', reason: 'Maria out Tue' }. Returns " +
-			'{ draftId, draftPath, assignmentIds, placedCount, atRisk, changes, reasoning }.',
+			"to: '2026-11-02', replanFrom: '2026-10-06', replanTo: '2026-10-06', reason: 'Maria out Tue' }. Orders are " +
+			"all-or-nothing: one that can't fully fit is left off the plan and listed in `unscheduledOrders` with a " +
+			'plain reason (also shown as a red flag on the Orders page) — tell the person which ones and why; orders ' +
+			'needing re-review are never planned. Returns { draftId, draftPath, assignmentIds, placedCount, atRisk, ' +
+			'unscheduledOrders, changes, reasoning }.',
 		inputSchema: {
 			from: z.iso.date(),
 			to: z.iso.date(),
