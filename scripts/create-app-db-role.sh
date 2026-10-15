@@ -140,14 +140,21 @@ sql_overrides() { # <sql> [check-role]
 SETUP_SQL="DO \$do\$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$ROLE') THEN
     CREATE ROLE $ROLE LOGIN PASSWORD '$VERIFIER';
+  ELSIF current_user = '$ROLE' THEN
+    ALTER ROLE $ROLE PASSWORD '$VERIFIER'; -- a role may change its own password, not its LOGIN flag
   ELSE
     ALTER ROLE $ROLE WITH LOGIN PASSWORD '$VERIFIER';
   END IF;
   -- Postgres 16 gives the creator only ADMIN on a new role; ALTER ... OWNER TO needs SET.
-  EXECUTE format('GRANT $ROLE TO %I WITH INHERIT TRUE, SET TRUE', current_user);
-  EXECUTE format('GRANT CONNECT ON DATABASE %I TO $ROLE', current_database());
+  -- Skipped on --rotate, where the task is connected as the role itself.
+  IF current_user <> '$ROLE' THEN
+    EXECUTE format('GRANT $ROLE TO %I WITH INHERIT TRUE, SET TRUE', current_user);
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO $ROLE', current_database());
+  END IF;
 END \$do\$;
-GRANT USAGE, CREATE ON SCHEMA public TO $ROLE;
+DO \$do\$ BEGIN
+  IF current_user <> '$ROLE' THEN GRANT USAGE, CREATE ON SCHEMA public TO $ROLE; END IF;
+END \$do\$;
 DO \$do\$ DECLARE r record; BEGIN
   FOR r IN SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','f') AND pg_get_userbyid(c.relowner) <> '$ROLE' LOOP
@@ -182,6 +189,14 @@ URL_FILE="$(winpath "$URL")" MERGE_INTO="$(winpath "$NEW")" REPO_ROOT="$(winpath
 aws secretsmanager put-secret-value --secret-id "$SECRET_ID" --secret-string "file://$(winpath "$NEW")" --query VersionStages --output text >/dev/null
 
 restore() {
+	if [ "$CURRENT_USER" = "$ROLE" ]; then
+		# --rotate: step 1 already changed the role's password, so the old URL no longer
+		# works either. Keep the new one; the running services still hold their old
+		# connections until they restart.
+		echo "The new password is already set on \"$ROLE\" and saved in $SECRET_ID; not restoring." >&2
+		echo "Fix the failure above, then force-redeploy $WEB and $MCP (Play 14 C)." >&2
+		exit 1
+	fi
 	echo "Putting the previous DATABASE_URL back." >&2
 	aws secretsmanager put-secret-value --secret-id "$SECRET_ID" --secret-string "file://$(winpath "$OLD")" --query VersionStages --output text >/dev/null
 	echo "Restored. The running services were never restarted, so nothing changed for users." >&2
