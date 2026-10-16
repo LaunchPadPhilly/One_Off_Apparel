@@ -639,6 +639,33 @@ model DomainAuditLog {
   @@index([at])
 }
 
+// "Why did the approved schedule change?" (2026-10-16). One row per change to committed
+// (APPROVED / IN_PROGRESS) work — jobs reopened, replaced by a newly approved plan, a
+// person marked out on days they were crewing, approved slots removed. Written in the same
+// transaction as the change (schedule/changeNotes.ts). `reason` is filled in later by a
+// person — on the Reports page or by telling Claude (explain_schedule_change) — never
+// inferred. draftId is a plain string, not a foreign key, so deleting a draft keeps its notes.
+model ScheduleChangeNote {
+  id       String    @id @default(cuid())
+  at       DateTime  @default(now())
+  actor    String
+  // reopened | replaced | worker_out | slots_removed (see changeNotes.ts)
+  kind     String
+  // One plain-English line for a shop manager.
+  summary  String
+  draftId  String?
+  orderIds String[]  @default([])
+  // { jobs: [{ job, hoopsOrderId, from?: { station, date }, to?: { station, date } }], ... }
+  details  Json?
+  reason   String?
+  reasonBy String?
+  reasonAt DateTime?
+
+  @@index([at])
+  @@index([reasonAt])
+  @@map("schedule_change_notes")
+}
+
 enum OrderStatus {
   NEEDS_REVIEW
   CONFIRMED

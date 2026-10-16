@@ -1,5 +1,6 @@
 import { prisma } from '$lib/server/prisma';
 import { LineItemStatus, OrderStatus, ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
+import { listScheduleChanges } from '$lib/server/schedule/changeNotes';
 
 /**
  * Reports (minimal, per CLAUDE.md's explicit request to propose metrics rather than
@@ -87,7 +88,16 @@ export async function getReportData(range: { from: string; to: string }) {
 		take: 50
 	});
 
+	// "Why did the approved schedule change?" (2026-10-16, schedule/changeNotes.ts): every
+	// unexplained change regardless of the window (each one still needs a person), plus the
+	// explained ones that happened inside it. Reasons are only ever what a person wrote.
+	const [changesNeedingReason, changeNotes] = await Promise.all([
+		listScheduleChanges({ needsReason: true, limit: 100 }),
+		listScheduleChanges({ needsReason: false, from: range.from, to: range.to, limit: 100 })
+	]);
+
 	return {
+		scheduleChanges: { needsReason: changesNeedingReason, explained: changeNotes },
 		perStation: [...perStation.values()],
 		lineItemVariance,
 		onTime: {

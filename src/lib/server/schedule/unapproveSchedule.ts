@@ -23,6 +23,7 @@
  */
 import { prisma } from '$lib/server/prisma';
 import { McpUserError } from '$lib/server/mcp/handler';
+import { changeJobLineItemSelect, changeSlot, jobLabel, plural, recordScheduleChange } from './changeNotes';
 import { ScheduleAssignmentStatus, ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
 
 export class UnapproveScheduleError extends McpUserError {
@@ -78,6 +79,32 @@ export async function unapproveSchedule(assignmentIds: readonly string[], actor:
 		// now has PROPOSED rows again — roll its status back to DRAFT so the board and
 		// the drafts list treat it as editable.
 		const draftIds = [...new Set(assignments.map((a) => a.scheduleDraftId).filter((id): id is string => id !== null))];
+
+		// These jobs were on the live schedule — note the change so someone is asked why
+		// (changeNotes.ts). Every row here was APPROVED, checked above.
+		const described = await tx.scheduleAssignment.findMany({
+			where: { id: { in: [...assignmentIds] } },
+			select: { date: true, startMinuteOfDay: true, station: { select: { label: true } }, lineItem: { select: changeJobLineItemSelect } },
+			orderBy: [{ date: 'asc' }, { startMinuteOfDay: 'asc' }]
+		});
+		const drafts = draftIds.length ? await tx.scheduleDraft.findMany({ where: { id: { in: draftIds } }, select: { name: true } }) : [];
+		const where =
+			drafts.length === 1 ? `on “${drafts[0].name}”` : drafts.length > 1 ? `across ${drafts.length} plans` : 'on the live schedule';
+		await recordScheduleChange(tx, {
+			actor,
+			kind: 'reopened',
+			summary: `${plural(assignments.length, 'approved job')} ${where} ${assignments.length === 1 ? 'was' : 'were'} reopened for changes`,
+			draftId: draftIds.length === 1 ? draftIds[0] : null,
+			orderIds: described.map((row) => row.lineItem.orderId),
+			details: {
+				jobs: described.map((row) => ({
+					job: jobLabel(row.lineItem),
+					hoopsOrderId: row.lineItem.order.hoopsOrderId,
+					from: changeSlot(row.station.label, row.date, row.startMinuteOfDay)
+				}))
+			}
+		});
+
 		let draftsReopened = 0;
 		for (const draftId of draftIds) {
 			const draft = await tx.scheduleDraft.findUnique({ where: { id: draftId }, select: { status: true } });
