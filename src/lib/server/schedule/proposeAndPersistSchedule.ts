@@ -13,7 +13,7 @@ import { prisma } from '$lib/server/prisma';
 import { DEPENDENCY_REASON_PREFIX, proposeSchedule } from '$lib/server/engine/proposeSchedule';
 import { STATION_KINDS } from '$lib/schedule/stationKinds';
 import type { AtRiskFlag } from '$lib/server/engine/types';
-import { ScheduleAssignmentStatus, ScheduleStrategy } from '../../../../prisma/generated/prisma/enums';
+import { ScheduleAssignmentStatus, ScheduleDraftStatus, ScheduleStrategy } from '../../../../prisma/generated/prisma/enums';
 import { buildSchedulingRun, type SchedulingRun } from './committedWork';
 import { createDraft } from './draft';
 import type { DateRange } from './types';
@@ -50,6 +50,12 @@ export interface ProposeOptions {
 	name: string;
 	description?: string;
 	actor: string;
+	/**
+	 * Re-plan inside this existing draft instead of creating a new one (2026-10-16 —
+	 * replan_draft: "edit the draft, don't make a new one unless asked"). Its proposed
+	 * jobs are replaced by the new plan; its approved jobs stay.
+	 */
+	intoDraftId?: string;
 }
 
 function iso(date: Date): string {
@@ -152,13 +158,20 @@ export async function proposeIntoDraft(options: ProposeOptions): Promise<Propose
 	const run = await buildSchedulingRun(range, release);
 	const { result, dropped, atRisk, consideredOrderIds } = await planWholeOrders(run);
 
-	const draft = await createDraft(
-		{ name: options.name, description: options.description ?? null, startDate: range.from, weeks: Math.ceil(days / 7), strategy: ScheduleStrategy.BATCH_OPTIMIZE },
-		actor
-	);
+	const draft = options.intoDraftId
+		? await prisma.scheduleDraft.findUniqueOrThrow({ where: { id: options.intoDraftId } })
+		: await createDraft(
+				{ name: options.name, description: options.description ?? null, startDate: range.from, weeks: Math.ceil(days / 7), strategy: ScheduleStrategy.BATCH_OPTIMIZE },
+				actor
+			);
 
 	const assignmentIds = await prisma.$transaction(async (tx) => {
 		const ids: string[] = [];
+		// Re-planning in place: the new plan replaces this draft's proposed jobs.
+		if (options.intoDraftId) {
+			await tx.scheduleAssignment.deleteMany({ where: { scheduleDraftId: draft.id, status: ScheduleAssignmentStatus.PROPOSED } });
+			if (draft.status !== ScheduleDraftStatus.DRAFT) await tx.scheduleDraft.update({ where: { id: draft.id }, data: { status: ScheduleDraftStatus.DRAFT } });
+		}
 		for (const assignment of result.assignments) {
 			const row = await tx.scheduleAssignment.create({
 				data: {
@@ -197,7 +210,7 @@ export async function proposeIntoDraft(options: ProposeOptions): Promise<Propose
 			data: {
 				entity: 'ScheduleDraft',
 				entityId: draft.id,
-				action: 'schedule_draft_auto_proposed',
+				action: options.intoDraftId ? 'schedule_draft_replanned' : 'schedule_draft_auto_proposed',
 				actor,
 				diff: { placedCount: result.assignments.length, atRiskCount: atRisk.length, unscheduledOrderCount: dropped.size, releasedCount: run.released.length, range, release }
 			}

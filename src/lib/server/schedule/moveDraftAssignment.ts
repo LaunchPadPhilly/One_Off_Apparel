@@ -6,14 +6,21 @@
  * validation and cascade — a station a drag refuses, the chat refuses too, with the same
  * message.
  *
- * Only PROPOSED rows inside the named draft can be moved. Row-kind mismatch, finisher
- * dependency breaks, archived-station targets and shift-overflow all surface as
- * MoveDraftAssignmentError with a human-readable message — the UI shows it as a
- * refusal toast; the MCP tool returns it to Claude as the handler's thrown error.
+ * Only PROPOSED rows inside the named draft can be moved, and only onto a station of the
+ * right kind — those are refused (MoveDraftAssignmentError, a McpUserError so Claude sees
+ * the reason). Everything else a move can break — an overlap, running past the end of
+ * the shift, a finisher before its print, a late job — is allowed and flagged
+ * (draftProblems.ts; client decision 2026-10-16), or, in `makeRoom` mode, the rest of
+ * the station gives way (draftDependencies.ts' RepackMode). See draftEdit.ts for dry
+ * runs and the "what else moved" list.
  */
 import { prisma } from '$lib/server/prisma';
+import { McpUserError } from '$lib/server/mcp/handler';
 import { expectedStationFor, stationDisplayLabel } from '$lib/schedule/expectedStation';
-import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from './draftDependencies';
+import { dayLabel, clockLabel } from '$lib/schedule/draftProblems';
+import { DraftPlacementError, repackDraftDays, type PlacementChange, type RepackMode } from './draftDependencies';
+import { restaffDaysJobsMovedTo } from './restaffDraftDay';
+import { runDraftEdit, type DraftEditOptions, type DraftEditOutcome } from './draftEdit';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 import type { PlacementPosition } from './draftDependencies';
 
@@ -22,7 +29,7 @@ import type { PlacementPosition } from './draftDependencies';
  * error so the form action and the MCP tool can translate it into a user-facing message
  * instead of a 500. One class so both callers handle it the same way.
  */
-export class MoveDraftAssignmentError extends Error {
+export class MoveDraftAssignmentError extends McpUserError {
 	constructor(message: string) {
 		super(message);
 		this.name = 'MoveDraftAssignmentError';
@@ -42,6 +49,11 @@ export interface MoveDraftAssignmentResult {
 	id: string;
 	peers: PlacementPosition[];
 	pushedCount: number;
+	changes: PlacementChange[];
+}
+
+export interface MoveDraftAssignmentOptions extends Partial<DraftEditOptions> {
+	mode?: RepackMode;
 }
 
 /**
@@ -79,8 +91,9 @@ function parseDate(iso: string): Date {
 
 export async function moveDraftAssignment(
 	input: MoveDraftAssignmentInput,
-	actor: string
-): Promise<MoveDraftAssignmentResult> {
+	actor: string,
+	options: MoveDraftAssignmentOptions = {}
+): Promise<DraftEditOutcome<MoveDraftAssignmentResult>> {
 	const existing = await prisma.scheduleAssignment.findUnique({
 		where: { id: input.assignmentId },
 		select: {
@@ -93,6 +106,7 @@ export async function moveDraftAssignment(
 			startMinuteOfDay: true,
 			lineItem: {
 				select: {
+					design: true,
 					itemType: true,
 					decorationType: true,
 					finishingStep: true,
@@ -125,21 +139,12 @@ export async function moveDraftAssignment(
 	if (mismatch) throw new MoveDraftAssignmentError(mismatch);
 
 	const date = parseDate(input.date);
-	const durationMin = Math.max(15, Math.round(existing.estimatedHours * 60));
-
-	const dependencyProblem = await checkFinisherPlacement(
-		prisma,
-		input.draftId,
-		existing.lineItemId,
-		date,
-		durationMin
-	);
-	if (dependencyProblem) throw new MoveDraftAssignmentError(dependencyProblem);
-
+	if (Number.isNaN(date.getTime())) throw new MoveDraftAssignmentError('Bad date — use YYYY-MM-DD.');
 	const targetStartMin = input.startMinuteOfDay ?? existing.startMinuteOfDay ?? 8 * 60;
+	const summary = () => `Moved "${existing.lineItem.design || 'a job'}" to ${station.label}, ${dayLabel(input.date)} ${clockLabel(targetStartMin)}`;
 
 	try {
-		return await prisma.$transaction(async (tx) => {
+		return await runDraftEdit(input.draftId, actor, summary, { via: options.via ?? 'board', dryRun: options.dryRun, withProblems: options.withProblems }, async (tx) => {
 			await tx.scheduleAssignment.update({
 				where: { id: input.assignmentId },
 				data: {
@@ -159,16 +164,23 @@ export async function moveDraftAssignment(
 				await tx.assignmentCrew.deleteMany({ where: { assignmentId: input.assignmentId } });
 			}
 
-			const { peers, pushedCount } = await repackDraftDays(tx, input.draftId, {
-				kind: 'move',
-				assignmentId: input.assignmentId,
-				oldStationId: existing.stationId,
-				oldDayMs: existing.date.getTime(),
-				newStationId: station.id,
-				newDayMs: date.getTime(),
-				targetStartMin
-			});
-			return { id: input.assignmentId, peers, pushedCount };
+			const { peers, pushedCount, changes } = await repackDraftDays(
+				tx,
+				input.draftId,
+				{
+					kind: 'move',
+					assignmentId: input.assignmentId,
+					oldStationId: existing.stationId,
+					oldDayMs: existing.date.getTime(),
+					oldStartMin: existing.startMinuteOfDay ?? 8 * 60,
+					newStationId: station.id,
+					newDayMs: date.getTime(),
+					targetStartMin
+				},
+				options.mode ?? 'flag'
+			);
+			if (options.mode === 'makeRoom') await restaffDaysJobsMovedTo(tx, input.draftId, changes);
+			return { id: input.assignmentId, peers, pushedCount, changes };
 		});
 	} catch (err) {
 		if (err instanceof DraftPlacementError) throw new MoveDraftAssignmentError(err.message);

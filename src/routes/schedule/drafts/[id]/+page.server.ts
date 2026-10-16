@@ -2,7 +2,8 @@ import { error, fail, redirect } from '@sveltejs/kit';
 import { hasGrantedScope, isAdmin, requireScopePage } from '$lib/server/auth/guards';
 import { deleteDraft, getDraft, renameDraft, renameDraftSchema } from '$lib/server/schedule/draft';
 import { commitDraft, CommitScheduleError } from '$lib/server/schedule/commitSchedule';
-import { checkFinisherPlacement, DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
+import { DraftPlacementError, repackDraftDays } from '$lib/server/schedule/draftDependencies';
+import { assertDraftApprovable } from '$lib/server/schedule/draftProblemsServer';
 import { moveDraftAssignment, MoveDraftAssignmentError } from '$lib/server/schedule/moveDraftAssignment';
 import { pinAndRestaffDraftDay, replanDraftCrews, RestaffError } from '$lib/server/schedule/restaffDraftDay';
 import { prisma } from '$lib/server/prisma';
@@ -90,7 +91,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		autoProposeFeedback,
 		// Renaming a draft is admin-only (2026-10-13); the action re-checks this.
 		canRename: isAdmin(locals.user),
-		canEdit: hasGrantedScope(locals.user, 'SCHEDULE_WRITE')
+		canEdit: hasGrantedScope(locals.user, 'SCHEDULE_WRITE'),
+		// The board polls ./activity for Claude's edits made after this (the pop-up).
+		loadedAt: new Date().toISOString()
 	};
 };
 
@@ -183,10 +186,9 @@ export const actions: Actions = {
 		const mismatch = stationMismatchMessage(lineItem, station);
 		if (mismatch) return fail(400, { message: mismatch });
 
-		// A finisher has to start after the job(s) it waits on end — refused, not snapped
-		// (2026-09-23 decision). See draftDependencies.ts.
-		const dependencyProblem = await checkFinisherPlacement(prisma, params.id, lineItemId, date, Math.max(15, Math.round(hours * 60)));
-		if (dependencyProblem) return fail(400, { message: dependencyProblem });
+		// A finisher dropped before the job it waits on, an overlap, or a job past the end
+		// of the shift is allowed and flagged red on the board (draftProblems.ts) — Approve
+		// is refused until it's fixed (client decision 2026-10-16; this used to refuse).
 
 		// One transaction so the create + cascade + settle sequence can't leave a
 		// half-shifted day if any step fails mid-way through.
@@ -250,9 +252,10 @@ export const actions: Actions = {
 					date: dateValue,
 					startMinuteOfDay
 				},
-				user.email
+				user.email,
+				{ via: 'board' }
 			);
-			return { success: true as const, peers: result.peers, pushedCount: result.pushedCount };
+			return { success: true as const, peers: result.result.peers, pushedCount: result.result.pushedCount, changes: result.changes };
 		} catch (err) {
 			if (err instanceof MoveDraftAssignmentError) {
 				// 409 keeps parity with the previous responses for post-check refusals; the
@@ -450,6 +453,9 @@ export const actions: Actions = {
 		const draft = await getDraft(params.id);
 		if (!draft) throw error(404, 'Schedule draft not found');
 		try {
+			// Nothing red may be approved (2026-10-16): the board disables the button too,
+			// this is the server-side check behind it.
+			await assertDraftApprovable(params.id);
 			const result = await commitDraft(params.id, user.email);
 			return { approved: true as const, approvedCount: result.assignments.length, replacedCount: result.replacedCount };
 		} catch (err) {

@@ -8,6 +8,7 @@
  */
 import { prisma } from '$lib/server/prisma';
 import { McpUserError } from '$lib/server/mcp/handler';
+import { changeJobLineItemSelect, changeSlot, jobLabel, plural, recordScheduleChange } from './changeNotes';
 import { ScheduleAssignmentStatus, ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
 
 /** A refusal written for the person approving — shown as-is in chat and on the board. */
@@ -69,7 +70,42 @@ export async function commitSchedule(assignmentIds: readonly string[], approvedB
 			);
 		}
 
-		// The new slots replace the old approved ones.
+		// The new slots replace the old approved ones. Where a job actually moved (another
+		// station, day or time), note it — captured here, before the old rows are deleted —
+		// so someone is asked why the live schedule changed (changeNotes.ts).
+		if (otherCommitted.length > 0) {
+			const stationIds = [...new Set([...otherCommitted, ...assignments].map((row) => row.stationId))];
+			const [stations, lineItems] = await Promise.all([
+				tx.station.findMany({ where: { id: { in: stationIds } }, select: { id: true, label: true } }),
+				tx.lineItem.findMany({ where: { id: { in: otherCommitted.map((row) => row.lineItemId) } }, select: changeJobLineItemSelect })
+			]);
+			const stationLabel = new Map(stations.map((s) => [s.id, s.label]));
+			const lineItemById = new Map(lineItems.map((item) => [item.id, item]));
+			const moves = otherCommitted
+				.map((old) => {
+					const replacement = assignments.find((a) => a.lineItemId === old.lineItemId);
+					const item = lineItemById.get(old.lineItemId);
+					if (!replacement || !item) return null;
+					const from = changeSlot(stationLabel.get(old.stationId) ?? 'a station', old.date, old.startMinuteOfDay);
+					const to = changeSlot(stationLabel.get(replacement.stationId) ?? 'a station', replacement.date, replacement.startMinuteOfDay);
+					if (from.station === to.station && from.date === to.date && from.time === to.time) return null;
+					return { orderId: item.orderId, sortKey: `${from.date}|${from.time ?? ''}`, job: { job: jobLabel(item), hoopsOrderId: item.order.hoopsOrderId, from, to } };
+				})
+				.filter((move): move is NonNullable<typeof move> => move !== null)
+				.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+			if (moves.length > 0) {
+				const draftIdsHere = [...new Set(assignments.map((a) => a.scheduleDraftId).filter((id): id is string => id !== null))];
+				const draft = draftIdsHere.length === 1 ? await tx.scheduleDraft.findUnique({ where: { id: draftIdsHere[0] }, select: { name: true } }) : null;
+				await recordScheduleChange(tx, {
+					actor: approvedBy,
+					kind: 'replaced',
+					summary: `Approving ${draft ? `“${draft.name}”` : 'a new plan'} moved ${plural(moves.length, 'already-approved job')} to a new slot`,
+					draftId: draftIdsHere.length === 1 ? draftIdsHere[0] : null,
+					orderIds: moves.map((move) => move.orderId),
+					details: { jobs: moves.map((move) => move.job) }
+				});
+			}
+		}
 		for (const old of otherCommitted) {
 			await tx.domainAuditLog.create({
 				data: {

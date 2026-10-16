@@ -207,3 +207,17 @@ export async function replanDraftCrews(draftId: string): Promise<{ notice: strin
 		.join(' ');
 	return { notice };
 }
+
+/**
+ * After a `makeRoom` edit moved jobs onto other days (draftDependencies.ts' RepackMode,
+ * 2026-10-16), re-plans those days' crews inside the same transaction, so a spilled job
+ * gets people who are in and free that day instead of keeping the crew of the day it left.
+ * Same planner as the People panel; nothing changes when there's no roster.
+ */
+export async function restaffDaysJobsMovedTo(tx: Tx, draftId: string, changes: readonly { from: { date: string }; to: { date: string } }[]): Promise<void> {
+	const days = [...new Set(changes.filter((c) => c.from.date !== c.to.date).map((c) => c.to.date))].sort();
+	if (days.length === 0) return;
+	const staffing = await fetchStaffingInputs({ from: days[0], to: days[days.length - 1] });
+	if (staffing.workers.length === 0) return;
+	for (const day of days) await restaffDay(tx, draftId, day, staffing);
+}

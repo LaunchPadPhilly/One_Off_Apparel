@@ -3,6 +3,7 @@ import type { Prisma } from '../../../../prisma/generated/prisma/client';
 import { LineItemStatus, OrderStatus, ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 import { checkCompletion } from '$lib/server/engine/checkCompletion';
 import { isPatchInstall } from '$lib/schedule/patchInstall';
+import { changeJobLineItemSelect, changeSlot, jobLabel, plural, recordScheduleChange } from '$lib/server/schedule/changeNotes';
 import { orderCorrectionSchema, lineItemCorrectionSchema, type OrderCorrection, type LineItemCorrection } from './types';
 
 /**
@@ -90,6 +91,29 @@ export async function updateLineItemFields(lineItemId: string, patch: LineItemCo
 				const slots = await tx.scheduleAssignment.findMany({ where: { lineItemId }, select: { id: true, status: true, stationId: true, date: true, startMinuteOfDay: true } });
 				if (slots.some((slot) => slot.status === ScheduleAssignmentStatus.IN_PROGRESS || slot.status === ScheduleAssignmentStatus.COMPLETE)) {
 					throw new Error("This Patch Install has already been started on the floor, so it can't be marked outsourced.");
+				}
+				// Approved slots were on the live schedule — note their removal so someone is
+				// asked why (changeNotes.ts). Proposed ones are only a draft; nothing to note.
+				const approvedSlots = slots.filter((slot) => slot.status === ScheduleAssignmentStatus.APPROVED);
+				if (approvedSlots.length > 0) {
+					const [item, stations] = await Promise.all([
+						tx.lineItem.findUniqueOrThrow({ where: { id: lineItemId }, select: changeJobLineItemSelect }),
+						tx.station.findMany({ where: { id: { in: approvedSlots.map((slot) => slot.stationId) } }, select: { id: true, label: true } })
+					]);
+					const stationLabel = new Map(stations.map((s) => [s.id, s.label]));
+					await recordScheduleChange(tx, {
+						actor,
+						kind: 'slots_removed',
+						summary: `${plural(approvedSlots.length, 'approved slot')} for ${jobLabel(item)} on order ${item.order.hoopsOrderId} ${approvedSlots.length === 1 ? 'was' : 'were'} removed because it was marked outsourced`,
+						orderIds: [item.orderId],
+						details: {
+							jobs: approvedSlots.map((slot) => ({
+								job: jobLabel(item),
+								hoopsOrderId: item.order.hoopsOrderId,
+								from: changeSlot(stationLabel.get(slot.stationId) ?? 'a station', slot.date, slot.startMinuteOfDay)
+							}))
+						}
+					});
 				}
 				for (const slot of slots) {
 					await tx.domainAuditLog.create({

@@ -24,6 +24,15 @@ import { SHIFT_END_MIN, SHIFT_START_MIN, skipBreak, wallClockEnd, workingMinutes
  * against its print's end — see draftDependencies.ts). Sequence order is renumbered
  * 0..N-1 by start time on every return.
  *
+ * Lenient mode (`{ lenient: true }`, 2026-10-16 — client decision: a manual move that
+ * breaks a rule is allowed and flagged, not refused): the same positions are computed,
+ * but overlap / shift-end / notBefore are NOT refused — draftProblems.ts flags them red
+ * on the board and the Approve gate refuses until they're fixed. Dragging a job earlier
+ * into another one inserts it there and pushes the rest later (a reorder) instead of
+ * refusing. The draft board and its server actions use lenient mode; the finisher
+ * settler in draftDependencies.ts keeps strict mode, because it relies on a refusal to
+ * know a job doesn't fit.
+ *
  * Breaks (see shift.ts) still work: `wallClockEnd(start, working)` skips them when
  * computing an item's end; `skipBreak(start)` nudges a start OUT of a break if a drop
  * would land inside one.
@@ -34,6 +43,11 @@ export interface CascadeItem {
 	startMin: number;
 	durationMin: number;
 	notBeforeMin?: number;
+}
+
+export interface CascadeOptions {
+	/** Compute the layout without refusing overlap / shift-end / notBefore (see file doc). */
+	lenient?: boolean;
 }
 
 export type CascadeResult<T> =
@@ -86,7 +100,7 @@ function snapOutOfOverlap(queue: readonly { id: string; startMin: number; durati
  * same delta — that's how inter-item gaps are preserved. Peers with a strictly-earlier
  * original startMin don't move. See file-level doc.
  */
-export function cascadeMove<T extends CascadeItem>(queue: readonly T[], movingId: string, targetStartMin: number): CascadeResult<T> {
+export function cascadeMove<T extends CascadeItem>(queue: readonly T[], movingId: string, targetStartMin: number, options: CascadeOptions = {}): CascadeResult<T> {
 	const sorted = [...queue].sort((a, b) => a.startMin - b.startMin);
 	const k = sorted.findIndex((p) => p.id === movingId);
 	if (k === -1) return { conflict: 'That item is no longer on this day — reload the board.' };
@@ -105,8 +119,15 @@ export function cascadeMove<T extends CascadeItem>(queue: readonly T[], movingId
 	// Predecessor collision (only possible when dragging earlier).
 	if (k > 0) {
 		const prevEnd = endOf(next[k - 1]);
-		if (target < prevEnd) return { conflict: `That would collide with the job before it (ends ${clock(prevEnd)}).` };
+		if (target < prevEnd) {
+			if (!options.lenient) return { conflict: `That would collide with the job before it (ends ${clock(prevEnd)}).` };
+			// Lenient: a reorder — take it out of the queue and insert it at the target,
+			// pushing whatever it now overlaps later (gaps behind that are kept).
+			const rest = sorted.filter((p) => p.id !== movingId);
+			return cascadeInsert(rest, { ...moving }, target, options);
+		}
 	}
+	if (options.lenient) return { placements: withSequence(next) };
 
 	// Shift-end / notBefore / negative-start checks on everyone that moved.
 	for (let i = k; i < next.length; i++) {
@@ -132,11 +153,12 @@ export function cascadeMove<T extends CascadeItem>(queue: readonly T[], movingId
  * the incoming item's snapped start (may differ from target if target landed in a
  * break).
  */
-export function cascadeInsert<T extends CascadeItem>(queue: readonly T[], incoming: T, targetStartMin: number): CascadeResult<T> & { incomingStart?: number } {
+export function cascadeInsert<T extends CascadeItem>(queue: readonly T[], incoming: T, targetStartMin: number, options: CascadeOptions = {}): CascadeResult<T> & { incomingStart?: number } {
 	const sorted = [...queue].sort((a, b) => a.startMin - b.startMin);
 	const snapped = snapOutOfOverlap(sorted, Math.round(targetStartMin), null);
 	const start = skipBreak(Math.max(SHIFT_START_MIN, snapped));
-	if (incoming.notBeforeMin != null && start < incoming.notBeforeMin) {
+	const lenient = options.lenient === true;
+	if (!lenient && incoming.notBeforeMin != null && start < incoming.notBeforeMin) {
 		return { conflict: `This job waits on another that finishes ${clock(incoming.notBeforeMin)} — drop it there or later.` };
 	}
 
@@ -145,7 +167,7 @@ export function cascadeInsert<T extends CascadeItem>(queue: readonly T[], incomi
 	const before = sorted.filter((p) => p.startMin < start);
 	if (before.length > 0) {
 		const prevEnd = endOf(before[before.length - 1]);
-		if (start < prevEnd) return { conflict: `That would collide with the job before it (ends ${clock(prevEnd)}).` };
+		if (!lenient && start < prevEnd) return { conflict: `That would collide with the job before it (ends ${clock(prevEnd)}).` };
 	}
 
 	const insertedItem: T & { startMin: number } = { ...incoming, startMin: start };
@@ -162,6 +184,7 @@ export function cascadeInsert<T extends CascadeItem>(queue: readonly T[], incomi
 
 	const shifted: (T & { startMin: number })[] = after.map((p) => ({ ...p, startMin: p.startMin + delta }));
 	const kept: (T & { startMin: number })[] = before.map((p) => ({ ...p, startMin: p.startMin }));
+	if (lenient) return { placements: withSequence([...kept, insertedItem, ...shifted]), incomingStart: start };
 
 	for (const p of shifted) {
 		if (p.notBeforeMin != null && p.startMin < p.notBeforeMin) {
@@ -186,7 +209,7 @@ export function cascadeInsert<T extends CascadeItem>(queue: readonly T[], incomi
  * item survives as a gap between the last pre-remove peer and the first post-remove
  * peer.
  */
-export function cascadeRemove<T extends CascadeItem>(queue: readonly T[], removedId: string): CascadeResult<T> {
+export function cascadeRemove<T extends CascadeItem>(queue: readonly T[], removedId: string, options: CascadeOptions = {}): CascadeResult<T> {
 	const sorted = [...queue].sort((a, b) => a.startMin - b.startMin);
 	const k = sorted.findIndex((p) => p.id === removedId);
 	if (k === -1) return { conflict: 'That item is no longer on this day — reload the board.' };
@@ -211,7 +234,7 @@ export function cascadeRemove<T extends CascadeItem>(queue: readonly T[], remove
 
 	for (const p of after) {
 		if (p.notBeforeMin != null && p.startMin < p.notBeforeMin) p.startMin = p.notBeforeMin;
-		if (endOf(p) > SHIFT_END_MIN) {
+		if (!options.lenient && endOf(p) > SHIFT_END_MIN) {
 			// A pulled-forward peer can't overrun the shift; this branch is only for the
 			// notBeforeMin bump above. Refuse rather than truncate.
 			return { conflict: `Removing this job would push another past the end of the shift (${clock(SHIFT_END_MIN)}).` };

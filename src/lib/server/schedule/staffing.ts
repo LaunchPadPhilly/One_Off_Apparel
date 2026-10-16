@@ -4,6 +4,7 @@ import { McpUserError } from '$lib/server/mcp/handler';
 import { isPressKind, PRINTED_RELABEL_KIND } from '$lib/schedule/stationKinds';
 import { pressSafeCrew } from '$lib/schedule/people';
 import { ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
+import { changeJobLineItemSelect, changeSlot, dayRange, jobLabel, plural, recordScheduleChange } from './changeNotes';
 
 /**
  * Daily staffing, the part people change by talking to Claude (2026-09-28): who is out
@@ -64,7 +65,7 @@ function days(from: string, to: string): Date[] {
 const iso = (date: Date) => date.toISOString().slice(0, 10);
 
 /** An active person by name: exact (case-insensitive), else a unique partial match. Throws a StaffingError on no match or an ambiguous one. */
-async function findWorker(name: string) {
+export async function findWorker(name: string) {
 	const workers = await prisma.worker.findMany({
 		where: { archivedAt: null },
 		select: { id: true, name: true, isMain: true, isOperator: true, certifications: { where: { station: { archivedAt: null } }, select: { stationId: true } } }
@@ -179,7 +180,11 @@ export async function setWorkerAvailability(input: z.infer<typeof setWorkerAvail
 	const worker = await findWorker(input.workerName);
 	const range = days(input.from, input.to);
 
-	await prisma.$transaction(async (tx) => {
+	const affected = await prisma.$transaction(async (tx) => {
+		// Days they weren't already out — only those are a new change to the schedule.
+		const alreadyOut = input.available
+			? new Set<string>()
+			: new Set((await tx.workerUnavailability.findMany({ where: { workerId: worker.id, date: { in: range } }, select: { date: true } })).map((row) => iso(row.date)));
 		if (input.available) {
 			await tx.workerUnavailability.deleteMany({ where: { workerId: worker.id, date: { in: range } } });
 		} else {
@@ -201,19 +206,52 @@ export async function setWorkerAvailability(input: z.infer<typeof setWorkerAvail
 				diff: { name: worker.name, from: input.from, to: input.to, reason: input.reason ?? null }
 			}
 		});
-	});
 
-	const affected = input.available
-		? []
-		: await prisma.scheduleAssignment.findMany({
-				where: {
-					date: { in: range },
-					status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] },
-					crew: { some: { workerId: worker.id } }
-				},
-				select: { id: true, date: true, status: true, station: { select: { label: true } }, lineItem: { select: { design: true, order: { select: { hoopsOrderId: true } } } } },
-				orderBy: [{ date: 'asc' }]
+		if (input.available) return [];
+		const onJobs = await tx.scheduleAssignment.findMany({
+			where: {
+				date: { in: range },
+				status: { in: [ScheduleAssignmentStatus.APPROVED, ScheduleAssignmentStatus.IN_PROGRESS] },
+				crew: { some: { workerId: worker.id } }
+			},
+			select: {
+				id: true,
+				date: true,
+				status: true,
+				startMinuteOfDay: true,
+				scheduleDraftId: true,
+				station: { select: { label: true } },
+				lineItem: { select: changeJobLineItemSelect }
+			},
+			orderBy: [{ date: 'asc' }, { startMinuteOfDay: 'asc' }]
+		});
+
+		// Out on days they were crewing committed work: the approved schedule no longer
+		// holds as planned — note it so someone is asked why (changeNotes.ts).
+		const newlyAffected = onJobs.filter((job) => !alreadyOut.has(iso(job.date)));
+		if (newlyAffected.length > 0) {
+			const outDays = [...new Set(newlyAffected.map((job) => iso(job.date)))].sort();
+			const draftIds = [...new Set(newlyAffected.map((job) => job.scheduleDraftId).filter((id): id is string => id !== null))];
+			await recordScheduleChange(tx, {
+				actor,
+				kind: 'worker_out',
+				summary: `${worker.name} was marked out ${dayRange(outDays)} while on ${plural(newlyAffected.length, 'approved job')}`,
+				draftId: draftIds.length === 1 ? draftIds[0] : null,
+				orderIds: newlyAffected.map((job) => job.lineItem.orderId),
+				details: {
+					worker: worker.name,
+					days: outDays,
+					outReason: input.reason ?? null,
+					jobs: newlyAffected.map((job) => ({
+						job: jobLabel(job.lineItem),
+						hoopsOrderId: job.lineItem.order.hoopsOrderId,
+						from: changeSlot(job.station.label, job.date, job.startMinuteOfDay)
+					}))
+				}
 			});
+		}
+		return onJobs;
+	});
 
 	return {
 		name: worker.name,
