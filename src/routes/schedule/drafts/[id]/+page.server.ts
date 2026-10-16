@@ -412,6 +412,84 @@ export const actions: Actions = {
 		return { success: true as const };
 	},
 
+	// Remove one crew member from a proposed job (2026-10-15). Mirrors the role switch:
+	// takes a (assignmentId, workerId), then drops that worker from EVERY proposed
+	// assignment on the same (station, day) — one person works one station per day, so
+	// removing them from one job removes them from the station for the day. The last
+	// lead on a press cannot be removed via this action; use the role switch to replace
+	// them, or add another lead first. Approved rows keep their approved crew.
+	removeCrewMember: async ({ request, params, locals, url }) => {
+		const user = requireScopePage(locals.user, 'SCHEDULE_WRITE', url.pathname);
+		const form = await request.formData();
+		const assignmentId = form.get('assignmentId');
+		const workerId = form.get('workerId');
+		if (typeof assignmentId !== 'string' || !assignmentId) return fail(400, { message: 'assignmentId required' });
+		if (typeof workerId !== 'string' || !workerId) return fail(400, { message: 'workerId required' });
+
+		const assignment = await prisma.scheduleAssignment.findUnique({
+			where: { id: assignmentId },
+			select: { scheduleDraftId: true, status: true, stationId: true, date: true, station: { select: { kind: true, label: true } } }
+		});
+		if (!assignment || assignment.scheduleDraftId !== params.id) return fail(404, { message: 'Assignment not in this draft' });
+		if (assignment.status !== ScheduleAssignmentStatus.PROPOSED) return fail(409, { message: 'Approved jobs keep their approved crew; propose a new plan to change them.' });
+
+		const worker = await prisma.worker.findUnique({ where: { id: workerId }, select: { name: true } });
+		if (!worker) return fail(404, { message: 'Person not found.' });
+
+		// Every proposed assignment on this (station, day) that has this worker on it.
+		const sibling = await prisma.scheduleAssignment.findMany({
+			where: {
+				scheduleDraftId: params.id,
+				status: ScheduleAssignmentStatus.PROPOSED,
+				stationId: assignment.stationId,
+				date: assignment.date,
+				crew: { some: { workerId } }
+			},
+			select: { id: true }
+		});
+		if (sibling.length === 0) return fail(409, { message: `${worker.name} isn't on this job.` });
+
+		// Press-only guard: if the worker being removed is the only lead on this
+		// (station, day), the press would be left with catches but no lead — refuse so
+		// the user adds a replacement (or demotes the lead to catch after a replacement
+		// is in). Off-press stations have no equivalent constraint.
+		if (isPressKind(assignment.station.kind)) {
+			const otherLeads = await prisma.assignmentCrew.count({
+				where: {
+					assignment: { scheduleDraftId: params.id, status: ScheduleAssignmentStatus.PROPOSED, stationId: assignment.stationId, date: assignment.date },
+					role: { in: ['MAIN', 'OPERATOR'] },
+					NOT: { workerId }
+				}
+			});
+			const selfIsLead = await prisma.assignmentCrew.count({
+				where: {
+					assignment: { scheduleDraftId: params.id, status: ScheduleAssignmentStatus.PROPOSED, stationId: assignment.stationId, date: assignment.date },
+					workerId,
+					role: { in: ['MAIN', 'OPERATOR'] }
+				}
+			});
+			if (selfIsLead > 0 && otherLeads === 0) {
+				return fail(409, { message: `${worker.name} is the only main or operator on ${assignment.station.label} today — add a replacement first, or demote them to catch.` });
+			}
+		}
+
+		await prisma.$transaction(async (tx) => {
+			await tx.assignmentCrew.deleteMany({
+				where: { assignmentId: { in: sibling.map((s) => s.id) }, workerId }
+			});
+			await tx.domainAuditLog.create({
+				data: {
+					entity: 'ScheduleAssignment',
+					entityId: assignmentId,
+					action: 'crew_member_removed',
+					actor: user.email,
+					diff: { name: worker.name, workerId, stationId: assignment.stationId, date: assignment.date }
+				}
+			});
+		});
+		return { success: true as const };
+	},
+
 	// "Re-plan crews" (2026-10-14): re-staff every day with proposed jobs against the
 	// current roster, certifications, pins and main/catch rules.
 	replanCrews: async ({ params, locals, url }) => {

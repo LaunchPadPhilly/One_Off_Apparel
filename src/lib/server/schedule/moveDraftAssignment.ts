@@ -145,14 +145,14 @@ export async function moveDraftAssignment(
 
 	try {
 		return await runDraftEdit(input.draftId, actor, summary, { via: options.via ?? 'board', dryRun: options.dryRun, withProblems: options.withProblems }, async (tx) => {
+			// The row's station / date / startMinuteOfDay are deliberately NOT updated
+			// here (2026-10-15 fix): repackDraftDays loads the draft, applies the move in
+			// memory via the cascade helpers, and writes the new position in its final
+			// pass (it also restores the old position from the mutation, 2026-10-16).
+			// Only `proposedBy` is touched so the record names who moved it.
 			await tx.scheduleAssignment.update({
 				where: { id: input.assignmentId },
-				data: {
-					stationId: station.id,
-					date,
-					startMinuteOfDay: targetStartMin,
-					proposedBy: actor
-				}
+				data: { proposedBy: actor }
 			});
 
 			// Crew was planned for the (station, day) the job left; a cross-slot move
