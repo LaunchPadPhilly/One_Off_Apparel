@@ -15,6 +15,9 @@ import { McpUserError } from '$lib/server/mcp/handler';
 import { shortDraftCode, resolveDraftIdOrShortCode } from './draftShortCode';
 import { SHIFT_START_MIN, SHIFT_END_MIN, WORKING_MIN, BREAKS } from '$lib/schedule/shift';
 import { ScheduleAssignmentStatus, ScheduleDraftStatus } from '../../../../prisma/generated/prisma/enums';
+import { loadDraftProblems } from './draftProblemsServer';
+import { isPressKind } from '$lib/schedule/stationKinds';
+import { problemsForTool } from './draftEdit';
 
 /**
  * The shop's shift model, included in every list_drafts / get_draft response so
@@ -121,6 +124,11 @@ export interface DraftAssignmentDetail {
 	durationMinutes: number;
 	sequenceOrder: number;
 	status: ScheduleAssignmentStatus;
+	/** Who works it (2026-10-16): role is main / operator / catch on a press, crew elsewhere. */
+	crew: { name: string; role: string }[];
+	/** The order's deadline and whether it's a firm customer date (tight) or internal. */
+	orderDeadline: string | null;
+	deadlineIsTight: boolean;
 }
 
 export interface DraftDetail extends DraftSummary {
@@ -128,6 +136,9 @@ export interface DraftDetail extends DraftSummary {
 	/** The shop's shift model — included here so Claude can compute wall-clock moves
 	 *  without asking the user "when does the day start?". */
 	shift: typeof SHOP_SHIFT;
+	/** Problems on the draft (draftProblems.ts — the board's red/orange); red ones block approval. */
+	canApprove: boolean;
+	problems: ReturnType<typeof problemsForTool>['allProblems'];
 }
 
 /**
@@ -151,8 +162,9 @@ export async function getDraftForTool(idOrShortCode: string): Promise<DraftDetai
 			assignments: {
 				orderBy: [{ date: 'asc' }, { stationId: 'asc' }, { sequenceOrder: 'asc' }],
 				include: {
-					lineItem: { select: { design: true, decorationType: true, finishingStep: true, otherJobType: true, order: { select: { hoopsOrderId: true } } } },
-					station: { select: { name: true, label: true } }
+					lineItem: { select: { design: true, decorationType: true, finishingStep: true, otherJobType: true, order: { select: { hoopsOrderId: true, deadline: true, deadlineIsTight: true } } } },
+					station: { select: { name: true, label: true, kind: true } },
+					crew: { select: { role: true, worker: { select: { name: true } } } }
 				}
 			}
 		}
@@ -174,8 +186,14 @@ export async function getDraftForTool(idOrShortCode: string): Promise<DraftDetai
 		estimatedHours: a.estimatedHours,
 		durationMinutes: Math.max(15, Math.round(a.estimatedHours * 60)),
 		sequenceOrder: a.sequenceOrder,
-		status: a.status
+		status: a.status,
+		crew: [...a.crew]
+			.sort((x, y) => Number(y.role !== 'CATCH') - Number(x.role !== 'CATCH'))
+			.map((m) => ({ name: m.worker.name, role: isPressKind(a.station.kind) ? m.role.toLowerCase() : 'crew' })),
+		orderDeadline: a.lineItem.order.deadline ? iso(a.lineItem.order.deadline) : null,
+		deadlineIsTight: a.lineItem.order.deadlineIsTight
 	}));
+	const { canApprove, allProblems } = problemsForTool({ problems: await loadDraftProblems(draft.id) });
 
 	return {
 		id: draft.id,
@@ -192,6 +210,8 @@ export async function getDraftForTool(idOrShortCode: string): Promise<DraftDetai
 		proposedCount: proposed,
 		approvedCount: approved,
 		assignments,
-		shift: SHOP_SHIFT
+		shift: SHOP_SHIFT,
+		canApprove,
+		problems: allProblems
 	};
 }

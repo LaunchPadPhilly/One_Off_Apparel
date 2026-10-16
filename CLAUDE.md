@@ -17,7 +17,7 @@ read it before touching any order/schedule/line-item logic.
 
 **Build status:** schema (`prisma/schema.prisma`), the engine (`src/lib/server/engine/`),
 the Hoops import persistence layer (`src/lib/server/hoops/`), the schedule persistence
-layer (`src/lib/server/schedule/`), all twelve domain MCP tools (`src/lib/server/mcp/tools.ts`),
+layer (`src/lib/server/schedule/`), all domain MCP tools (`src/lib/server/mcp/tools.ts` + `changeNoteTools.ts`, twenty-two as of 2026-10-16),
 and a first UI pass — Orders (`src/routes/orders/`, plus `/orders/archive`), an extended
 Schedule/Production board (`src/routes/schedule/`), and a minimal Reports page
 (`src/routes/reports/`) — are built and merged. Real Hoops PDF extraction now exists
@@ -363,7 +363,8 @@ Deliberately not linked to `User`: floor staff don't log in. The daily staffing 
 (`engine/planStaffing.ts`) only ever puts a person on a station they're certified on — see
 "Config settings roadmap" under Known open items.
 
-**Press main / catch (client, 2026-10-14).** `worker_certifications.is_main` marks who may run a
+**Press main / catch (client, 2026-10-14; roles reworked 2026-10-15).** `Worker.isMain` /
+`Worker.isOperator` (per person, not per certification any more) mark who may lead a
 screen-print press (`isPressKind`, kind `screen_print_auto`) as its **main** printer; everyone
 else on a press is a **catch** (Mitch, Nick and Jose are the mains today — data, not code).
 Rules in `planStaffing.ts`: a press runs only with exactly one main (no main in → press closed
@@ -379,8 +380,8 @@ someone else can do it, and a main can catch for another main. **A catch halves 
 job** (setup included): main + 1 or 2 catches = job hours ÷ 2; a second catch doesn't halve it
 again; main alone = full time (`estimateHours`, client 2026-10-14 — replaces the run-only
 division for presses). Only presses have
-main/catch; other stations keep plain crew. `assignment_crew.is_main` records who was the main
-on each planned job. New certifications default to catch (migration
+main/catch; other stations keep plain crew. `AssignmentCrew.role` (`MAIN` / `OPERATOR` /
+`CATCH`) records who did what on each planned job; an operator is a non-main who may still lead. New certifications default to catch (migration
 `press_main_and_catch`) — an admin ticks **Main** per press in Settings → People.
 
 **Relabel needs a press (2026-10-14).** The press operator runs Printed Relabel between
@@ -683,6 +684,13 @@ wovens have no dependency and are placed like any other job. So:
 | `get_staffing(from, to)` | *(2026-09-28)* the roster with certifications (and `mainOn`: presses they may run as main, 2026-10-14), notes, who's out, who's pinned, and the crew per station/day on the approved schedule with its `main` |
 | `set_worker_availability(worker_name, from, to, available, reason?)` | *(2026-09-28)* marks a person out/in for days; returns the approved jobs they were on those days. Changes no schedule by itself |
 | `set_worker_station(worker_name, date, station_name?)` | *(2026-09-28)* pins a person to a station for a day (must be certified, not out); omit the station to clear |
+| `list_drafts` / `get_draft(draft)` / `list_stations` | *(2026-10-14)* read drafts and stations; `get_draft` (2026-10-16) also returns each job's crew and order deadline, the draft's `problems` and `canApprove` |
+| `move_assignment(draft, assignment, station, date, start?, dryRun?, makeRoom?)` | moves one proposed job in a draft, in place |
+| `set_draft_crew(draft, date, station, workerNames[], dryRun?, makeRoom?)` | *(2026-10-16)* exactly who works one station/day in one draft; hours re-estimated for the crew size |
+| `shift_draft(draft, days? \| bufferMinutes?, from?, to?, station?, dryRun?, makeRoom?)` | *(2026-10-16)* move many jobs N working days, or leave a buffer between jobs |
+| `replan_draft(draft, replanFrom?, replanTo?)` | *(2026-10-16)* re-runs the engine INSIDE an existing draft (no new draft) |
+| `unapprove_schedule(draft \| assignment_ids[])` | reopens approved, not-started jobs for editing ("Make changes") |
+| `list_schedule_changes(needsReason?)` / `explain_schedule_change(change_id, reason)` | *(2026-10-16)* changes made to the approved schedule, and the person's reason for each (Reports) |
 
 Each of these is a real MCP tool registered the same way as any other tool in
 `src/lib/server/mcp/tools.ts`, gated by `guardedToolResult` and the scope system described
@@ -964,9 +972,13 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
     removed item's working duration (closing the gap the removed item spanned;
     the gap that was BEFORE the removed item survives, absorbed into the space
     between the last pre-remove peer and the first post-remove peer).
-  Refused: predecessor collision (dragging earlier into another item's span),
-  push past `SHIFT_END_MIN`, violation of a finisher's `notBeforeMin` (its
-  print's end time). Errors surface as `boardNotice` on the board.
+  **Allowed and flagged since 2026-10-16** (client: a manual move that breaks a rule
+  is allowed, highlighted, and blocks Approve — see "Draft problems" below): an
+  overlap, a push past `SHIFT_END_MIN`, a finisher before its `notBeforeMin`.
+  Dragging a job earlier into the one before it now reorders (inserts and pushes
+  the rest later). The cascades take `{ lenient: true }` for this; the finisher
+  settler keeps strict mode. Still refused: the wrong kind of station, an order that
+  isn't confirmed/schedulable.
 
   `$lib/schedule/repackDay.ts` is the ONE source of truth: `cascadeMove`,
   `cascadeInsert`, `cascadeRemove` (plus `packFromShiftStart`, retained only
@@ -1069,6 +1081,63 @@ Skills are not 1:1 with tools — a skill composes whichever tools it needs.
   templates (UAT since 2026-10-15). Before that UAT's web app never received the key, so
   the Orders-page Import, notes → answers and notes → rules all failed there, while
   importing through Claude chat (which needs no server key) worked. Revisit the model choice once real import volume/cost is known.
+- **Draft problems, editing drafts from chat, change notes (2026-10-16).**
+  - `$lib/schedule/draftProblems.ts` is the ONE checker for "is this draft
+    realistic?", run live by the board (`ScheduleBoard.svelte`), by the Approve gate
+    (`draftProblemsServer.ts`' `assertDraftApprovable`, in `approveDraft` and
+    `commit_schedule`) and by Claude's draft tools. **Red blocks approval** (when it
+    touches a proposed job): overlap (incl. with approved work from other drafts),
+    past 4:30, finisher before its print / its print not scheduled, a station with
+    jobs and nobody on it, a press with no main/operator, a person on two stations or
+    marked out, late for a tight deadline, an order only partly placed, a station over
+    its capacity-calendar hours. **Orange warns**: late for a loose deadline, a weekend,
+    a job longer than one shift. The board outlines jobs red (striped) / orange
+    (dashed), lists the problems (click → scroll to it), shows a "+Xm" stub past 4:30
+    and replaces Approve with "Fix N problems to approve".
+  - **Claude edits drafts in place** (`move_assignment`, `set_draft_crew`,
+    `shift_draft`, `replan_draft`; `draftEdit.ts`). Each takes `dryRun` (runs in a
+    rolled-back transaction and reports what else would move plus `newProblems`) —
+    the tool descriptions tell Claude to check first, explain a red problem and
+    suggest alternatives, and only with the person's go-ahead use `makeRoom`: the
+    edited job stays where it was put and everything else on that station gives way
+    (overlaps pushed after it, overflow to the next working day's front, finishers
+    re-settled, spill days re-crewed — `draftDependencies.ts`' `RepackMode`). Every
+    Claude edit writes a `draft_edited` audit entry; the board polls
+    `drafts/[id]/activity` and shows a "Claude changed this draft" pop-up listing
+    the edit and every knock-on move, then reloads. `propose_schedule` is only for a
+    brand-new plan.
+  - **Change notes.** A change to committed work — reopening approved jobs
+    (`reopened`), approving a plan that replaces approved slots (`replaced`), someone
+    marked out while on approved jobs (`worker_out`), approved slots removed because a
+    Patch Install was outsourced (`slots_removed`) — writes a `ScheduleChangeNote`
+    (`schedule/changeNotes.ts`, table `schedule_change_notes`) in the same
+    transaction. Reports lists the unexplained ones under "Needs a reason" with a box
+    to answer, and the answered ones as "Change notes"; Claude lists them
+    (`list_schedule_changes`) and records exactly what the person says
+    (`explain_schedule_change`). Nothing fills a reason in on its own.
+  - Fixed on the way: a refused `move_assignment` used to reach Claude only as "The
+    requested data is unavailable" (`MoveDraftAssignmentError` wasn't an
+    `McpUserError`); moving a job to another day/station failed every time and a
+    same-day move didn't push the jobs after it (the moved row was saved before the
+    cascade read the old layout — `repackDraftDays` now restores the old position
+    first); `confirm_import` only took internal ids although its example used job
+    numbers (it now takes either).
+- **Jobs longer than one shift can't be auto-scheduled (open, found 2026-10-16).**
+  `proposeSchedule.ts` only places a job on a single station-day with enough open
+  hours, and nothing splits a job across days — so any job over 7.5h for its crew
+  (e.g. 300 embroidered polos ≈ 13.5h) is always left off ("Not enough open
+  Embroidery time…"). Needs a decision: split long jobs into day-sized pieces (and
+  how Start/Stop and actuals work per piece), or another rule.
+- **Cancelling an order leaves its approved slots on the live schedule (open).**
+  `cancelOrder.ts` only changes the order's status. Decide whether cancel should
+  remove its not-started slots (and write a `slots_removed` change note).
+- **No chat tool edits a confirmed order's fields (open).** `confirm_import`
+  corrections only apply while confirming; after that a wrong stitch count etc. can
+  only be fixed on the order page.
+- **`apparel_color` is still required by the import schema** (`hoops/types.ts`)
+  although it's hidden and the client says it isn't needed; a migration making it
+  optional (`line_item_apparel_color_optional`) exists in a local database but not
+  on this branch — reconcile before relying on either.
 - **Reports (minimal) gaps.** `/reports` only shows what the schema already supports
   (estimate-vs-actual variance by station and by line item, on-time completion,
   currently-blocked count, a recent-changes feed off `audit_log`). One thing it still
@@ -1192,7 +1261,8 @@ and one of CLAUDE.md's two human approval gates — never a bare write with noth
 of it. Rationale: "no separate write path" in the Domain section's "What this system is"
 implies one write path shared by chat and the production board, not two; splitting
 confirmation out to a UI-only action would contradict that. See
-`src/lib/server/mcp/tools.ts` for the registered tools (twelve as of 2026-10-05).
+`src/lib/server/mcp/tools.ts` for the registered tools (twenty-two as of 2026-10-16, two of them in
+`changeNoteTools.ts`).
 
 ## Git and definition of done
 

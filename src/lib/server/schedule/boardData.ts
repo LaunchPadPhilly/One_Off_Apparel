@@ -6,6 +6,7 @@ import { pressSafeCrew } from '$lib/schedule/people';
 import { isPressKind } from '$lib/schedule/stationKinds';
 import { OrderStatus, ScheduleAssignmentStatus } from '../../../../prisma/generated/prisma/enums';
 import type { Prisma } from '../../../../prisma/generated/prisma/client';
+import { problemJobLabel, type ProblemBusyBlock } from '$lib/schedule/draftProblems';
 
 /**
  * Everything the schedule board (routes/schedule/drafts/[id]/ScheduleBoard.svelte) draws,
@@ -51,7 +52,11 @@ function startOfToday(): Date {
 	return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
-export async function buildBoardData(source: BoardSource) {
+/**
+ * @param db - `prisma`, or a transaction client so a check can see edits not committed
+ *   yet (draftEdit.ts' dry runs).
+ */
+export async function buildBoardData(source: BoardSource, db: Prisma.TransactionClient = prisma) {
 	const startDate = source.kind === 'draft' ? source.draft.startDate : source.from;
 	const weeks = source.kind === 'draft' ? source.draft.weeks : source.weeks;
 	const startIso = iso(startDate);
@@ -64,13 +69,13 @@ export async function buildBoardData(source: BoardSource) {
 			: { status: { in: COMMITTED }, date: { gte: startDate, lte: endDate } };
 
 	const [stations, capacityRows, assignments] = await Promise.all([
-		prisma.station.findMany({
+		db.station.findMany({
 			where: { archivedAt: null },
 			orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }],
 			select: { id: true, name: true, label: true, kind: true, autoSchedule: true }
 		}),
-		prisma.capacityCalendar.findMany({ where: { date: { gte: startDate, lte: endDate } } }),
-		prisma.scheduleAssignment.findMany({
+		db.capacityCalendar.findMany({ where: { date: { gte: startDate, lte: endDate } } }),
+		db.scheduleAssignment.findMany({
 			where: assignmentWhere,
 			include: {
 				lineItem: { select: { id: true, orderId: true, status: true } },
@@ -89,7 +94,7 @@ export async function buildBoardData(source: BoardSource) {
 	// schedule, just the orders on it.
 	const placedOrderIds = [...new Set(assignments.map((a) => a.lineItem.orderId))];
 	const candidateWhere: Prisma.OrderWhereInput = { status: OrderStatus.CONFIRMED, deadline: { gte: startOfToday() }, lineItems: { some: {} } };
-	const orders = await prisma.order.findMany({
+	const orders = await db.order.findMany({
 		where: source.kind === 'draft' ? { OR: [candidateWhere, { id: { in: placedOrderIds } }] } : { id: { in: placedOrderIds } },
 		include: { lineItems: { orderBy: { id: 'asc' } } },
 		orderBy: [{ deadline: 'asc' }, { createdAt: 'desc' }]
@@ -102,13 +107,48 @@ export async function buildBoardData(source: BoardSource) {
 		order.deadline >= today &&
 		order.lineItems.length > 0;
 
+	// Committed work outside this draft (2026-10-16): it occupies the same stations and
+	// people, so the draft's problem check (draftProblems.ts) counts it — overlaps, a
+	// person on two stations — and an order's job already approved elsewhere counts as
+	// scheduled. In the window, plus anything for the orders on this draft.
+	const elsewhereRows =
+		source.kind === 'draft'
+			? await db.scheduleAssignment.findMany({
+					where: {
+						status: { in: COMMITTED },
+						OR: [{ scheduleDraftId: null }, { scheduleDraftId: { not: source.draft.id } }],
+						AND: [{ OR: [{ date: { gte: startDate, lte: endDate } }, { lineItem: { orderId: { in: placedOrderIds } } }] }]
+					},
+					select: {
+						id: true,
+						lineItemId: true,
+						date: true,
+						startMinuteOfDay: true,
+						estimatedHours: true,
+						station: { select: { name: true } },
+						crew: { select: { workerId: true } },
+						lineItem: { select: { design: true, decorationType: true, finishingStep: true, otherJobType: true, order: { select: { hoopsOrderId: true } } } }
+					}
+				})
+			: [];
+	const elsewhere: ProblemBusyBlock[] = elsewhereRows.map((row) => ({
+		id: row.id,
+		lineItemId: row.lineItemId,
+		date: iso(row.date),
+		stationName: row.station.name,
+		startMin: row.startMinuteOfDay ?? 8 * 60,
+		durationMin: Math.max(15, Math.round(row.estimatedHours * 60)),
+		crewIds: row.crew.map((c) => c.workerId),
+		label: problemJobLabel(row.lineItem, row.lineItem.order.hoopsOrderId)
+	}));
+
 	const [unavailability, workers, pins] = await Promise.all([
-		prisma.workerUnavailability.findMany({
+		db.workerUnavailability.findMany({
 			where: { date: { gte: startDate, lte: endDate }, worker: { archivedAt: null } },
 			select: { date: true, reason: true, worker: { select: { id: true, name: true } } }
 		}),
 		// The People panel (2026-10-14): the active roster with certifications and notes.
-		prisma.worker.findMany({
+		db.worker.findMany({
 			where: { archivedAt: null },
 			orderBy: { name: 'asc' },
 			select: {
@@ -120,7 +160,7 @@ export async function buildBoardData(source: BoardSource) {
 				certifications: { where: { station: { archivedAt: null } }, select: { station: { select: { name: true } } } }
 			}
 		}),
-		prisma.staffingPin.findMany({
+		db.staffingPin.findMany({
 			where: { date: { gte: startDate, lte: endDate }, worker: { archivedAt: null } },
 			select: { date: true, workerId: true, station: { select: { name: true } } }
 		})
@@ -199,6 +239,8 @@ export async function buildBoardData(source: BoardSource) {
 				status: item.status,
 				// For the timeline's "waits on …" tooltip on finisher blocks.
 				dependsOn: item.dependsOn,
+				// An outsourced Patch Install needs no slot (draftProblems.ts).
+				outsourced: item.outsourced,
 				// The live estimate (estimateForDisplay(), same as the Orders page).
 				estimate: estimateForDisplay(item)
 			}))
@@ -250,7 +292,8 @@ export async function buildBoardData(source: BoardSource) {
 			certifications: w.certifications.map((c) => ({ stationName: c.station.name }))
 		})),
 		peopleOut: unavailability.map((row) => ({ date: iso(row.date), workerId: row.worker.id, reason: row.reason })),
-		pins: pins.map((row) => ({ date: iso(row.date), workerId: row.workerId, stationName: row.station.name }))
+		pins: pins.map((row) => ({ date: iso(row.date), workerId: row.workerId, stationName: row.station.name })),
+		elsewhere
 	};
 }
 

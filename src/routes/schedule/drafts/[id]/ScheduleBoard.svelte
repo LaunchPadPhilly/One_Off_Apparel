@@ -11,6 +11,7 @@
 	import { countScreens } from '$lib/schedule/screenCount';
 	import { isWeekendDay } from '$lib/schedule/defaultCapacity';
 	import { shortDraftCode } from '$lib/schedule/shortDraftCode';
+	import { findDraftProblems, overflowMinutes, problemContextFromBoard, severityByPlacement, type DraftProblem } from '$lib/schedule/draftProblems';
 	import type { Snippet } from 'svelte';
 	import { deserialize, enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
@@ -47,6 +48,8 @@
 			/** SCHEDULE_WRITE: may change the schedule (drafts) or Start / Stop jobs (live). */
 			canEdit: boolean;
 			user?: { isAdmin?: boolean } | null;
+			/** Drafts: when the page loaded — Claude's edits after it pop up (./activity). */
+			loadedAt?: string;
 		};
 		form?: BoardForm;
 		/** Live mode: buttons for the page header (e.g. Create schedule). */
@@ -586,6 +589,86 @@
 		placements = hydratePlacements(data.assignments);
 	});
 
+	// ─── Problems (2026-10-16) ─────────────────────────────────────────────────
+	// Manual moves are allowed and flagged rather than refused (client decision): the same
+	// checker the server's Approve gate runs ($lib/schedule/draftProblems.ts), recomputed
+	// live from the local placements as jobs are dragged. Red blocks Approve; orange warns.
+	let problems = $derived<DraftProblem[]>(
+		finalized
+			? []
+			: findDraftProblems(
+					problemContextFromBoard(
+						data,
+						placements.map((p) => ({
+							id: p.id,
+							lineItemId: p.lineItemId,
+							orderId: p.orderId,
+							date: p.date,
+							stationName: p.stationName,
+							startMin: p.startMin,
+							durationMin: p.durationMin,
+							status: p.status,
+							crew: p.crew,
+							noLead: p.noLead
+						}))
+					)
+				)
+	);
+	let problemSeverity = $derived(severityByPlacement(problems));
+	let blockingProblemCount = $derived(problems.filter((p) => p.blocking).length);
+	let problemsOpen = $state(true);
+	function problemsFor(placementId: string): DraftProblem[] {
+		return problems.filter((p) => p.placementIds.includes(placementId));
+	}
+	/** Scroll to a problem's day and open its first job, so it's easy to find and fix. */
+	function showProblem(problem: DraftProblem) {
+		const first = problem.placementIds[0];
+		const placement = first ? placements.find((p) => p.id === first) : undefined;
+		const date = placement?.date ?? problem.date;
+		if (placement && isFinishing(placement.stationName) && finishingCollapsed) toggleFinishing();
+		if (date && daysViewMode === 'week') {
+			const index = data.capacity.findIndex((day) => day.date === date);
+			if (index >= 0) weekIndex = Math.floor(index / 7);
+		}
+		if (first) openPlacementId = first;
+		requestAnimationFrame(() => document.getElementById(`day-${date}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+	}
+
+	// ─── What Claude changed (2026-10-16) ──────────────────────────────────────
+	// Claude edits drafts from chat (move_assignment, set_draft_crew, shift_draft,
+	// replan_draft). Someone looking at the draft gets a pop-up listing the edit and every
+	// other job it moved to make room, and the board reloads. Polls ./activity.
+	type ClaudeEdit = { at: string; actor: string; summary: string; changes: string[] };
+	let claudeEdits = $state<ClaudeEdit[]>([]);
+	$effect(() => {
+		if (live || typeof window === 'undefined' || !data.loadedAt) return;
+		let cursor = data.loadedAt;
+		let stopped = false;
+		const poll = async () => {
+			if (stopped || document.hidden) return;
+			try {
+				const res = await fetch(`/schedule/drafts/${data.draft.id}/activity?after=${encodeURIComponent(cursor)}`);
+				if (!res.ok) return;
+				const body = (await res.json()) as { now: string; edits: ClaudeEdit[] };
+				if (body.edits.length === 0) return;
+				cursor = body.edits[body.edits.length - 1].at;
+				claudeEdits = [...claudeEdits, ...body.edits];
+				await invalidateAll();
+				placements = hydratePlacements(data.assignments);
+			} catch {
+				// Offline or signed out — try again next tick.
+			}
+		};
+		const timer = setInterval(poll, 8000);
+		const onFocus = () => void poll();
+		window.addEventListener('focus', onFocus);
+		return () => {
+			stopped = true;
+			clearInterval(timer);
+			window.removeEventListener('focus', onFocus);
+		};
+	});
+
 	/** A job that can't be dragged or removed: anything already approved, or a finalized board. */
 	function isLocked(placement: Placement): boolean {
 		return finalized || placement.status !== 'PROPOSED';
@@ -978,6 +1061,9 @@
 	type ActionOutcome = { ok: boolean; id?: string; peers: Peer[]; pushedCount: number; message?: string };
 
 	let boardNotice = $state<{ text: string; tone: 'info' | 'warn' } | null>(null);
+	// Same lenient cascade as the server (repackDay.ts): a move that breaks a rule is
+	// applied and flagged, not refused.
+	const LENIENT = { lenient: true } as const;
 
 	async function postAction(action: string, body: FormData): Promise<ActionOutcome> {
 		try {
@@ -1211,11 +1297,10 @@
 			// keep their crew.
 			if (stayedOnSameDay) {
 				// Same-row move: cascade shifts every peer AFTER the moving item by
-				// the same delta, so any gaps between them are preserved. Refused if
-				// the new start would collide with the predecessor, or push a peer
-				// past the shift end.
+				// the same delta, so any gaps between them are preserved. Dragging
+				// into the job before it reorders; running past 4:30 is flagged red.
 				const sameDayPeers = placementsForDay(date, stationName);
-				const cascade = cascadeMove<CascadeItem & Placement>(sameDayPeers, existing.id, targetStart);
+				const cascade = cascadeMove<CascadeItem & Placement>(sameDayPeers, existing.id, targetStart, LENIENT);
 				if ('conflict' in cascade) {
 					boardNotice = { text: cascade.conflict, tone: 'warn' };
 					return;
@@ -1226,13 +1311,13 @@
 				// Cross-row / cross-day move: origin day pulls forward (as if the item
 				// were removed there), destination day inserts at the drop time.
 				const originDayPeers = placementsForDay(originDate, originStation);
-				const removeCascade = cascadeRemove<CascadeItem & Placement>(originDayPeers, existing.id);
+				const removeCascade = cascadeRemove<CascadeItem & Placement>(originDayPeers, existing.id, LENIENT);
 				if ('conflict' in removeCascade) {
 					boardNotice = { text: removeCascade.conflict, tone: 'warn' };
 					return;
 				}
 				const destinationPeers = placementsForDay(date, stationName);
-				const insertCascade = cascadeInsert<CascadeItem & Placement>(destinationPeers, { ...existing, date, stationName }, targetStart);
+				const insertCascade = cascadeInsert<CascadeItem & Placement>(destinationPeers, { ...existing, date, stationName }, targetStart, LENIENT);
 				if ('conflict' in insertCascade) {
 					boardNotice = { text: insertCascade.conflict, tone: 'warn' };
 					return;
@@ -1307,7 +1392,7 @@
 			lineItemStatus: '',
 			draftId: data.draft.id
 		};
-		const cascade = cascadeInsert<CascadeItem & Placement>(destinationPeers, incoming, targetStart);
+		const cascade = cascadeInsert<CascadeItem & Placement>(destinationPeers, incoming, targetStart, LENIENT);
 		if ('conflict' in cascade) {
 			boardNotice = { text: cascade.conflict, tone: 'warn' };
 			return;
@@ -1345,7 +1430,7 @@
 		// Optimistic: pull-forward peers on this day by the removed item's duration
 		// (the user chose "close the gap" — see $lib/schedule/repackDay.ts).
 		const dayPeers = placementsForDay(target.date, target.stationName);
-		const cascade = cascadeRemove<CascadeItem & Placement>(dayPeers, id);
+		const cascade = cascadeRemove<CascadeItem & Placement>(dayPeers, id, LENIENT);
 		if ('conflict' in cascade) {
 			boardNotice = { text: cascade.conflict, tone: 'warn' };
 			return;
@@ -1455,8 +1540,15 @@
 					     Claude's commit_schedule tool (commitSchedule.ts). Full-page POST so the
 					     page reloads with the approved state. -->
 					{#if proposedCount > 0}
+						<!-- Nothing red can be approved (2026-10-16); approveDraft re-checks on the server. -->
 						<form method="POST" action="?/approveDraft" onsubmit={confirmApprove}>
-							<button type="submit" class="button">Approve {proposedCount} job{proposedCount === 1 ? '' : 's'}</button>
+							{#if blockingProblemCount > 0}
+								<button type="button" class="button" disabled title="Fix the problems marked red first" aria-describedby="draft-problems">
+									Fix {blockingProblemCount} problem{blockingProblemCount === 1 ? '' : 's'} to approve
+								</button>
+							{:else}
+								<button type="submit" class="button">Approve {proposedCount} job{proposedCount === 1 ? '' : 's'}</button>
+							{/if}
 						</form>
 					{/if}
 					<!-- Full-page form POST rather than a fetch: the delete action
@@ -1507,6 +1599,63 @@
 			{boardNotice.text}
 			<button type="button" class="board-notice__dismiss" onclick={() => (boardNotice = null)} aria-label="Dismiss">×</button>
 		</p>
+	{/if}
+
+	{#if problems.length > 0}
+		<section class="problems card" id="draft-problems" aria-label="Problems with this schedule" class:problems--blocking={blockingProblemCount > 0}>
+			<button type="button" class="problems__head" aria-expanded={problemsOpen} onclick={() => (problemsOpen = !problemsOpen)}>
+				<span aria-hidden="true">{problemsOpen ? '▾' : '▸'}</span>
+				{#if blockingProblemCount > 0}
+					<strong>{blockingProblemCount} problem{blockingProblemCount === 1 ? '' : 's'} to fix before this can be approved</strong>
+				{:else}
+					<strong>Nothing blocks approval</strong>
+				{/if}
+				{#if problems.length > blockingProblemCount}
+					<span class="muted">· {problems.length - blockingProblemCount} warning{problems.length - blockingProblemCount === 1 ? '' : 's'}</span>
+				{/if}
+			</button>
+			{#if problemsOpen}
+				<ul class="problems__list">
+					{#each problems as problem (problem.key)}
+						<li class="problem problem--{problem.severity}">
+							<button type="button" class="problem__link" onclick={() => showProblem(problem)}>
+								<span class="problem__dot" aria-hidden="true"></span>
+								<span class="sr-only">{problem.severity === 'red' ? 'Must fix:' : 'Warning:'}</span>
+								{problem.message}
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</section>
+	{/if}
+
+	{#if claudeEdits.length > 0}
+		<div class="claude-edits__backdrop" role="presentation" onclick={() => (claudeEdits = [])}></div>
+		<div class="claude-edits card" role="dialog" aria-modal="true" aria-labelledby="claude-edits-title">
+			<h2 id="claude-edits-title">Claude changed this draft</h2>
+			{#each claudeEdits as edit (edit.at)}
+				<div class="claude-edits__edit">
+					<p class="claude-edits__summary">{edit.summary}</p>
+					{#if edit.changes.length}
+						<p class="muted claude-edits__label">To make room, {edit.changes.length === 1 ? 'this also changed' : `these ${edit.changes.length} also changed`}:</p>
+						<ul class="claude-edits__changes">
+							{#each edit.changes as change, i (i)}
+								<li>{change}</li>
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted claude-edits__label">Nothing else had to move.</p>
+					{/if}
+				</div>
+			{/each}
+			{#if blockingProblemCount > 0}
+				<p class="claude-edits__warn">{blockingProblemCount} problem{blockingProblemCount === 1 ? ' is' : 's are'} still marked red on the board.</p>
+			{/if}
+			<div class="claude-edits__actions">
+				<button type="button" class="button" onclick={() => (claudeEdits = [])}>Got it</button>
+			</div>
+		</div>
 	{/if}
 
 	<div class="workspace" class:workspace--finalized={finalized}>
@@ -1761,7 +1910,7 @@
 					{@const finishingCount = placements.filter(
 						(p) => p.date === day.date && isFinishing(p.stationName)
 					).length}
-					<article class="day" class:day--weekend={isWeekend(day.date)}>
+					<article class="day" id="day-{day.date}" class:day--weekend={isWeekend(day.date)}>
 						<header class="day__head">
 							<div class="day__label">
 								<span class="day__weekday">{label.weekday}</span>
@@ -1852,6 +2001,12 @@
 												{@const wallEnd = wallClockEnd(placement.startMin, placement.durationMin)}
 												{@const isHovered = hoveredPlacementId === placement.id || openPlacementId === placement.id}
 												{@const locked = isLocked(placement)}
+												{@const severity = problemSeverity.get(placement.id)}
+												{@const overflow = overflowMinutes(placement)}
+												{#if overflow > 0 && severity}
+													<!-- Runs past 4:30 (flagged red): a stub at the day's end shows by how much. -->
+													<div class="placement-overflow" title="Runs {overflow} min past the end of the shift" aria-hidden="true">+{formatMinutes(overflow)}</div>
+												{/if}
 												{@const liveConflictsHere = liveConflicts.get(placement.id) ?? []}
 												{@const hasConflict = liveConflictsHere.length > 0}
 												{#each segments as seg, i (seg.start)}
@@ -1867,6 +2022,8 @@
 														class:placement--conflict={hasConflict}
 														class:placement--in-progress={placement.status === 'IN_PROGRESS'}
 														class:placement--complete={placement.status === 'COMPLETE'}
+														class:placement--problem-red={severity === 'red'}
+														class:placement--problem-orange={severity === 'orange'}
 														role="button"
 														tabindex="0"
 														aria-expanded={openPlacementId === placement.id}
@@ -1950,6 +2107,9 @@
 																	{#if waitsOnText(placement.lineItemId)}
 																		<div class="placement__details-waits">{waitsOnText(placement.lineItemId)}</div>
 																	{/if}
+																	{#each problemsFor(placement.id) as problem (problem.key)}
+																		<div class="placement__details-problem placement__details-problem--{problem.severity}">{problem.message}</div>
+																	{/each}
 																	{#if placement.crew.length}
 																		<ul class="placement__details-crew" aria-label="Crew">
 																			{#each placement.crew as member (member.id)}
@@ -3263,6 +3423,163 @@
 
 	.placement:active {
 		cursor: grabbing;
+	}
+
+	/* Problems (2026-10-16): red blocks Approve, orange warns. An outline that survives the
+	   order's own block color, plus a pattern so it isn't conveyed by color alone. */
+	.placement--problem-red {
+		outline: 3px solid var(--danger, #d92d20);
+		outline-offset: -1px;
+		background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / 0%) 0 6px, rgb(255 255 255 / 22%) 6px 9px);
+		z-index: 3;
+	}
+	.placement--problem-orange {
+		outline: 3px dashed var(--warning, #f79009);
+		outline-offset: -1px;
+		z-index: 3;
+	}
+	.placement-overflow {
+		position: absolute;
+		right: 0;
+		top: 3px;
+		bottom: 3px;
+		display: flex;
+		align-items: center;
+		padding: 0 0.3rem;
+		font-size: 0.7rem;
+		font-weight: 700;
+		color: white;
+		background: var(--danger, #d92d20);
+		z-index: 4;
+		pointer-events: none;
+	}
+	.placement__details-problem {
+		margin-top: 0.35rem;
+		padding: 0.3rem 0.45rem;
+		border-left: 3px solid var(--danger, #d92d20);
+		background: var(--danger-bg, rgb(217 45 32 / 8%));
+		font-size: 0.8rem;
+	}
+	.placement__details-problem--orange {
+		border-left-color: var(--warning, #f79009);
+		background: var(--warning-bg, rgb(247 144 9 / 10%));
+	}
+	.problems {
+		margin: 0 0 1rem;
+		padding: 0.6rem 0.9rem;
+		border-left: 4px solid var(--warning, #f79009);
+	}
+	.problems--blocking {
+		border-left-color: var(--danger, #d92d20);
+	}
+	.problems__head {
+		display: flex;
+		gap: 0.5rem;
+		align-items: baseline;
+		width: 100%;
+		background: none;
+		border: 0;
+		padding: 0;
+		font: inherit;
+		color: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+	.problems__list {
+		list-style: none;
+		margin: 0.5rem 0 0;
+		padding: 0;
+		display: grid;
+		gap: 0.2rem;
+		max-height: 14rem;
+		overflow-y: auto;
+	}
+	.problem__link {
+		display: flex;
+		gap: 0.5rem;
+		align-items: baseline;
+		width: 100%;
+		background: none;
+		border: 0;
+		padding: 0.2rem 0.25rem;
+		font: inherit;
+		color: inherit;
+		text-align: left;
+		cursor: pointer;
+		border-radius: 4px;
+	}
+	.problem__link:hover,
+	.problem__link:focus-visible {
+		background: var(--surface-2, rgb(0 0 0 / 5%));
+	}
+	.problem__dot {
+		flex: none;
+		width: 0.6rem;
+		height: 0.6rem;
+		border-radius: 50%;
+		background: var(--danger, #d92d20);
+		transform: translateY(0.05rem);
+	}
+	.problem--orange .problem__dot {
+		background: var(--warning, #f79009);
+		border-radius: 2px;
+	}
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+	}
+	.claude-edits__backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgb(0 0 0 / 35%);
+		z-index: 50;
+	}
+	.claude-edits {
+		position: fixed;
+		z-index: 51;
+		top: 10vh;
+		left: 50%;
+		transform: translateX(-50%);
+		width: min(36rem, calc(100vw - 2rem));
+		max-height: 76vh;
+		overflow-y: auto;
+		padding: 1.1rem 1.25rem;
+		background: var(--surface, white);
+	}
+	.claude-edits h2 {
+		margin: 0 0 0.6rem;
+		font-size: 1.1rem;
+	}
+	.claude-edits__edit + .claude-edits__edit {
+		border-top: 1px solid var(--border, rgb(0 0 0 / 10%));
+		margin-top: 0.6rem;
+		padding-top: 0.6rem;
+	}
+	.claude-edits__summary {
+		margin: 0;
+		font-weight: 600;
+	}
+	.claude-edits__label {
+		margin: 0.3rem 0;
+		font-size: 0.85rem;
+	}
+	.claude-edits__changes {
+		margin: 0;
+		padding-left: 1.1rem;
+		font-size: 0.85rem;
+	}
+	.claude-edits__warn {
+		color: var(--danger, #d92d20);
+		font-weight: 600;
+	}
+	.claude-edits__actions {
+		display: flex;
+		justify-content: flex-end;
+		margin-top: 0.8rem;
 	}
 
 	/* Finalized / approved jobs (2026-10-15): click for details, nothing to drag. */
